@@ -1,0 +1,726 @@
+openapi: 3.1.0
+info:
+  title: DataStudio Backend API
+  description: |
+    Backend API for DataStudio - A visual data pipeline editor.
+    Provides workflow management, node execution, and real-time logging via WebSocket.
+  version: 1.0.0
+  contact:
+    name: DataStudio Team
+    email: support@datastudio.example.com
+  license:
+    name: MIT
+    url: https://opensource.org/licenses/MIT
+
+servers:
+  - url: http://localhost:8080
+    description: Development server
+  - url: https://api.datastudio.example.com
+    description: Production server
+
+tags:
+  - name: Nodes
+    description: Node type definitions and metadata
+  - name: Workflows
+    description: Workflow management and execution
+  - name: Execution
+    description: Workflow execution and monitoring
+
+paths:
+  /nodes/list:
+    get:
+      tags:
+        - Nodes
+      summary: Get available node types
+      description: Returns all available node types that can be used in workflows
+      operationId: getNodeTypes
+      responses:
+        '200':
+          description: Successful response
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/NodeType'
+          examples:
+            success:
+              summary: Example node types
+              value:
+                - id: "csv_input"
+                  name: "CSV Input"
+                  category: "input"
+                  description: "Read data from CSV files"
+                  icon: "📥"
+                  parameters:
+                    - name: "file_path"
+                      type: "string"
+                      required: true
+                      description: "Path to CSV file"
+                    - name: "delimiter"
+                      type: "string"
+                      required: false
+                      default: ","
+                      description: "CSV delimiter"
+                - id: "json_output"
+                  name: "JSON Output"
+                  category: "output"
+                  description: "Write data to JSON files"
+                  icon: "📤"
+                  parameters:
+                    - name: "output_path"
+                      type: "string"
+                      required: true
+                      description: "Output directory path"
+                    - name: "pretty_print"
+                      type: "boolean"
+                      required: false
+                      default: true
+                      description: "Format JSON output"
+
+        '500':
+          $ref: '#/components/responses/InternalServerError'
+
+  /workflow/save:
+    post:
+      tags:
+        - Workflows
+      summary: Save workflow
+      description: Save a workflow definition to persistent storage
+      operationId: saveWorkflow
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/Workflow'
+            examples:
+              basic:
+                summary: Basic workflow
+                value:
+                  name: "Data Processing Pipeline"
+                  description: "Process customer data"
+                  nodes:
+                    - id: "node-1"
+                      type: "csv_input"
+                      position: { x: 100, y: 100 }
+                      data:
+                        label: "Read Customers"
+                        parameters:
+                          file_path: "/data/customers.csv"
+                          delimiter: ","
+                    - id: "node-2"
+                      type: "filter"
+                      position: { x: 400, y: 100 }
+                      data:
+                        label: "Filter Active"
+                        parameters:
+                          condition: "status == 'active'"
+                  edges:
+                    - id: "edge-1"
+                      source: "node-1"
+                      target: "node-2"
+                      sourceHandle: "output"
+                      targetHandle: "input"
+
+      responses:
+        '201':
+          description: Workflow saved successfully
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SaveWorkflowResponse'
+          examples:
+            success:
+              summary: Workflow saved
+              value:
+                success: true
+                id: "wf-123456"
+                message: "Workflow saved successfully"
+                saved_at: "2024-01-15T10:30:00Z"
+
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '500':
+          $ref: '#/components/responses/InternalServerError'
+
+  /workflow/run:
+    post:
+      tags:
+        - Execution
+      summary: Execute workflow
+      description: |
+        Execute a workflow and return execution ID.
+        Real-time progress and logs are streamed via WebSocket.
+      operationId: runWorkflow
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/Workflow'
+            examples:
+              execution:
+                summary: Workflow execution
+                value:
+                  name: "Data Processing Pipeline"
+                  nodes: [...]
+                  edges: [...]
+
+      responses:
+        '202':
+          description: Workflow execution started
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/RunWorkflowResponse'
+          examples:
+            accepted:
+              summary: Execution started
+              value:
+                executionId: "exec-789012"
+                status: "running"
+                message: "Workflow execution started"
+                started_at: "2024-01-15T10:30:00Z"
+
+        '400':
+          description: Invalid workflow
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+              examples:
+                invalid:
+                  summary: Invalid workflow
+                  value:
+                    error: "VALIDATION_ERROR"
+                    message: "Workflow contains cycles"
+                    details: "Node 'node-3' creates a cyclic dependency"
+
+        '422':
+          description: Workflow validation failed
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ValidationError'
+
+        '500':
+          $ref: '#/components/responses/InternalServerError'
+
+components:
+  schemas:
+    # Node Types
+    NodeType:
+      type: object
+      required:
+        - id
+        - name
+        - category
+      properties:
+        id:
+          type: string
+          description: Unique node type identifier
+          example: "csv_input"
+        name:
+          type: string
+          description: Human-readable name
+          example: "CSV Input"
+        category:
+          type: string
+          enum: [input, output, transform, filter, join]
+          description: Node category
+          example: "input"
+        description:
+          type: string
+          description: Detailed description
+          example: "Read data from CSV files"
+        icon:
+          type: string
+          description: Icon identifier or emoji
+          example: "📥"
+        parameters:
+          type: array
+          description: Configurable parameters for this node type
+          items:
+            $ref: '#/components/schemas/NodeParameter'
+
+    NodeParameter:
+      type: object
+      required:
+        - name
+        - type
+        - required
+      properties:
+        name:
+          type: string
+          description: Parameter name
+          example: "file_path"
+        type:
+          type: string
+          enum: [string, number, boolean, select, textarea]
+          description: Parameter data type
+          example: "string"
+        required:
+          type: boolean
+          description: Whether parameter is required
+          example: true
+        default:
+          description: Default value
+        description:
+          type: string
+          description: Parameter description
+          example: "Path to the input file"
+        options:
+          type: array
+          description: Available options for select type
+          items:
+            type: string
+          example: ["csv", "json", "parquet"]
+
+    # Workflow Models
+    Workflow:
+      type: object
+      required:
+        - name
+        - nodes
+        - edges
+      properties:
+        id:
+          type: string
+          description: Workflow ID (for updates)
+          example: "wf-123456"
+        name:
+          type: string
+          description: Workflow name
+          example: "Customer Data Pipeline"
+        description:
+          type: string
+          description: Workflow description
+          example: "Process and analyze customer data"
+        nodes:
+          type: array
+          description: Workflow nodes
+          items:
+            $ref: '#/components/schemas/WorkflowNode'
+        edges:
+          type: array
+          description: Connections between nodes
+          items:
+            $ref: '#/components/schemas/WorkflowEdge'
+        metadata:
+          type: object
+          description: Additional workflow metadata
+          properties:
+            version:
+              type: string
+              example: "1.0"
+            created_by:
+              type: string
+              example: "user@example.com"
+            tags:
+              type: array
+              items:
+                type: string
+              example: ["customer-data", "production"]
+
+    WorkflowNode:
+      type: object
+      required:
+        - id
+        - type
+        - position
+        - data
+      properties:
+        id:
+          type: string
+          description: Unique node identifier
+          example: "node-1"
+        type:
+          type: string
+          description: Node type ID
+          example: "csv_input"
+        position:
+          $ref: '#/components/schemas/NodePosition'
+        data:
+          $ref: '#/components/schemas/NodeData'
+
+    NodePosition:
+      type: object
+      required:
+        - x
+        - y
+      properties:
+        x:
+          type: number
+          format: float
+          description: X coordinate
+          example: 100.5
+        y:
+          type: number
+          format: float
+          description: Y coordinate
+          example: 200.0
+
+    NodeData:
+      type: object
+      required:
+        - label
+      properties:
+        label:
+          type: string
+          description: Node display label
+          example: "Read Customer Data"
+        description:
+          type: string
+          description: Node description
+          example: "Read customer data from CSV file"
+        parameters:
+          type: object
+          description: Node parameter values
+          additionalProperties: true
+          example:
+            file_path: "/data/customers.csv"
+            delimiter: ","
+            encoding: "utf-8"
+
+    WorkflowEdge:
+      type: object
+      required:
+        - id
+        - source
+        - target
+      properties:
+        id:
+          type: string
+          description: Unique edge identifier
+          example: "edge-1"
+        source:
+          type: string
+          description: Source node ID
+          example: "node-1"
+        target:
+          type: string
+          description: Target node ID
+          example: "node-2"
+        sourceHandle:
+          type: string
+          description: Source handle ID
+          example: "output"
+        targetHandle:
+          type: string
+          description: Target handle ID
+          example: "input"
+
+    # Response Models
+    SaveWorkflowResponse:
+      type: object
+      required:
+        - success
+        - id
+      properties:
+        success:
+          type: boolean
+          description: Save operation status
+          example: true
+        id:
+          type: string
+          description: Saved workflow ID
+          example: "wf-123456"
+        message:
+          type: string
+          description: Status message
+          example: "Workflow saved successfully"
+        saved_at:
+          type: string
+          format: date-time
+          description: Save timestamp
+          example: "2024-01-15T10:30:00Z"
+
+    RunWorkflowResponse:
+      type: object
+      required:
+        - executionId
+        - status
+      properties:
+        executionId:
+          type: string
+          description: Unique execution identifier
+          example: "exec-789012"
+        status:
+          type: string
+          enum: [pending, running, completed, failed, cancelled]
+          description: Initial execution status
+          example: "running"
+        message:
+          type: string
+          description: Status message
+          example: "Workflow execution started"
+        started_at:
+          type: string
+          format: date-time
+          description: Execution start timestamp
+          example: "2024-01-15T10:30:00Z"
+        estimated_duration:
+          type: number
+          description: Estimated duration in seconds
+          example: 120
+
+    # WebSocket Message Schemas
+    WebSocketMessage:
+      type: object
+      required:
+        - type
+        - data
+        - timestamp
+      properties:
+        type:
+          type: string
+          enum: [execution_started, execution_completed, execution_failed, node_started, node_completed, node_failed, node_skipped, progress_update, log_message]
+          description: Message type
+          example: "node_started"
+        data:
+          oneOf:
+            - $ref: '#/components/schemas/ExecutionEventData'
+            - $ref: '#/components/schemas/NodeEventData'
+            - $ref: '#/components/schemas/ProgressEventData'
+            - $ref: '#/components/schemas/LogEventData'
+        timestamp:
+          type: string
+          format: date-time
+          description: Event timestamp
+          example: "2024-01-15T10:30:00.123Z"
+        executionId:
+          type: string
+          description: Associated execution ID
+          example: "exec-789012"
+
+    ExecutionEventData:
+      type: object
+      properties:
+        status:
+          type: string
+          enum: [running, completed, failed, cancelled]
+          example: "completed"
+        total_nodes:
+          type: integer
+          example: 5
+        processed_nodes:
+          type: integer
+          example: 5
+        error:
+          type: string
+          example: "Database connection failed"
+
+    NodeEventData:
+      type: object
+      required:
+        - nodeId
+        - nodeType
+      properties:
+        nodeId:
+          type: string
+          example: "node-2"
+        nodeType:
+          type: string
+          example: "filter"
+        label:
+          type: string
+          example: "Filter Active Users"
+        status:
+          type: string
+          enum: [running, success, failed, skipped]
+          example: "success"
+        duration:
+          type: number
+          description: Execution duration in milliseconds
+          example: 1250
+        error:
+          type: string
+          example: "Invalid filter condition"
+        records_processed:
+          type: integer
+          example: 1000
+
+    ProgressEventData:
+      type: object
+      required:
+        - progress
+      properties:
+        progress:
+          type: number
+          minimum: 0
+          maximum: 100
+          description: Overall progress percentage
+          example: 75.5
+        current_node:
+          type: string
+          example: "node-3"
+        nodes_completed:
+          type: integer
+          example: 3
+        total_nodes:
+          type: integer
+          example: 4
+
+    LogEventData:
+      type: object
+      required:
+        - level
+        - message
+      properties:
+        level:
+          type: string
+          enum: [DEBUG, INFO, WARN, ERROR, SUCCESS]
+          example: "INFO"
+        message:
+          type: string
+          example: "Processing 1000 records"
+        source:
+          type: string
+          example: "csv_input"
+        nodeId:
+          type: string
+          example: "node-1"
+        details:
+          type: object
+          additionalProperties: true
+
+    # Error Models
+    Error:
+      type: object
+      required:
+        - error
+        - message
+      properties:
+        error:
+          type: string
+          description: Error type
+          example: "VALIDATION_ERROR"
+        message:
+          type: string
+          description: Human-readable error message
+          example: "Invalid workflow structure"
+        details:
+          type: object
+          description: Additional error details
+        trace_id:
+          type: string
+          description: Request trace ID for debugging
+          example: "trace-123456"
+
+    ValidationError:
+      type: object
+      required:
+        - error
+        - message
+        - violations
+      properties:
+        error:
+          type: string
+          example: "VALIDATION_ERROR"
+        message:
+          type: string
+          example: "Workflow validation failed"
+        violations:
+          type: array
+          items:
+            $ref: '#/components/schemas/ValidationViolation'
+
+    ValidationViolation:
+      type: object
+      required:
+        - field
+        - message
+      properties:
+        field:
+          type: string
+          description: Field path with violation
+          example: "nodes[0].parameters.file_path"
+        message:
+          type: string
+          description: Violation description
+          example: "File path does not exist"
+        value:
+          description: Invalid value
+          example: "/nonexistent/file.csv"
+
+  responses:
+    BadRequest:
+      description: Bad request
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+          examples:
+            invalid_json:
+              summary: Invalid JSON
+              value:
+                error: "INVALID_JSON"
+                message: "Request body contains invalid JSON"
+            missing_field:
+              summary: Missing required field
+              value:
+                error: "MISSING_FIELD"
+                message: "Field 'name' is required"
+
+    InternalServerError:
+      description: Internal server error
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+          examples:
+            database_error:
+              summary: Database error
+              value:
+                error: "DATABASE_ERROR"
+                message: "Failed to connect to database"
+                trace_id: "trace-789012"
+
+  securitySchemes:
+    BearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+    ApiKeyAuth:
+      type: apiKey
+      in: header
+      name: X-API-Key
+
+security:
+  - BearerAuth: []
+  - ApiKeyAuth: []
+
+# WebSocket Endpoint Documentation
+webhooks:
+  workflowLogs:
+    description: |
+      WebSocket endpoint for real-time workflow execution logs and events.
+      
+      **Connection URL:** `ws://localhost:8081/logs`
+      
+      **Query Parameters:**
+      - `executionId` (optional): Specific execution ID to follow
+      - `token` (optional): Authentication token
+      
+      **Message Flow:**
+      1. Client connects to WebSocket endpoint
+      2. Server sends welcome message
+      3. Client can subscribe to specific executions
+      4. Server streams events in real-time
+      
+      **Event Types:**
+      - `execution_started`: Workflow execution began
+      - `node_started`: Node execution started
+      - `node_completed`: Node execution completed successfully
+      - `node_failed`: Node execution failed
+      - `node_skipped`: Node was skipped
+      - `progress_update`: Execution progress update
+      - `log_message`: General log message
+      - `execution_completed`: Workflow execution finished
+      - `execution_failed`: Workflow execution failed
+    request:
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/WebSocketMessage'

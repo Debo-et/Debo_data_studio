@@ -1,0 +1,26 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <link rel="icon" type="image/svg+xml" href="/vite.svg" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Debo Data Studio</title>
+    <script>
+      // Ensure globalThis is properly set
+      if (typeof globalThis === 'undefined') {
+        window.globalThis = window;
+      }
+      if (typeof global === 'undefined') {
+        window.global = window;
+      }
+      // Ensure Request is available (it should be in modern browsers)
+      if (typeof Request === 'undefined') {
+        console.warn('Request object not available - this may cause issues');
+      }
+    </script>
+  </head>
+  <body>
+    <div id="root"></div>
+    <script type="module" src="/src/main.tsx"></script>
+  </body>
+</html>

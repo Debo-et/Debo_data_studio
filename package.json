@@ -1,0 +1,35 @@
+{
+  "name": "enterprise-database-app",
+  "version": "1.0.0",
+  "private": true,
+  "workspaces": [
+    "client",
+    "backend"
+  ],
+  "scripts": {
+    "start": "concurrently \"npm run start:backend\" \"npm run start:client\"",
+    "start:backend": "cd backend && npm run dev",
+    "start:client": "cd client && npm start",
+    "build": "npm run build:backend && npm run build:client",
+    "build:backend": "cd backend && npm run build",
+    "build:client": "cd client && npm run build",
+    "dev": "npm run dev:backend & npm run dev:client",
+    "dev:backend": "cd backend && npm run dev",
+    "dev:client": "cd client && npm start",
+    "dev:full": "node dev.js",
+    "install:all": "npm install && cd client && npm install && cd ../backend && npm install",
+    "clean": "npm run clean:backend && npm run clean:client",
+    "clean:backend": "cd backend && npm run clean",
+    "clean:client": "cd client && npm run clean",
+    "lint": "npm run lint:backend && npm run lint:client",
+    "lint:backend": "cd backend && npm run lint",
+    "lint:client": "cd client && npm run lint"
+  },
+  "devDependencies": {
+    "concurrently": "^8.2.1"
+  },
+  "engines": {
+    "node": ">=18.0.0",
+    "npm": ">=9.0.0"
+  }
+}

@@ -1,0 +1,606 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@layer base {
+  :root {
+    --background: 0 0% 100%;
+    --foreground: 222.2 84% 4.9%;
+
+    --card: 0 0% 100%;
+    --card-foreground: 222.2 84% 4.9%;
+
+    --popover: 0 0% 100%;
+    --popover-foreground: 222.2 84% 4.9%;
+
+    --primary: 222.2 47.4% 11.2%;
+    --primary-foreground: 210 40% 98%;
+
+    --secondary: 210 40% 96%;
+    --secondary-foreground: 222.2 47.4% 11.2%;
+
+    --muted: 210 40% 96%;
+    --muted-foreground: 215.4 16.3% 46.9%;
+
+    --accent: 210 40% 96%;
+    --accent-foreground: 222.2 47.4% 11.2%;
+
+    --destructive: 0 84.2% 60.2%;
+    --destructive-foreground: 210 40% 98%;
+
+    --border: 214.3 31.8% 91.4%;
+    --input: 214.3 31.8% 91.4%;
+    --ring: 222.2 84% 4.9%;
+
+    --radius: 0.5rem;
+
+    /* DataStudio specific variables */
+    --sidebar-background: 222 84% 5%;
+    --sidebar-foreground: 210 40% 98%;
+    --sidebar-primary: 210 40% 98%;
+    --sidebar-primary-foreground: 222.2 84% 4.9%;
+    --sidebar-accent: 217.2 91.2% 59.8%;
+    --sidebar-accent-foreground: 222.2 84% 4.9%;
+    --sidebar-border: 217.2 32.6% 17.5%;
+    --sidebar-ring: 217.2 91.2% 59.8%;
+
+    --canvas-background: 210 40% 98%;
+    --canvas-foreground: 222.2 84% 4.9%;
+
+    --console-background: 222 84% 5%;
+    --console-foreground: 210 40% 98%;
+    --console-header: 217.2 32.6% 17.5%;
+    --console-border: 217.2 32.6% 17.5%;
+  }
+
+  .dark {
+    --background: 222.2 84% 4.9%;
+    --foreground: 210 40% 98%;
+
+    --card: 222.2 84% 4.9%;
+    --card-foreground: 210 40% 98%;
+
+    --popover: 222.2 84% 4.9%;
+    --popover-foreground: 210 40% 98%;
+
+    --primary: 210 40% 98%;
+    --primary-foreground: 222.2 47.4% 11.2%;
+
+    --secondary: 217.2 32.6% 17.5%;
+    --secondary-foreground: 210 40% 98%;
+
+    --muted: 217.2 32.6% 17.5%;
+    --muted-foreground: 215 20.2% 65.1%;
+
+    --accent: 217.2 32.6% 17.5%;
+    --accent-foreground: 210 40% 98%;
+
+    --destructive: 0 62.8% 30.6%;
+    --destructive-foreground: 210 40% 98%;
+
+    --border: 217.2 32.6% 17.5%;
+    --input: 217.2 32.6% 17.5%;
+    --ring: 212.7 26.8% 83.9%;
+  }
+}
+
+/* Enhanced drag and drop styles */
+.canvas-palette-drag-active {
+  background: linear-gradient(45deg, rgba(59, 130, 246, 0.1) 25%, transparent 25%), 
+              linear-gradient(-45deg, rgba(59, 130, 246, 0.1) 25%, transparent 25%), 
+              linear-gradient(45deg, transparent 75%, rgba(59, 130, 246, 0.1) 75%), 
+              linear-gradient(-45deg, transparent 75%, rgba(59, 130, 246, 0.1) 75%);
+  background-size: 20px 20px;
+  background-position: 0 0, 0 10px, 10px -10px, -10px 0px;
+}
+
+/* Smooth transitions for drag ghosts */
+.component-drag-ghost {
+  opacity: 0.9;
+  transform: scale(0.95);
+  transition: all 0.2s ease;
+}
+
+/* Port hover enhancements */
+.connection-port {
+  transition: all 0.15s ease;
+}
+
+.connection-port:hover {
+  transform: scale(1.25);
+}
+
+@layer base {
+  * {
+    @apply border-border;
+  }
+  body {
+    @apply bg-background text-foreground;
+  }
+}
+
+html, body, #root {
+  height: 100%;
+  margin: 0;
+  padding: 0;
+}
+
+.resize-handle {
+  @apply bg-gray-300 hover:bg-blue-500 transition-colors;
+}
+
+
+@keyframes settingsUpdate {
+  0% { box-shadow: 0 0 0 0 rgba(59, 130, 246, 0.5); }
+  70% { box-shadow: 0 0 0 10px rgba(59, 130, 246, 0); }
+  100% { box-shadow: 0 0 0 0 rgba(59, 130, 246, 0); }
+}
+
+.canvas-node.settings-updated {
+  animation: settingsUpdate 1s ease-in-out;
+  border-color: #3b82f6 !important;
+}
+
+/* Modal overlay styling */
+.modal-overlay {
+  background: rgba(0, 0, 0, 0.5);
+  backdrop-filter: blur(4px);
+}
+
+/* Add these styles to ensure MapEditor is always on top */
+.map-editor-modal {
+  position: fixed !important;
+  top: 0 !important;
+  left: 0 !important;
+  right: 0 !important;
+  bottom: 0 !important;
+  z-index: 9999 !important;
+  background-color: rgba(0, 0, 0, 0.7) !important;
+  display: flex !important;
+  align-items: center !important;
+  justify-content: center !important;
+  padding: 20px !important;
+}
+
+.map-editor-content {
+  width: 95vw !important;
+  height: 95vh !important;
+  max-width: 95vw !important;
+  max-height: 95vh !important;
+  background: white !important;
+  border-radius: 12px !important;
+  box-shadow: 0 25px 50px -12px rgba(0, 0, 0, 0.5) !important;
+  overflow: hidden !important;
+  animation: mapEditorSlideIn 0.3s ease-out !important;
+}
+
+@keyframes mapEditorSlideIn {
+  from {
+    opacity: 0;
+    transform: scale(0.95) translateY(-20px);
+  }
+  to {
+    opacity: 1;
+    transform: scale(1) translateY(0);
+  }
+}
+
+/* Ensure MapEditor takes precedence over all other elements */
+.map-editor-modal * {
+  box-sizing: border-box !important;
+}
+
+/* Prevent interaction with background elements when MapEditor is open */
+body.map-editor-open {
+  overflow: hidden !important;
+  pointer-events: none !important;
+}
+
+body.map-editor-open .map-editor-modal {
+  pointer-events: all !important;
+}
+
+/* Ensure node container is positioned relative */
+.canvas-node {
+  position: relative;
+}
+
+/* Ports should be absolutely positioned within their parent node */
+.connection-port-wrapper {
+  position: absolute;
+  pointer-events: all;
+  z-index: 10;
+}
+
+/* During drag, ensure transforms are applied to children */
+.canvas-node-dragging .connection-port-wrapper {
+  transition: none;
+  will-change: transform;
+}
+
+/* Connection port states */
+.connection-port.dragging {
+  z-index: 10000 !important;
+}
+
+.connection-port.dragging .port-visual {
+  animation: pulse-port 0.5s infinite alternate;
+}
+
+@keyframes pulse-port {
+  from { filter: drop-shadow(0 0 8px rgba(59, 130, 246, 0.5)); }
+  to { filter: drop-shadow(0 0 12px rgba(59, 130, 246, 0.8)); }
+}
+
+/* Temporary connection line */
+.temp-connection-line {
+  stroke-dasharray: 5,5;
+  animation: dash-flow 1s linear infinite;
+}
+
+@keyframes dash-flow {
+  to { stroke-dashoffset: -20; }
+}
+
+/* Node dragging state */
+.canvas-node.dragging {
+  opacity: 0.8;
+  cursor: grabbing;
+}
+
+.canvas-node.dragging .connection-port {
+  pointer-events: none;
+  opacity: 0.5;
+}
+
+/* Connection mode indicator */
+.connection-mode-active .canvas-node {
+  opacity: 0.7;
+}
+
+.connection-mode-active .connection-port {
+  opacity: 1 !important;
+}
+
+/* Add to your global CSS */
+.connection-port-wrapper[data-snap-target="true"] {
+  animation: pulse-snap 1s infinite;
+  z-index: 10000 !important;
+}
+
+@keyframes pulse-snap {
+  0%, 100% {
+    transform: translate(-50%, -50%) scale(1);
+  }
+  50% {
+    transform: translate(-50%, -50%) scale(1.2);
+  }
+}
+
+.canvas-container.cursor-crosshair {
+  cursor: crosshair !important;
+}
+
+.canvas-container.cursor-crosshair * {
+  cursor: crosshair !important;
+}
+
+.canvas-container.cursor-crosshair .connection-port-wrapper {
+  cursor: crosshair !important;
+}
+/* Add to your global CSS */
+.connection-port-wrapper[data-snap-target="true"] {
+  animation: pulse-snap 1s infinite;
+  z-index: 10000 !important;
+}
+
+@keyframes pulse-snap {
+  0%, 100% {
+    transform: translate(-50%, -50%) scale(1);
+  }
+  50% {
+    transform: translate(-50%, -50%) scale(1.2);
+  }
+}
+
+.canvas-container.cursor-crosshair {
+  cursor: crosshair !important;
+}
+
+.canvas-container.cursor-crosshair * {
+  cursor: crosshair !important;
+}
+
+.canvas-container.cursor-crosshair .connection-port-wrapper {
+  cursor: crosshair !important;
+}
+
+
+/* Add to your global CSS or component styles */
+.connection-port-wrapper {
+  pointer-events: auto !important;
+  z-index: 1000 !important;
+}
+
+@keyframes pulse {
+  0% { transform: scale(1); }
+  50% { transform: scale(1.05); }
+  100% { transform: scale(1); }
+}
+
+.react-flow__node[style*="border-radius: 50%"],
+.react-flow__node[style*="clip-path: circle"] {
+  border-radius: 8px !important;
+  clip-path: none !important;
+}
+
+
+.react-flow__viewport {
+  pointer-events: auto !important;
+}
+
+.react-flow__pane {
+  pointer-events: auto !important;
+}
+
+.react-flow__container {
+  pointer-events: auto !important;
+}
+
+.canvas-container .react-flow {
+  pointer-events: auto !important;
+}
+
+/* Ensure no parent is blocking pointer events */
+#root, .app-container, .main-content {
+  pointer-events: auto !important;
+}
+
+
+
+/* Data Source Node Styling */
+.talend-node.data-source-node {
+  position: relative;
+  overflow: hidden;
+}
+
+.talend-node.data-source-node::before {
+  content: '';
+  position: absolute;
+  left: 0;
+  top: 0;
+  bottom: 0;
+  width: 4px;
+  border-radius: 8px 0 0 8px;
+}
+
+.talend-node.data-source-node[data-category="file"]::before {
+  background-color: #3b82f6; /* Blue */
+}
+
+.talend-node.data-source-node[data-category="database"]::before {
+  background-color: #059669; /* Green */
+}
+
+.talend-node.data-source-node[data-category="directory"]::before {
+  background-color: #7c3aed; /* Purple */
+}
+
+.talend-node.data-source-node[data-category="ldap"]::before {
+  background-color: #d97706; /* Amber */
+}
+
+/* Role Badges */
+.role-badge {
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 0.5px;
+  padding: 2px 6px;
+  border-radius: 10px;
+  text-transform: uppercase;
+}
+
+.role-badge.input {
+  background-color: #dbeafe;
+  color: #1e40af;
+  border: 1px solid #93c5fd;
+}
+
+.role-badge.output {
+  background-color: #d1fae5;
+  color: #065f46;
+  border: 1px solid #6ee7b7;
+}
+
+/* Popup Animation */
+@keyframes popupAppear {
+  0% {
+    opacity: 0;
+    transform: scale(0.9) translate(-50%, -60%);
+  }
+  100% {
+    opacity: 1;
+    transform: scale(1) translate(-50%, -50%);
+  }
+}
+
+.role-selection-popup {
+  animation: popupAppear 0.2s ease-out;
+}
+
+/* Add these styles to your global CSS or Canvas component */
+
+/* Make handles invisible by default, visible on hover */
+.react-flow__handle {
+  opacity: 0;
+  transition: opacity 0.2s ease;
+}
+
+.react-flow__node:hover .react-flow__handle {
+  opacity: 0.7;
+}
+
+/* Ensure handles are still clickable even when invisible */
+.react-flow__handle-left,
+.react-flow__handle-right {
+  cursor: crosshair !important;
+}
+
+/* Remove default node background and border */
+.react-flow__node-talendNode {
+  background: transparent !important;
+  border: none !important;
+  box-shadow: none !important;
+}
+
+/* Selection state styling */
+.react-flow__node-talendNode.selected {
+  background: transparent !important;
+}
+
+/* Connection line styling */
+.react-flow__edge-path {
+  stroke-width: 2;
+  stroke: #4b5563;
+}
+
+.react-flow__edge.selected .react-flow__edge-path {
+  stroke: #3b82f6;
+  stroke-width: 2.5;
+}
+
+/* Improve visibility on different backgrounds */
+.talend-node {
+  backdrop-filter: blur(4px);
+}
+
+/* Console Resize Isolation Styles */
+.console-dragging {
+  user-select: none;
+  -webkit-user-select: none;
+  pointer-events: auto;
+}
+
+.console-resizing-active {
+  cursor: row-resize !important;
+}
+
+/* Prevent layout shifts in other elements during console resize */
+.reactflow-wrapper,
+.sidebar-container,
+.right-panel-container,
+.toolbar-container {
+  pointer-events: auto !important;
+  transform: none !important;
+  transition: none !important;
+}
+
+/* Isolation for resize operation */
+.console-protected {
+  contain: layout style paint;
+  will-change: height;
+}
+
+.isolate-resize {
+  isolation: isolate;
+  z-index: 100;
+}
+
+/* Ensure React Flow canvas remains stable */
+.react-flow__viewport {
+  pointer-events: auto !important;
+  transform: none !important;
+}
+
+.react-flow__nodes,
+.react-flow__edges {
+  pointer-events: auto !important;
+}
+
+/* Prevent accidental scaling of other elements */
+body.console-resizing-active .react-flow__node,
+body.console-resizing-active .react-flow__edge,
+body.console-resizing-active .react-flow__viewport {
+  pointer-events: none !important;
+}
+
+/* Lock other panels during resize */
+.console-resizing-active ~ *,
+.console-resizing-active + * {
+  pointer-events: none !important;
+  user-select: none !important;
+}
+
+/* Add these styles to your global CSS file */
+.console-floating-panel {
+  /* Prevent interaction with underlying canvas */
+  pointer-events: auto !important;
+}
+
+.console-floating-panel * {
+  /* Allow interactions within the console */
+  pointer-events: auto !important;
+}
+
+/* When console is resizing or dragging, prevent all canvas interactions */
+.console-dragging ~ .reactflow-wrapper,
+.console-dragging ~ .react-flow__pane,
+.console-dragging ~ .react-flow__nodes,
+.console-dragging ~ .react-flow__edges {
+  pointer-events: none !important;
+}
+
+/* Ensure resize handles don't interfere */
+.console-resize-handle:hover {
+  z-index: 10000 !important;
+}
+
+/* Floating panel shadow for better visibility */
+.floating-panel-shadow {
+  box-shadow: 0 20px 60px rgba(0, 0, 0, 0.3), 
+              0 0 0 1px rgba(255, 255, 255, 0.1) !important;
+}
+
+/* Add to index.css - Additional styles for doubled node dimensions */
+
+/* Node container adjustments for doubled size */
+.react-flow__node-talendNode {
+  transform-box: fill-box !important;
+  transform-origin: center !important;
+  box-sizing: border-box !important;
+  min-width: 120px !important;
+  min-height: 80px !important;
+}
+
+/* Ensure handles are properly positioned for larger nodes */
+.react-flow__handle-left {
+  left: -6px !important; /* Adjusted for larger handles */
+}
+
+.react-flow__handle-right {
+  right: -6px !important; /* Adjusted for larger handles */
+}
+
+/* Improved text rendering for larger font */
+.talend-node-label {
+  text-shadow: 0 0 1px rgba(255, 255, 255, 0.5); /* Better text readability */
+}
+
+/* Better icon scaling for larger nodes */
+.talend-node-icon-container {
+  transition: transform 0.2s ease;
+}
+
+.talend-node:hover .talend-node-icon-container {
+  transform: scale(1.05);
+}
+
+/* Consistent border width for larger nodes */
+.talend-node {
+  border-width: 3px !important; /* Thicker border for larger nodes */
+}
+
+/* Selection ring for larger nodes */
+.talend-node.selected {
+  box-shadow: 0 0 0 3px #3b82f6, 0 6px 20px rgba(0, 0, 0, 0.15) !important;
+}

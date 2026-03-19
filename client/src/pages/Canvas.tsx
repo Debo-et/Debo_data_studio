@@ -1,4 +1,4 @@
-// src/pages/Canvas.tsx (FIXED)
+// src/pages/Canvas.tsx (FULL with all editors integrated)
 import React, { useCallback, useEffect, useRef, useState, forwardRef, useImperativeHandle } from 'react';
 import ReactFlow, {
   Controls,
@@ -26,7 +26,7 @@ import 'reactflow/dist/style.css';
 import { motion } from 'framer-motion';
 import { Suspense } from 'react';
 
-import MapEditor from '../components/Editor/MapEditor';
+import MapEditor from '../components/Editor/Mapping/MapEditor';
 
 // Import unified architecture
 import TalendNode from './TalendNode';
@@ -46,17 +46,14 @@ import { GraphState, GraphNode as OriginalGraphNode, GraphEdge as OriginalGraphE
 // Import UNIFIED metadata types and strategies
 import {
   UnifiedCanvasNode,
-  UnifiedCanvasConnection,
   UnifiedNodeMetadata,
   ComponentConfiguration,
   MapComponentConfiguration,
   JoinComponentConfiguration,
   FilterComponentConfiguration,
-  LookupComponentConfiguration,
   AggregateComponentConfiguration,
   SortComponentConfiguration,
   InputComponentConfiguration,
-  OutputComponentConfiguration,
   NodeType,
   DataSourceType,
   PostgreSQLDataType,
@@ -66,14 +63,30 @@ import {
   isMapConfig,
   isJoinConfig,
   isFilterConfig,
-  isLookupConfig,
   isAggregateConfig,
   isSortConfig,
   isInputConfig,
   isOutputConfig,
   getComponentConfig,
   PostgresColumn,
-  NodeStatus
+  NodeStatus,
+  ReplaceComponentConfiguration,
+  ExtractDelimitedFieldsConfiguration,
+  ExtractJSONFieldsConfiguration,
+  ExtractXMLFieldConfiguration,
+  ConvertComponentConfiguration,
+  NormalizeNumberComponentConfiguration,
+  NormalizeComponentConfiguration,
+  ReplicateComponentConfiguration,
+  MatchGroupComponentConfiguration,
+  FilterColumnsComponentConfiguration,
+  FileLookupComponentConfiguration,
+  UnpivotRowComponentConfiguration,
+  UniteComponentConfiguration,
+  UniqRowComponentConfiguration,
+  DenormalizeSortedRowComponentConfiguration,
+  DenormalizeComponentConfiguration,
+  PivotToColumnsDelimitedConfiguration,
 } from '../types/unified-pipeline.types';
 
 // Import column extraction utilities
@@ -86,7 +99,39 @@ import { canvasPersistence, CanvasRecord } from '../services/canvas-persistence.
 import { useAppDispatch } from '../hooks';
 import { addLog } from '../store/slices/logsSlice';
 import { generatePipelineSQL, PipelineGenerationResult } from '../generators/SQLGenerationPipeline';
-import { CanvasNode as PipelineCanvasNode, CanvasConnection as PipelineCanvasConnection, ConnectionStatus } from '../types/pipeline-types'; // We'll keep the old types for the generator for now
+import { CanvasNode as PipelineCanvasNode, CanvasConnection as PipelineCanvasConnection, ConnectionStatus } from '../types/pipeline-types';
+
+// NEW: Import database API for execution
+import databaseApi from '../services/database-api.service';
+import { ClientQueryExecutionResult } from '../services/database-api.types';
+
+// ==================== IMPORT ALL EDITORS ====================
+import { SortEditor } from '../components/Editor/JoinsAndLookups/SortEditor';
+import ReplaceEditor from '../components/Editor/Mapping/ReplaceEditor';
+import JoinEditor from '../components/Editor/JoinsAndLookups/JoinEditor';
+import { FilterRowConfigModal } from '../components/Editor/JoinsAndLookups/FilterRowConfigModal';
+import ExtractXMLFieldEditor from '../components/Editor/Parsing/ExtractXMLFieldEditor';
+import { ExtractJSONFieldsEditor } from '../components/Editor/Parsing/ExtractJSONFieldsEditor';
+import { ExtractDelimitedFieldsConfigModal } from '../components/Editor/Parsing/ExtractDelimitedFieldsConfigModal';
+import { AggregateEditor } from '../components/Editor/Aggregates/AggregateEditor'; // NEW: replaced old import
+import { ConvertTypeEditor } from '../components/Editor/Mapping/ConvertTypeEditor';
+import ReplaceListEditor from '../components/Editor/Mapping/ReplaceListEditor';
+import NormalizeNumberEditor from '../components/Editor/Mapping/NormalizeNumberEditor';
+import NormalizeEditor from '../components/Editor/Mapping/NormalizeEditor';
+import ReplicateEditor from '../components/Editor/JoinsAndLookups/ReplicateEditor';
+import { RecordMatchingEditor } from '../components/Editor/JoinsAndLookups/RecordMatchingEditor';
+import { MatchGroupEditor } from '../components/Editor/JoinsAndLookups/MatchGroupEditor';
+import FilterColumnsEditor from '../components/Editor/JoinsAndLookups/FilterColumnsEditor';
+import { FileLookupEditor } from '../components/Editor/JoinsAndLookups/FileLookupEditor';
+
+// ==================== NEW EDITORS ====================
+import UnpivotRowEditor from '../components/Editor/Aggregates/UnpivotRowEditor';
+import { UniteEditor } from '../components/Editor/Aggregates/UniteEditor';
+import UniqRowEditor from '../components/Editor/Aggregates/UniqRowEditor';
+import SplitRowEditor from '../components/Editor/Aggregates/SplitRowEditor';
+import { PivotToColumnsDelimitedEditor } from '../components/Editor/Aggregates/PivotToColumnsDelimitedEditor';
+import { DenormalizeSortedRowEditor } from '../components/Editor/Aggregates/DenormalizeSortedRowEditor';
+import { DenormalizeEditor } from '../components/Editor/Aggregates/DenormalizeEditor';
 
 // ==================== TYPES ====================
 interface ReactFlowDragData {
@@ -98,6 +143,50 @@ interface ReactFlowDragData {
 
 // Our node data is now UnifiedCanvasNode
 type CanvasNodeData = UnifiedCanvasNode;
+
+// Helper: SimpleColumn for editors
+interface SimpleColumn {
+  name: string;
+  type?: string;
+  id?: string;
+}
+
+// Interface for UniteEditor input schemas
+interface InputSchema {
+  id: string;
+  name: string;
+  fields: Array<{ name: string; type: string; nullable: boolean }>;
+}
+
+// Union type for active editor (extended with new types)
+type ActiveEditor =
+  | null
+  | { type: 'map'; nodeId: string; nodeMetadata: CanvasNodeData; inputColumns: SimpleColumn[]; outputColumns: SimpleColumn[]; initialConfig?: MapComponentConfiguration }
+  | { type: 'sort'; nodeId: string; nodeMetadata: CanvasNodeData; inputColumns: SimpleColumn[]; initialConfig?: SortComponentConfiguration }
+  | { type: 'replace'; nodeId: string; nodeMetadata: CanvasNodeData; inputColumns: SimpleColumn[]; outputColumns: SimpleColumn[]; initialConfig?: ReplaceComponentConfiguration }
+  | { type: 'join'; nodeId: string; nodeMetadata: CanvasNodeData; leftSchema: { id: string; name: string; fields: FieldSchema[] }; rightSchema: { id: string; name: string; fields: FieldSchema[] }; initialConfig?: JoinComponentConfiguration }
+  | { type: 'filter'; nodeId: string; nodeMetadata: CanvasNodeData; inputColumns: SimpleColumn[]; initialConfig?: FilterComponentConfiguration }
+  | { type: 'extractXML'; nodeId: string; nodeMetadata: CanvasNodeData; inputColumns: SimpleColumn[]; initialConfig?: ExtractXMLFieldConfiguration }
+  | { type: 'extractJSON'; nodeId: string; nodeMetadata: CanvasNodeData; inputColumns: SimpleColumn[]; initialConfig?: ExtractJSONFieldsConfiguration }
+  | { type: 'extractDelimited'; nodeId: string; nodeMetadata: CanvasNodeData; inputColumns: SimpleColumn[]; initialConfig?: ExtractDelimitedFieldsConfiguration }
+  | { type: 'convert'; nodeId: string; nodeMetadata: CanvasNodeData; inputColumns: SimpleColumn[]; outputColumns: SimpleColumn[]; initialConfig?: ConvertComponentConfiguration }
+  | { type: 'aggregate'; nodeId: string; nodeMetadata: CanvasNodeData; inputColumns: SimpleColumn[]; initialConfig?: AggregateComponentConfiguration }
+  | { type: 'replaceList'; nodeId: string; nodeMetadata: CanvasNodeData; inputSchema: SchemaDefinition; initialConfig?: ReplaceComponentConfiguration }
+  | { type: 'normalizeNumber'; nodeId: string; nodeMetadata: CanvasNodeData; inputColumns: SimpleColumn[]; initialConfig?: NormalizeNumberComponentConfiguration }
+  | { type: 'normalize'; nodeId: string; nodeMetadata: CanvasNodeData; inputColumns: SimpleColumn[]; initialConfig?: NormalizeComponentConfiguration }
+  | { type: 'replicate'; nodeId: string; nodeMetadata: CanvasNodeData; inputColumns: SimpleColumn[]; initialConfig?: ReplicateComponentConfiguration }
+  | { type: 'recordMatching'; nodeId: string; nodeMetadata: CanvasNodeData; inputFields: FieldSchema[]; initialConfig?: MatchGroupComponentConfiguration }
+  | { type: 'matchGroup'; nodeId: string; nodeMetadata: CanvasNodeData; inputColumns: SimpleColumn[]; initialConfig?: MatchGroupComponentConfiguration }
+  | { type: 'filterColumns'; nodeId: string; nodeMetadata: CanvasNodeData; inputSchema?: SchemaDefinition; initialConfig?: FilterColumnsComponentConfiguration }
+  | { type: 'fileLookup'; nodeId: string; nodeMetadata: CanvasNodeData; inputColumns: SimpleColumn[]; initialConfig?: FileLookupComponentConfiguration }
+  // ==================== NEW TYPES ====================
+  | { type: 'unpivotRow'; nodeId: string; nodeMetadata: CanvasNodeData; inputColumns: SimpleColumn[]; initialConfig?: UnpivotRowComponentConfiguration }
+  | { type: 'unite'; nodeId: string; nodeMetadata: CanvasNodeData; inputSchemas: InputSchema[]; initialConfig?: UniteComponentConfiguration }
+  | { type: 'uniqRow'; nodeId: string; nodeMetadata: CanvasNodeData; inputColumns: SimpleColumn[]; initialConfig?: UniqRowComponentConfiguration }
+  | { type: 'splitRow'; nodeId: string; nodeMetadata: CanvasNodeData; inputColumns: SimpleColumn[]; initialConfig?: NormalizeComponentConfiguration }
+  | { type: 'pivotToColumnsDelimited'; nodeId: string; nodeMetadata: CanvasNodeData; inputColumns: SimpleColumn[]; initialConfig?: PivotToColumnsDelimitedConfiguration }
+  | { type: 'denormalizeSortedRow'; nodeId: string; nodeMetadata: CanvasNodeData; inputColumns: SimpleColumn[]; initialConfig?: DenormalizeSortedRowComponentConfiguration }
+  | { type: 'denormalize'; nodeId: string; nodeMetadata: CanvasNodeData; inputColumns: SimpleColumn[]; initialConfig?: DenormalizeComponentConfiguration };
 
 interface ExtendedCanvasProps {
   job?: any;
@@ -112,19 +201,6 @@ interface ExtendedCanvasProps {
   canvasId?: string;
   onNodeMetadataUpdate?: (nodeId: string, metadata: UnifiedNodeMetadata) => void;
   onEdgeMetadataUpdate?: (edgeId: string, metadata: any) => void;
-}
-
-interface TableDefinition {
-  id: string;
-  name: string;
-  type: 'input' | 'output';
-  columns: Array<{
-    id: string;
-    name: string;
-    type: string;
-    isKey: boolean;
-    expression?: string;
-  }>;
 }
 
 interface WizardConfig {
@@ -427,10 +503,10 @@ const createInitialComponentConfiguration = (
           type: 'INPUT',
           config: {
             version: "1.0",
-            sourceType: DataSourceType.POSTGRESQL, // default, can be overridden
+            sourceType: DataSourceType.POSTGRESQL,
             sourceDetails: {
               connectionString: undefined,
-              tableName: '',
+              tableName: metadata?.postgresTableName || metadata?.tableName || metadata?.name || '',
               filePath: undefined,
               format: undefined,
               encoding: undefined,
@@ -474,7 +550,7 @@ const createInitialComponentConfiguration = (
             targetType: DataSourceType.POSTGRESQL,
             targetDetails: {
               connectionString: undefined,
-              tableName: '',
+              tableName: metadata?.postgresTableName || metadata?.tableName || metadata?.name || '',
               filePath: undefined,
               format: undefined,
               mode: 'APPEND'
@@ -786,17 +862,6 @@ const getConnectedNodes = (
     .filter((node): node is Node<CanvasNodeData> => node !== undefined);
 };
 
-const getMapNodeConnections = (
-  mapNode: Node<CanvasNodeData>,
-  nodes: Node<CanvasNodeData>[],
-  edges: Edge[]
-): { inputNodes: Node<CanvasNodeData>[]; outputNodes: Node<CanvasNodeData>[] } => {
-  return {
-    inputNodes: getConnectedNodes(mapNode.id, edges, nodes, 'input'),
-    outputNodes: getConnectedNodes(mapNode.id, edges, nodes, 'output')
-  };
-};
-
 // Convert React Flow nodes to validation engine GraphState
 const convertToGraphState = (nodes: Node[], edges: Edge[]): GraphState => {
   return {
@@ -809,7 +874,6 @@ const convertToGraphState = (nodes: Node[], edges: Edge[]): GraphState => {
         columns: outputSchema.fields.map(f => ({
           name: f.name,
           type: f.type,
-          // include other relevant fields if needed
           nullable: f.nullable,
           isKey: f.isKey,
           length: f.length,
@@ -818,7 +882,7 @@ const convertToGraphState = (nodes: Node[], edges: Edge[]): GraphState => {
           defaultValue: f.defaultValue,
           description: f.description,
         }))
-      } : { columns: [] }; // Always provide a columns array
+      } : { columns: [] };
 
       return {
         id: node.id,
@@ -828,7 +892,7 @@ const convertToGraphState = (nodes: Node[], edges: Edge[]): GraphState => {
           name: data.name || node.id,
           technology: data.type,
           componentCategory: data.componentCategory?.toLowerCase(),
-          schema, // now guaranteed to have a columns property
+          schema,
         },
         metadata: data.metadata,
       } as OriginalGraphNode;
@@ -915,6 +979,20 @@ const mapComponentKeyToNodeType = (key: string, role?: 'INPUT' | 'OUTPUT' | 'TRA
   }
 };
 
+// ==================== HELPER: GET ACTIVE POSTGRES CONNECTION ====================
+const getActivePostgresConnectionId = async (): Promise<string | null> => {
+  try {
+    const connections = await databaseApi.getActiveConnections();
+    const pgConnection = connections.find(c => 
+      c.dbType === 'postgresql' || c.dbType === 'postgres'
+    );
+    return pgConnection ? pgConnection.connectionId : null;
+  } catch (error) {
+    console.error('Failed to get active PostgreSQL connection:', error);
+    return null;
+  }
+};
+
 // ==================== CANVAS COMPONENT ====================
 const Canvas = forwardRef<{ forceSave: () => Promise<void> }, ExtendedCanvasProps>(({
   job,
@@ -979,14 +1057,12 @@ const Canvas = forwardRef<{ forceSave: () => Promise<void> }, ExtendedCanvasProp
     viewport: {
       x: 0,
       y: 0,
-      zoom: 1  // Start at 1:1 scale
+      zoom: 1
     },
-    // Map editor state with metadata
     mapEditorState: {
       isOpen: false,
       data: null
     },
-    // Auto-save status
     autoSaveStatus: 'idle',
     lastSavedAt: undefined
   });
@@ -994,8 +1070,10 @@ const Canvas = forwardRef<{ forceSave: () => Promise<void> }, ExtendedCanvasProp
   // Role selection state
   const [pendingRoleSelection, setPendingRoleSelection] = useState<PendingRoleSelection | null>(null);
 
+  // ==================== ACTIVE EDITOR STATE ====================
+  const [activeEditor, setActiveEditor] = useState<ActiveEditor>(null);
+
   // ==================== SYNC WITH CANVAS CONTEXT ====================
-  // Sync nodes and edges with CanvasContext whenever they change
   useEffect(() => {
     if (nodes.length > 0 || edges.length > 0) {
       console.log('🔄 Syncing canvas state with context:', {
@@ -1026,7 +1104,6 @@ const Canvas = forwardRef<{ forceSave: () => Promise<void> }, ExtendedCanvasProp
       }
     }));
 
-    // Auto-hide feedback
     setTimeout(() => {
       setState(prev => ({
         ...prev,
@@ -1039,12 +1116,7 @@ const Canvas = forwardRef<{ forceSave: () => Promise<void> }, ExtendedCanvasProp
   }, []);
 
   // ==================== AUTO-SAVE PERSISTENCE ====================
-  /**
-   * Save canvas state function – now supports updating by canvasId
-   * and always updates the same record once an ID is known.
-   */
   const saveCanvasState = useCallback(async () => {
-    // We need either a job (for auto‑named saves) OR a canvasId (for named canvas saves)
     if ((!job && !canvasId) || isSavingRef.current) {
       return;
     }
@@ -1067,7 +1139,6 @@ const Canvas = forwardRef<{ forceSave: () => Promise<void> }, ExtendedCanvasProp
         viewport: state.viewport
       });
 
-      // Only save if state has changed
       if (currentStateHash === lastSaveStateRef.current) {
         console.log('🔄 No changes detected, skipping save');
         return;
@@ -1087,16 +1158,14 @@ const Canvas = forwardRef<{ forceSave: () => Promise<void> }, ExtendedCanvasProp
 
       let savedRecord: CanvasRecord | null = null;
 
-      // Case 1: Use provided canvasId (from props)
       if (canvasId) {
         await canvasPersistence.updateCanvas(canvasId, {
           nodes,
           edges,
           viewport: state.viewport
         });
-        savedRecord = { id: canvasId } as CanvasRecord; // we don't need the full record
+        savedRecord = { id: canvasId } as CanvasRecord;
       }
-      // Case 2: Use stored local ID from previous save
       else if (localCanvasIdRef.current) {
         await canvasPersistence.updateCanvas(localCanvasIdRef.current, {
           nodes,
@@ -1105,7 +1174,6 @@ const Canvas = forwardRef<{ forceSave: () => Promise<void> }, ExtendedCanvasProp
         });
         savedRecord = { id: localCanvasIdRef.current } as CanvasRecord;
       }
-      // Case 3: First save – call saveCanvas (will find existing by name or create new)
       else if (job) {
         const canvasName = job.name;
         savedRecord = await canvasPersistence.saveCanvas(
@@ -1136,7 +1204,6 @@ const Canvas = forwardRef<{ forceSave: () => Promise<void> }, ExtendedCanvasProp
         console.log('✅ Canvas saved successfully (ID: ' + savedRecord.id + ')');
         lastSaveStateRef.current = currentStateHash;
 
-        // Store the canvas ID for future updates
         localCanvasIdRef.current = savedRecord.id;
 
         setState(prev => ({
@@ -1151,7 +1218,6 @@ const Canvas = forwardRef<{ forceSave: () => Promise<void> }, ExtendedCanvasProp
           { x: 100, y: 100 }
         );
       } else if (canvasId) {
-        // When canvasId was provided, we don't have a full record but the update succeeded
         lastSaveStateRef.current = currentStateHash;
         setState(prev => ({
           ...prev,
@@ -1178,32 +1244,24 @@ const Canvas = forwardRef<{ forceSave: () => Promise<void> }, ExtendedCanvasProp
     }
   }, [job, canvasId, nodes, edges, state.viewport, showValidationFeedback]);
 
-  /**
-   * Debounced auto-save function
-   */
   const debouncedAutoSave = useCallback(() => {
-    // Clear existing timeout
     if (saveTimeoutRef.current) {
       clearTimeout(saveTimeoutRef.current);
     }
 
-    // Don't save if no job and no canvasId, or already saving
     if ((!job && !canvasId) || isSavingRef.current) {
       return;
     }
 
-    // Set new timeout for auto-save
     saveTimeoutRef.current = setTimeout(() => {
       saveCanvasState();
-    }, 1000); // 1-second debounce
+    }, 1000);
   }, [job, canvasId, saveCanvasState]);
 
-  // Expose forceSave method to parent via ref
   useImperativeHandle(ref, () => ({
     forceSave: saveCanvasState
   }), [saveCanvasState]);
 
-  // Sync canvasId prop to local ref
   useEffect(() => {
     if (canvasId) {
       localCanvasIdRef.current = canvasId;
@@ -1213,13 +1271,11 @@ const Canvas = forwardRef<{ forceSave: () => Promise<void> }, ExtendedCanvasProp
   // ==================== INITIALIZATION & LOADING ====================
   useEffect(() => {
     const initializeCanvas = async () => {
-      // Guard: require either a canvasId or a job to load
       if (!canvasId && !job) {
         console.log('ℹ️ [Canvas] No canvasId or job provided – skipping load.');
         return;
       }
 
-      // Check if we already loaded this specific canvas/job
       if (canvasId) {
         if (lastLoadedCanvasIdRef.current === canvasId) {
           console.log('ℹ️ [Canvas] Already loaded canvas', canvasId);
@@ -1251,7 +1307,6 @@ const Canvas = forwardRef<{ forceSave: () => Promise<void> }, ExtendedCanvasProp
             showValidationFeedback('Canvas data not found. Starting with empty canvas.', 'warning', { x: 100, y: 100 });
           }
         } else if (job) {
-          // Load saved canvas by job name (old behavior)
           const canvasName = job.name;
           console.log(`📂 [Canvas] Loading canvas by name: ${canvasName}`);
           const savedData = await canvasPersistence.getCanvasByName(canvasName);
@@ -1266,30 +1321,25 @@ const Canvas = forwardRef<{ forceSave: () => Promise<void> }, ExtendedCanvasProp
           }
         }
 
-        // Update local React Flow state
         setNodes(loadedNodes);
         setEdges(loadedEdges);
 
-        // Update viewport if we have an instance
         if (loadedViewport && reactFlowInstance) {
           setViewport(loadedViewport);
         }
 
-        // Update local state (last saved time, viewport)
         setState(prev => ({
           ...prev,
           viewport: loadedViewport,
           lastSavedAt: canvasId ? new Date().toISOString() : undefined
         }));
 
-        // Sync with CanvasContext
         updateCanvasData({
           nodes: loadedNodes,
           edges: loadedEdges,
           viewport: loadedViewport
         });
 
-        // Show user feedback
         if (loadedNodes.length > 0 || loadedEdges.length > 0) {
           showValidationFeedback(
             `Loaded canvas with ${loadedNodes.length} nodes, ${loadedEdges.length} edges`,
@@ -1298,7 +1348,6 @@ const Canvas = forwardRef<{ forceSave: () => Promise<void> }, ExtendedCanvasProp
           );
         }
 
-        // Mark as loaded for this canvas/job
         if (canvasId) {
           lastLoadedCanvasIdRef.current = canvasId;
           lastLoadedJobIdRef.current = null;
@@ -1316,7 +1365,6 @@ const Canvas = forwardRef<{ forceSave: () => Promise<void> }, ExtendedCanvasProp
 
     initializeCanvas();
 
-    // Cleanup: save final state before unmounting
     return () => {
       if ((job || canvasId) && (lastLoadedCanvasIdRef.current || lastLoadedJobIdRef.current)) {
         console.log('💾 [Canvas] Unmounting – saving final state.');
@@ -1328,7 +1376,6 @@ const Canvas = forwardRef<{ forceSave: () => Promise<void> }, ExtendedCanvasProp
     };
   }, [job, canvasId, reactFlowInstance, setViewport, updateCanvasData, saveCanvasState, showValidationFeedback]);
 
-  // Initialize name generator with existing nodes
   useEffect(() => {
     const nodeLabels = nodes
       .filter(node => node.type === 'talendNode')
@@ -1340,13 +1387,11 @@ const Canvas = forwardRef<{ forceSave: () => Promise<void> }, ExtendedCanvasProp
 
   // ==================== VALIDATION INITIALIZATION ====================
   useEffect(() => {
-    // Initialize schema registry
     const registry = new SchemaRegistry();
     registry.registerSchemas(DefaultSchemas);
     DefaultConnectionRules.forEach(rule => registry.registerConnectionRule(rule));
     schemaRegistryRef.current = registry;
 
-    // Initialize validation engine with proper configuration
     const engine = new ValidationEngine({
       schemaRegistry: registry,
       mode: state.validationMode,
@@ -1358,7 +1403,6 @@ const Canvas = forwardRef<{ forceSave: () => Promise<void> }, ExtendedCanvasProp
 
     validationEngineRef.current = engine;
 
-    // Validate initial state if nodes exist
     if (nodes.length > 0) {
       const graphState = convertToGraphState(nodes, edges);
       const summary = engine.validateGraph(graphState);
@@ -1373,29 +1417,21 @@ const Canvas = forwardRef<{ forceSave: () => Promise<void> }, ExtendedCanvasProp
     };
   }, [state.validationMode, nodes.length, edges.length]);
 
-  // ==================== VALIDATION FEEDBACK ====================
-
   // ==================== VALIDATION FUNCTIONS ====================
 
-  /**
-   * React Flow's isValidConnection callback for visual feedback during drag
-   */
   const isValidConnection = useCallback((connection: Connection): boolean => {
     if (!connection.source || !connection.target) {
       return false;
     }
 
-    // Quick check for self-connection
     if (connection.source === connection.target) {
       return false;
     }
 
-    // Quick check for cycles
     if (wouldCauseCycle(connection.source, connection.target, edges)) {
       return false;
     }
 
-    // Use validation engine for comprehensive validation
     if (validationEngineRef.current) {
       try {
         const state = convertToGraphState(nodes, edges);
@@ -1410,7 +1446,6 @@ const Canvas = forwardRef<{ forceSave: () => Promise<void> }, ExtendedCanvasProp
       }
     }
 
-    // Fallback to schema registry validation
     const sourceNode = nodes.find(n => n.id === connection.source);
     const targetNode = nodes.find(n => n.id === connection.target);
 
@@ -1419,13 +1454,11 @@ const Canvas = forwardRef<{ forceSave: () => Promise<void> }, ExtendedCanvasProp
     const sourceType = sourceNode.data?.type || sourceNode.type || 'unknown';
     const targetType = targetNode.data?.type || targetNode.type || 'unknown';
 
-    // Check connection rules
     const connectionCheck = schemaRegistryRef.current?.isConnectionAllowed(sourceType, targetType);
     if (connectionCheck && !connectionCheck.allowed) {
       return false;
     }
 
-    // Check ETL rules
     const etlCheck = schemaRegistryRef.current?.isETLConnectionAllowed(sourceType, targetType);
     if (etlCheck && !etlCheck.allowed) {
       return false;
@@ -1435,73 +1468,63 @@ const Canvas = forwardRef<{ forceSave: () => Promise<void> }, ExtendedCanvasProp
   }, [nodes, edges, wouldCauseCycle]);
 
   // ==================== NEW: TMap HANDLER FUNCTIONS WITH METADATA ====================
-  /**
-   * Handle tMap node double-click to open MapEditor with connected columns and metadata
-   */
-  /**
- * Handle tMap node double-click to open MapEditor with connected columns and metadata
- */
-const handleTMapDoubleClick = useCallback((nodeId: string) => {
-  console.log('🎯 Opening tMap editor with metadata for node:', nodeId);
+  const handleTMapDoubleClick = useCallback((nodeId: string) => {
+    console.log('🎯 Opening tMap editor with metadata for node:', nodeId);
 
-  const tMapNode = nodes.find(n => n.id === nodeId);
-  if (!tMapNode) {
-    console.error('❌ tMap node not found:', nodeId);
-    return;
-  }
+    const tMapNode = nodes.find(n => n.id === nodeId);
+    if (!tMapNode) {
+      console.error('❌ tMap node not found:', nodeId);
+      return;
+    }
 
-  const nodeData = tMapNode.data as CanvasNodeData;
-  const mapConfig = getComponentConfig(nodeData, 'MAP');
+    const nodeData = tMapNode.data as CanvasNodeData;
+    const mapConfig = getComponentConfig(nodeData, 'MAP');
 
-  console.log('🔍 tMap node metadata:', {
-    id: tMapNode.id,
-    label: nodeData.name,
-    configurationType: nodeData.metadata?.configuration.type,
-    transformationCount: mapConfig ? mapConfig.transformations.length : 0
-  });
+    console.log('🔍 tMap node metadata:', {
+      id: tMapNode.id,
+      label: nodeData.name,
+      configurationType: nodeData.metadata?.configuration.type,
+      transformationCount: mapConfig ? mapConfig.transformations.length : 0
+    });
 
-  const editorData = getConnectedColumns(nodeId, nodes, edges);
-  console.log('🔍 getConnectedColumns output:', JSON.stringify(editorData, null, 2));
+    const editorData = getConnectedColumns(nodeId, nodes, edges);
+    console.log('🔍 getConnectedColumns output:', JSON.stringify(editorData, null, 2));
 
-  // ✅ FIX: Pass only the fields that MapEditor expects (name and type)
-  // Remove any extra properties like sourceSchema that may cause errors.
-  const transformedData = {
-    ...editorData,
-    inputColumns: editorData.inputColumns.map(col => ({
-      name: col.name,
-      type: col.type || 'STRING'  // ensure type is defined
-    })),
-    outputColumns: editorData.outputColumns.map(col => ({
-      name: col.name,
-      type: col.type || 'STRING'
-    }))
-  };
+    const transformedData = {
+      ...editorData,
+      inputColumns: editorData.inputColumns.map(col => ({
+        name: col.name,
+        type: col.type || 'STRING'
+      })),
+      outputColumns: editorData.outputColumns.map(col => ({
+        name: col.name,
+        type: col.type || 'STRING'
+      }))
+    };
 
-  console.log('📊 Editor data prepared with metadata:', {
-    nodeId: editorData.nodeId,
-    inputColumns: editorData.inputColumns.length,
-    outputColumns: editorData.outputColumns.length,
-    existingTransformations: mapConfig ? mapConfig.transformations.length : 0
-  });
+    console.log('📊 Editor data prepared with metadata:', {
+      nodeId: editorData.nodeId,
+      inputColumns: editorData.inputColumns.length,
+      outputColumns: editorData.outputColumns.length,
+      existingTransformations: mapConfig ? mapConfig.transformations.length : 0
+    });
 
-  setState(prev => ({
-    ...prev,
-    mapEditorState: {
-      isOpen: true,
-      data: transformedData,   // use simplified data
-      nodeMetadata: nodeData
-    },
-  }));
+    setState(prev => ({
+      ...prev,
+      mapEditorState: {
+        isOpen: true,
+        data: transformedData,
+        nodeMetadata: nodeData
+      },
+    }));
 
-  showValidationFeedback(
-    `Opening Map Editor for ${nodeData.name || nodeId}`,
-    'info',
-    { x: 100, y: 100 }
-  );
-}, [nodes, edges, showValidationFeedback]);
-  /**
-   * Handle MapEditor save with metadata strategies
-   */
+    showValidationFeedback(
+      `Opening Map Editor for ${nodeData.name || nodeId}`,
+      'info',
+      { x: 100, y: 100 }
+    );
+  }, [nodes, edges, showValidationFeedback]);
+
   const handleMapEditorSave = useCallback((config: MapComponentConfiguration) => {
     const { mapEditorState } = state;
     if (!mapEditorState.isOpen || !mapEditorState.nodeMetadata) {
@@ -1518,10 +1541,8 @@ const handleTMapDoubleClick = useCallback((nodeId: string) => {
       previousHash
     });
 
-    // Create updated configuration union
     const updatedConfig: ComponentConfiguration = { type: 'MAP', config };
 
-    // Update node metadata
     setNodes(prev => {
       const updatedNodes = prev.map(node => {
         if (node.id === nodeId) {
@@ -1538,7 +1559,6 @@ const handleTMapDoubleClick = useCallback((nodeId: string) => {
             metadata: updatedMetadata
           };
 
-          // Notify parent component about node update
           if (onNodeMetadataUpdate) {
             onNodeMetadataUpdate(nodeId, updatedMetadata);
           }
@@ -1548,23 +1568,19 @@ const handleTMapDoubleClick = useCallback((nodeId: string) => {
         return node;
       });
 
-      // Sync updated nodes with context
       syncNodesAndEdges(updatedNodes, edges);
 
       return updatedNodes;
     });
 
-    // Trigger auto-save after map editor save
     debouncedAutoSave();
 
-    // Show success feedback
     showValidationFeedback(
       `Saved ${config.transformations.length} transformations for ${mapEditorState.nodeMetadata.name}`,
       'success',
       { x: 100, y: 100 }
     );
 
-    // Close the editor
     setState(prev => ({
       ...prev,
       mapEditorState: {
@@ -1575,9 +1591,6 @@ const handleTMapDoubleClick = useCallback((nodeId: string) => {
     }));
   }, [state.mapEditorState, onNodeMetadataUpdate, showValidationFeedback, syncNodesAndEdges, edges, debouncedAutoSave]);
 
-  /**
-   * Close the tMap MapEditor modal
-   */
   const closeTMapEditor = useCallback(() => {
     setState(prev => ({
       ...prev,
@@ -1596,13 +1609,11 @@ const handleTMapDoubleClick = useCallback((nodeId: string) => {
 
       if (!reactFlowInstance) return;
 
-      // Get drop position
       const position = screenToFlowPosition({
         x: event.clientX,
         y: event.clientY,
       });
 
-      // Get drag data
       const reactFlowData = event.dataTransfer.getData('application/reactflow');
 
       if (!reactFlowData) {
@@ -1618,18 +1629,12 @@ const handleTMapDoubleClick = useCallback((nodeId: string) => {
           return;
         }
 
-        // Get component definition from unified registry
         const componentDef = COMPONENT_REGISTRY[data.componentId];
         if (!componentDef) {
           console.warn(`Component not found in registry: ${data.componentId}`);
           return;
         }
 
-        // ====== GET NAME FROM METADATA IF AVAILABLE ======
-        // Try to get the name from metadata in this order:
-        // 1. originalNodeName from metadata
-        // 2. name from repositoryMetadata
-        // 3. displayName from component definition
         let baseName = componentDef.displayName;
 
         if (data.metadata?.originalNodeName) {
@@ -1643,42 +1648,29 @@ const handleTMapDoubleClick = useCallback((nodeId: string) => {
           console.log('🔤 Using direct name property:', baseName);
         }
 
-        // Clean up the base name (remove any role prefixes if present)
         const cleanBaseName = baseName
           .replace(/_(INPUT|OUTPUT|TRANSFORM)_/i, '_')
-          .replace(/_+$/, ''); // Remove trailing underscores
+          .replace(/_+$/, '');
 
         console.log('🔤 Clean base name for naming:', cleanBaseName);
 
-        // Check if component is in 'input' category
         const isInputCategoryComponent = componentDef.category === 'input';
 
-        // Generate deterministic name using NameGenerator with CLEAN base name
         const label = nameGenerator.generate(
           cleanBaseName,
           isInputCategoryComponent ? 'TRANSFORM' : componentDef.defaultRole
         );
 
-        // Extract instance number from generated name
-        const extracted = nameGenerator.extractBaseName(label);
-        const instanceNumber = extracted?.instance || 1;
-
-        // ====== END OF NEW NAME LOGIC ======
-
-        // Extract columns from drag metadata
         const columns = extractColumnsFromDragData(data.metadata);
 
-        // Determine component role
         const componentRole = isInputCategoryComponent ? 'TRANSFORM' : componentDef.defaultRole;
 
-        // Create initial component configuration
         const configuration = createInitialComponentConfiguration(
           componentDef.id,
           componentRole,
           data.metadata
         );
 
-        // Build fields from columns if any
         let fields: FieldSchema[] = [];
         if (columns.length > 0) {
           fields = columns.map((col: any, index: number) => ({
@@ -1698,7 +1690,6 @@ const handleTMapDoubleClick = useCallback((nodeId: string) => {
           }));
         }
 
-        // Build schemas based on component type
         const schemas: UnifiedNodeMetadata['schemas'] = {};
 
         if (componentRole === 'INPUT') {
@@ -1714,7 +1705,6 @@ const handleTMapDoubleClick = useCallback((nodeId: string) => {
               keyColumns: fields.filter(f => f.isKey).length
             }
           };
-          // Also update input config schema
           if (configuration.type === 'INPUT') {
             configuration.config.schema = schemas.output;
           }
@@ -1732,7 +1722,6 @@ const handleTMapDoubleClick = useCallback((nodeId: string) => {
             }
           }];
         } else {
-          // Transform components get both input and output schemas
           schemas.input = [{
             id: `${cleanBaseName}_input_schema`,
             name: `${label} Input Schema`,
@@ -1758,19 +1747,16 @@ const handleTMapDoubleClick = useCallback((nodeId: string) => {
           };
         }
 
-        // Create node data with unified metadata model
-        // FIX: Added componentKey and componentType fields to ensure TalendNode renders the correct icon and color.
         const nodeData: CanvasNodeData = {
           id: `node-${Date.now()}-${cleanBaseName}`,
           name: label,
           type: mapComponentKeyToNodeType(componentDef.id, componentRole),
           nodeType: componentRole === 'INPUT' ? 'input' : componentRole === 'OUTPUT' ? 'output' : 'transform',
-          componentCategory: componentDef.category, // now includes 'transform' in the union
-          componentKey: componentDef.id,            // <-- FIX: needed for TalendNode icon lookup
-          componentType: componentRole,              // <-- FIX: needed for TalendNode category color (uppercase)
+          componentCategory: componentDef.category,
+          componentKey: componentDef.id,
+          componentType: componentRole,
           position,
           size: { width: componentDef.defaultDimensions.width * 2, height: componentDef.defaultDimensions.height * 2 },
-          // Use defaultPorts if available, otherwise empty array (cast to any to avoid TS error if not in type)
           connectionPorts: (componentDef as any).defaultPorts || [],
           metadata: {
             configuration,
@@ -1785,7 +1771,6 @@ const handleTMapDoubleClick = useCallback((nodeId: string) => {
             cleanType: cleanBaseName,
             scaleFactor: 0.6,
             visualScaling: { fontSizeScale: 0.6, iconScale: 0.6, handleScale: 0.6 },
-            // Preserve all repository metadata
             repositoryNodeId: data.metadata?.repositoryNodeId,
             repositoryNodeType: data.metadata?.repositoryNodeType,
             originalNodeName: data.metadata?.originalNodeName,
@@ -1804,11 +1789,10 @@ const handleTMapDoubleClick = useCallback((nodeId: string) => {
           technology: componentDef.id,
           visualProperties: {
             color: getCategoryColor(componentDef.category),
-            icon: componentDef.icon, // now accepted as ReactNode
+            icon: componentDef.icon,
           }
         };
 
-        // Create React Flow node with DOUBLED dimensions
         const newNode: Node<CanvasNodeData> = {
           id: nodeData.id,
           type: 'talendNode',
@@ -1823,24 +1807,19 @@ const handleTMapDoubleClick = useCallback((nodeId: string) => {
           connectable: true,
         };
 
-        // Add node using React Flow API
         addNodes(newNode);
 
-        // Get updated nodes and sync with context
         const updatedNodes = [...nodes, newNode];
         setTimeout(() => {
           syncNodesAndEdges(updatedNodes, edges);
         }, 0);
 
-        // Notify parent component about node creation
         if (onNodeMetadataUpdate) {
           onNodeMetadataUpdate(newNode.id, nodeData.metadata!);
         }
 
-        // Trigger auto-save after adding node
         debouncedAutoSave();
 
-        // If component is in 'input' category, show role selection popup
         if (isInputCategoryComponent) {
           setPendingRoleSelection({
             nodeId: newNode.id,
@@ -1852,14 +1831,12 @@ const handleTMapDoubleClick = useCallback((nodeId: string) => {
             nodeData
           });
 
-          // Show info feedback
           showValidationFeedback(
             `Please select role for ${cleanBaseName}`,
             'info',
             position
           );
         } else {
-          // For non-input components, show success feedback
           showValidationFeedback(
             `Added ${label}`,
             'success',
@@ -1887,19 +1864,15 @@ const handleTMapDoubleClick = useCallback((nodeId: string) => {
   // ==================== REACT FLOW HANDLERS WITH SYNCHRONIZATION AND PERSISTENCE ====================
   const onNodesChange = useCallback(
     (changes: NodeChange[]) => {
-      // Update nodes normally
       const updatedNodes = applyNodeChanges(changes, nodes);
       setNodes(updatedNodes);
 
-      // Immediately sync with context
       syncNodesAndEdges(updatedNodes, edges);
 
-      // ✅ Trigger auto-save after node changes
       if (job || canvasId) {
         debouncedAutoSave();
       }
 
-      // Check if any pending role selection node was deleted
       changes.forEach(change => {
         if (change.type === 'remove' && pendingRoleSelection?.nodeId === change.id) {
           setPendingRoleSelection(null);
@@ -1914,10 +1887,8 @@ const handleTMapDoubleClick = useCallback((nodeId: string) => {
       const updatedEdges = applyEdgeChanges(changes, edges);
       setEdges(updatedEdges);
 
-      // Immediately sync with context
       syncNodesAndEdges(nodes, updatedEdges);
 
-      // ✅ Trigger auto-save after edge changes
       if (job || canvasId) {
         debouncedAutoSave();
       }
@@ -1925,14 +1896,12 @@ const handleTMapDoubleClick = useCallback((nodeId: string) => {
     [nodes, edges, syncNodesAndEdges, job, canvasId, debouncedAutoSave]
   );
 
-  // Handle viewport changes for persistence
   const onMove = useCallback((_event: MouseEvent | TouchEvent | null, viewport: Viewport) => {
     setState(prev => ({
       ...prev,
       viewport
     }));
 
-    // ✅ Trigger auto-save after viewport changes
     if (job || canvasId) {
       debouncedAutoSave();
     }
@@ -1940,19 +1909,16 @@ const handleTMapDoubleClick = useCallback((nodeId: string) => {
 
   const onConnect = useCallback(
     (connection: Connection) => {
-      // Guard against null source or target
       if (!connection.source || !connection.target) {
         showValidationFeedback('Source and target are required', 'error');
         return;
       }
 
-      // Type guard to ensure non-null strings
       if (typeof connection.source !== 'string' || typeof connection.target !== 'string') {
         showValidationFeedback('Invalid connection parameters', 'error');
         return;
       }
 
-      // Find source and target nodes
       const sourceNode = nodes.find(n => n.id === connection.source);
       const targetNode = nodes.find(n => n.id === connection.target);
 
@@ -1961,19 +1927,16 @@ const handleTMapDoubleClick = useCallback((nodeId: string) => {
         return;
       }
 
-      // Check for self-connection
       if (connection.source === connection.target) {
         showValidationFeedback('Cannot connect a node to itself', 'error');
         return;
       }
 
-      // Check for cycles
       if (wouldCauseCycle(connection.source, connection.target, edges)) {
         showValidationFeedback('Connection would create a cycle', 'error');
         return;
       }
 
-      // Validate connection using custom validation if provided
       if (propValidateConnection) {
         const validation = propValidateConnection(connection, nodes, edges);
         if (!validation.isValid) {
@@ -1987,7 +1950,6 @@ const handleTMapDoubleClick = useCallback((nodeId: string) => {
         }
       }
 
-      // Create edge with metadata - now with guaranteed non-null source/target
       const newEdge = createEdgeWithMetadata(
         {
           ...connection,
@@ -1998,32 +1960,24 @@ const handleTMapDoubleClick = useCallback((nodeId: string) => {
         targetNode as Node<CanvasNodeData>
       );
 
-      // Add the edge
       const updatedEdges = addEdge(newEdge, edges);
       setEdges(updatedEdges);
 
-      // Immediately sync with context
       syncNodesAndEdges(nodes, updatedEdges);
 
-      // Notify parent component about edge creation
       if (onEdgeMetadataUpdate) {
         onEdgeMetadataUpdate(newEdge.id, newEdge.data);
       }
 
-      // ✅ Trigger auto-save after creating connection
       if (job || canvasId) {
         debouncedAutoSave();
       }
 
-      // Show success feedback
       showValidationFeedback(
         `Created ${newEdge.data.relationType} connection`,
         'success',
         { x: 100, y: 100 }
       );
-
-      // DO NOT open configuration modal automatically
-      // User will double-click edge to configure
     },
     [
       nodes,
@@ -2047,9 +2001,6 @@ const handleTMapDoubleClick = useCallback((nodeId: string) => {
   }, []);
 
   // ==================== NEW: VIEWPORT CENTERING AND ZOOM ====================
-  /**
-   * Center nodes on initial load or when nodes change
-   */
   const centerNodes = useCallback(() => {
     if (nodes.length > 0 && reactFlowInstance && reactFlowWrapper.current) {
       const container = reactFlowWrapper.current;
@@ -2058,7 +2009,6 @@ const handleTMapDoubleClick = useCallback((nodeId: string) => {
       const containerWidth = container.clientWidth;
       const containerHeight = container.clientHeight;
 
-      // If we have nodes, calculate their bounds
       const nodePositions = nodes.map(node => node.position);
       const nodeWidths = nodes.map(node =>
         node.style?.width ? parseFloat(node.style.width as string) : 100
@@ -2067,7 +2017,6 @@ const handleTMapDoubleClick = useCallback((nodeId: string) => {
         node.style?.height ? parseFloat(node.style.height as string) : 100
       );
 
-      // Find the bounds of all nodes
       const minX = Math.min(...nodePositions.map((p, _i) => p.x));
       const maxX = Math.max(...nodePositions.map((p, i) => p.x + nodeWidths[i]));
       const minY = Math.min(...nodePositions.map((p, _i) => p.y));
@@ -2078,7 +2027,6 @@ const handleTMapDoubleClick = useCallback((nodeId: string) => {
       const centerX = minX + nodesWidth / 2;
       const centerY = minY + nodesHeight / 2;
 
-      // Calculate viewport to center nodes at 1:1 scale
       const viewportX = containerWidth / 2 - centerX;
       const viewportY = containerHeight / 2 - centerY;
 
@@ -2086,23 +2034,19 @@ const handleTMapDoubleClick = useCallback((nodeId: string) => {
 
       reactFlowInstance.setViewport(newViewport);
 
-      // Update state
       setState(prev => ({
         ...prev,
         viewport: newViewport
       }));
 
-      // Trigger auto-save after centering
       if (job || canvasId) {
         debouncedAutoSave();
       }
     }
   }, [nodes, reactFlowInstance, reactFlowWrapper, job, canvasId, debouncedAutoSave]);
 
-  // Auto-center nodes when they're first loaded
   useEffect(() => {
     if (nodes.length > 0 && reactFlowInstance && (!state.viewport || state.viewport.zoom !== 1)) {
-      // Small delay to ensure container is rendered
       const timer = setTimeout(() => {
         centerNodes();
       }, 100);
@@ -2115,20 +2059,14 @@ const handleTMapDoubleClick = useCallback((nodeId: string) => {
   const handleRoleSelect = useCallback((selectedRole: 'INPUT' | 'OUTPUT') => {
     if (!pendingRoleSelection) return;
 
-    // Find the node to update
     const nodeToUpdate = nodes.find(n => n.id === pendingRoleSelection.nodeId);
     if (!nodeToUpdate) return;
 
-    // Generate new label with correct role
     const newLabel = nameGenerator.generate(
       pendingRoleSelection.componentId,
       selectedRole
     );
 
-    const extracted = nameGenerator.extractBaseName(newLabel);
-    const instanceNumber = extracted?.instance || 1;
-
-    // Get columns from metadata if available
     const columns = extractColumnsFromDragData(pendingRoleSelection.nodeData.metadata);
     const fields: FieldSchema[] = columns.length > 0
       ? columns.map((col: any, index: number) => ({
@@ -2148,14 +2086,12 @@ const handleTMapDoubleClick = useCallback((nodeId: string) => {
         }))
       : [];
 
-    // Create new configuration based on selected role
     const newConfiguration = createInitialComponentConfiguration(
       pendingRoleSelection.componentId,
       selectedRole,
       pendingRoleSelection.nodeData.metadata
     );
 
-    // Update schemas based on selected role
     const schemas: UnifiedNodeMetadata['schemas'] = {};
 
     if (selectedRole === 'INPUT') {
@@ -2172,7 +2108,6 @@ const handleTMapDoubleClick = useCallback((nodeId: string) => {
         }
       } : undefined;
 
-      // Update input configuration schema
       if (newConfiguration.type === 'INPUT') {
         (newConfiguration.config as InputComponentConfiguration).schema = {
           id: `${pendingRoleSelection.componentId}_schema`,
@@ -2197,7 +2132,6 @@ const handleTMapDoubleClick = useCallback((nodeId: string) => {
       }] : undefined;
     }
 
-    // Update the node with the selected role
     setNodes((nds) => {
       const updatedNodes = nds.map((node) => {
         if (node.id === pendingRoleSelection.nodeId) {
@@ -2206,7 +2140,7 @@ const handleTMapDoubleClick = useCallback((nodeId: string) => {
             name: newLabel,
             nodeType: selectedRole === 'INPUT' ? 'input' : 'output',
             componentCategory: pendingRoleSelection.componentDef.category,
-            componentType: selectedRole,               // <-- FIX: update componentType to reflect new role
+            componentType: selectedRole,
             metadata: {
               ...pendingRoleSelection.nodeData.metadata,
               configuration: newConfiguration,
@@ -2222,7 +2156,6 @@ const handleTMapDoubleClick = useCallback((nodeId: string) => {
             }
           };
 
-          // Notify parent component about node update
           if (onNodeMetadataUpdate) {
             onNodeMetadataUpdate(node.id, updatedData.metadata!);
           }
@@ -2235,19 +2168,15 @@ const handleTMapDoubleClick = useCallback((nodeId: string) => {
         return node;
       });
 
-      // Sync updated nodes with context
       syncNodesAndEdges(updatedNodes, edges);
 
       return updatedNodes;
     });
 
-    // Trigger auto-save after role selection
     debouncedAutoSave();
 
-    // Clear pending selection
     setPendingRoleSelection(null);
 
-    // Show success feedback
     showValidationFeedback(
       `Role set to ${selectedRole} for ${pendingRoleSelection.displayName}`,
       'success',
@@ -2258,26 +2187,20 @@ const handleTMapDoubleClick = useCallback((nodeId: string) => {
   const handleRoleCancel = useCallback(() => {
     if (!pendingRoleSelection) return;
 
-    // Remove the temporary node since user cancelled
     setNodes((nds) => {
       const updatedNodes = nds.filter(node => node.id !== pendingRoleSelection.nodeId);
 
-      // Sync updated nodes with context
       syncNodesAndEdges(updatedNodes, edges);
 
       return updatedNodes;
     });
 
-    // Decrement the counter since we're removing the temporary node
     nameGenerator.decrementCounter(pendingRoleSelection.componentId, 'TRANSFORM');
 
-    // Trigger auto-save after cancellation
     debouncedAutoSave();
 
-    // Clear pending selection
     setPendingRoleSelection(null);
 
-    // Show cancellation feedback
     showValidationFeedback(
       'Component placement cancelled',
       'info',
@@ -2309,7 +2232,6 @@ const handleTMapDoubleClick = useCallback((nodeId: string) => {
             }
           };
 
-          // Notify parent component
           if (onNodeMetadataUpdate) {
             onNodeMetadataUpdate(nodeId, newNodeData.metadata!);
           }
@@ -2322,13 +2244,11 @@ const handleTMapDoubleClick = useCallback((nodeId: string) => {
         return node;
       });
 
-      // Sync updated nodes with context
       syncNodesAndEdges(updatedNodes, edges);
 
       return updatedNodes;
     });
 
-    // Trigger auto-save after node update
     debouncedAutoSave();
   }, [onNodeMetadataUpdate, syncNodesAndEdges, edges, debouncedAutoSave]);
 
@@ -2350,113 +2270,390 @@ const handleTMapDoubleClick = useCallback((nodeId: string) => {
   }, []);
 
   // ==================== UPDATED DOUBLE-CLICK HANDLER ====================
-  /**
-   * Handles double-click on TMap nodes to open MapEditor with connected columns
-   */
   const handleCanvasNodeDoubleClick = useCallback((event: CustomEvent) => {
     const { componentMetadata, nodeMetadata } = event.detail;
     const metadata = nodeMetadata || componentMetadata;
 
-    if (metadata) {
-      // NEW: First check if it's a tMap node
-      if (metadata.componentKey === 'tMap') {
-        handleTMapDoubleClick(metadata.id);
-        return; // Don't proceed to old Map component logic
-      }
+    if (!metadata || !metadata.id) return;
 
-      // Existing logic for other Map components continues here...
-      const isMapComponent = metadata.name?.includes('Map') ||
-                            metadata.type === 'tMap' ||
-                            metadata.componentKey?.includes('Map');
+    const node = nodes.find(n => n.id === metadata.id) as Node<CanvasNodeData> | undefined;
+    if (!node) return;
 
-      if (isMapComponent) {
-        const node = nodes.find(n => n.id === metadata.id);
-        if (node) {
-          // Get connected input and output nodes
-          const { inputNodes, outputNodes } = getMapNodeConnections(
-            node as Node<CanvasNodeData>,
-            nodes as Node<CanvasNodeData>[],
-            edges
-          );
+    const nodeData = node.data;
+    const nodeType = nodeData.type;
 
-          // Extract columns from connected nodes with proper direction and de-duplication
-          const sourceTables: TableDefinition[] = inputNodes.map((inputNode, index) => {
-            const columns = extractColumnsFromNode(inputNode);
-
-            // De-duplicate columns by name
-            const uniqueColumns = columns.filter((col, idx, arr) =>
-              arr.findIndex(c => c.name === col.name) === idx
-            );
-
-            return {
-              id: `input-${inputNode.id}`,
-              name: inputNode.data.name || `Input ${index + 1}`,
-              type: 'input' as const,
-              columns: uniqueColumns.map(col => ({
-                ...col,
-                id: `${inputNode.id}_${col.name}`.replace(/[^a-zA-Z0-9]/g, '_')
-              }))
-            };
-          });
-
-          const targetTables: TableDefinition[] = outputNodes.map((outputNode, index) => {
-            const columns = extractColumnsFromNode(outputNode);
-
-            // De-duplicate columns by name
-            const uniqueColumns = columns.filter((col, idx, arr) =>
-              arr.findIndex(c => c.name === col.name) === idx
-            );
-
-            return {
-              id: `output-${outputNode.id}`,
-              name: outputNode.data.name || `Output ${index + 1}`,
-              type: 'output' as const,
-              columns: uniqueColumns.map(col => ({
-                ...col,
-                id: `${outputNode.id}_${col.name}`.replace(/[^a-zA-Z0-9]/g, '_')
-              }))
-            };
-          });
-
-          // If no connected nodes found, show warning
-          if (sourceTables.length === 0 && targetTables.length === 0) {
-            showValidationFeedback(
-              'No connected input or output nodes found. Please connect nodes first.',
-              'warning',
-              { x: 100, y: 100 }
-            );
-            return;
-          }
-
-          // Store canvas context with source and target tables
-          const canvasContext = {
-            sourceTables,
-            targetTables,
-            inputNodeIds: inputNodes.map(n => n.id),
-            outputNodeIds: outputNodes.map(n => n.id),
-            lastOpened: new Date().toISOString()
-          };
-
-          setState(prev => ({
-            ...prev,
-            showMapEditor: true,
-            selectedNodeForMapEditor: {
-              ...node,
-              canvasContext,
-              sourceTables,
-              targetTables
-            }
-          }));
-        }
-      }
+    if (nodeType === NodeType.MAP) {
+      handleTMapDoubleClick(metadata.id);
+      return;
     }
-  }, [nodes, edges, showValidationFeedback, handleTMapDoubleClick]);
 
-  // Add event listeners for node and edge double-click
+    const inputNodes = getConnectedNodes(metadata.id, edges, nodes, 'input');
+    const inputColumns = inputNodes.flatMap(n => extractColumnsFromNode(n));
+    const uniqueInputColumns = inputColumns.filter((col, idx, self) =>
+      self.findIndex(c => c.name === col.name) === idx
+    );
+
+    const simpleInputColumns: SimpleColumn[] = uniqueInputColumns.map(({ name, type, id }) => ({ name, type, id }));
+
+    const getInitialConfig = <T,>(type: string): T | undefined => {
+      if (type === 'FILTER') return getComponentConfig(nodeData, 'FILTER') as T;
+      if (type === 'SORT') return getComponentConfig(nodeData, 'SORT') as T;
+      if (type === 'AGGREGATE') return getComponentConfig(nodeData, 'AGGREGATE') as T;
+      if (type === 'CONVERT') return getComponentConfig(nodeData, 'CONVERT') as T;
+      if (type === 'REPLACE') return getComponentConfig(nodeData, 'REPLACE') as T;
+      if (type === 'EXTRACT_JSON_FIELDS') return getComponentConfig(nodeData, 'EXTRACT_JSON_FIELDS') as T;
+      if (type === 'EXTRACT_DELIMITED') return getComponentConfig(nodeData, 'EXTRACT_DELIMITED') as T;
+      if (type === 'EXTRACT_XML_FIELD') return getComponentConfig(nodeData, 'EXTRACT_XML_FIELD') as T;
+      if (type === 'REPLACE_LIST') return getComponentConfig(nodeData, 'REPLACE_LIST') as T;
+      if (type === 'NORMALIZE_NUMBER') return getComponentConfig(nodeData, 'NORMALIZE_NUMBER') as T;
+      if (type === 'NORMALIZE') return getComponentConfig(nodeData, 'NORMALIZE') as T;
+      if (type === 'REPLICATE') return getComponentConfig(nodeData, 'REPLICATE') as T;
+      if (type === 'MATCH_GROUP') return getComponentConfig(nodeData, 'MATCH_GROUP') as T;
+      if (type === 'FILTER_COLUMNS') return getComponentConfig(nodeData, 'FILTER_COLUMNS') as T;
+      if (type === 'FILE_LOOKUP') return getComponentConfig(nodeData, 'FILE_LOOKUP') as T;
+      // NEW
+      if (type === 'UNPIVOT_ROW') return getComponentConfig(nodeData, 'UNPIVOT_ROW') as T;
+      if (type === 'UNITE') return getComponentConfig(nodeData, 'UNITE') as T;
+      if (type === 'UNIQ_ROW') return getComponentConfig(nodeData, 'UNIQ_ROW') as T;
+      if (type === 'SPLIT_ROW') return getComponentConfig(nodeData, 'NORMALIZE') as T; // SplitRow uses NORMALIZE config
+      if (type === 'PIVOT_TO_COLUMNS_DELIMITED') return getComponentConfig(nodeData, 'PIVOT_TO_COLUMNS_DELIMITED') as T;
+      if (type === 'DENORMALIZE_SORTED_ROW') return getComponentConfig(nodeData, 'DENORMALIZE_SORTED_ROW') as T;
+      if (type === 'DENORMALIZE') return getComponentConfig(nodeData, 'DENORMALIZE') as T;
+      return undefined;
+    };
+
+    if (nodeType === NodeType.JOIN) {
+      if (inputNodes.length < 2) {
+        showValidationFeedback('Join requires at least two input connections.', 'error');
+        return;
+      }
+      const leftNode = inputNodes[0];
+      const rightNode = inputNodes[1];
+
+      const leftSchema: SchemaDefinition = {
+        id: leftNode.id,
+        name: leftNode.data.name || leftNode.id,
+        fields: extractColumnsFromNode(leftNode).map((col, idx) => ({
+          id: col.id || `${leftNode.id}_${col.name}_${idx}`,
+          name: col.name,
+          type: (col.type as DataType) || 'STRING',
+          nullable: true,
+          isKey: false,
+        })),
+        isTemporary: false,
+        isMaterialized: false,
+      };
+
+      const rightSchema: SchemaDefinition = {
+        id: rightNode.id,
+        name: rightNode.data.name || rightNode.id,
+        fields: extractColumnsFromNode(rightNode).map((col, idx) => ({
+          id: col.id || `${rightNode.id}_${col.name}_${idx}`,
+          name: col.name,
+          type: (col.type as DataType) || 'STRING',
+          nullable: true,
+          isKey: false,
+        })),
+        isTemporary: false,
+        isMaterialized: false,
+      };
+
+      const joinConfig = getComponentConfig(nodeData, 'JOIN');
+      setActiveEditor({
+        type: 'join',
+        nodeId: node.id,
+        nodeMetadata: nodeData,
+        leftSchema,
+        rightSchema,
+        initialConfig: joinConfig,
+      });
+      return;
+    }
+
+    switch (nodeType) {
+      case NodeType.SORT_ROW:
+        setActiveEditor({
+          type: 'sort',
+          nodeId: node.id,
+          nodeMetadata: nodeData,
+          inputColumns: simpleInputColumns,
+          initialConfig: getInitialConfig<SortComponentConfiguration>('SORT'),
+        });
+        break;
+
+      case NodeType.REPLACE:
+        setActiveEditor({
+          type: 'replace',
+          nodeId: node.id,
+          nodeMetadata: nodeData,
+          inputColumns: simpleInputColumns,
+          outputColumns: simpleInputColumns,
+          initialConfig: getInitialConfig<ReplaceComponentConfiguration>('REPLACE'),
+        });
+        break;
+
+      case NodeType.FILTER_ROW:
+        setActiveEditor({
+          type: 'filter',
+          nodeId: node.id,
+          nodeMetadata: nodeData,
+          inputColumns: simpleInputColumns,
+          initialConfig: getInitialConfig<FilterComponentConfiguration>('FILTER'),
+        });
+        break;
+
+      case NodeType.AGGREGATE_ROW:
+        setActiveEditor({
+          type: 'aggregate',
+          nodeId: node.id,
+          nodeMetadata: nodeData,
+          inputColumns: simpleInputColumns,
+          initialConfig: getInitialConfig<AggregateComponentConfiguration>('AGGREGATE'),
+        });
+        break;
+
+      case NodeType.CONVERT_TYPE:
+        setActiveEditor({
+          type: 'convert',
+          nodeId: node.id,
+          nodeMetadata: nodeData,
+          inputColumns: simpleInputColumns,
+          outputColumns: simpleInputColumns,
+          initialConfig: getInitialConfig<ConvertComponentConfiguration>('CONVERT'),
+        });
+        break;
+
+      case NodeType.EXTRACT_DELIMITED_FIELDS:
+        setActiveEditor({
+          type: 'extractDelimited',
+          nodeId: node.id,
+          nodeMetadata: nodeData,
+          inputColumns: simpleInputColumns,
+          initialConfig: getInitialConfig<ExtractDelimitedFieldsConfiguration>('EXTRACT_DELIMITED'),
+        });
+        break;
+
+      case NodeType.EXTRACT_JSON_FIELDS:
+        setActiveEditor({
+          type: 'extractJSON',
+          nodeId: node.id,
+          nodeMetadata: nodeData,
+          inputColumns: simpleInputColumns,
+          initialConfig: getInitialConfig<ExtractJSONFieldsConfiguration>('EXTRACT_JSON_FIELDS'),
+        });
+        break;
+
+      case NodeType.EXTRACT_XML_FIELD:
+        setActiveEditor({
+          type: 'extractXML',
+          nodeId: node.id,
+          nodeMetadata: nodeData,
+          inputColumns: simpleInputColumns,
+          initialConfig: getInitialConfig<ExtractXMLFieldConfiguration>('EXTRACT_XML_FIELD'),
+        });
+        break;
+
+      case NodeType.NORMALIZE:
+        setActiveEditor({
+          type: 'normalize',
+          nodeId: node.id,
+          nodeMetadata: nodeData,
+          inputColumns: simpleInputColumns,
+          initialConfig: getInitialConfig<NormalizeComponentConfiguration>('NORMALIZE'),
+        });
+        break;
+
+      case NodeType.NORMALIZE_NUMBER:
+        setActiveEditor({
+          type: 'normalizeNumber',
+          nodeId: node.id,
+          nodeMetadata: nodeData,
+          inputColumns: simpleInputColumns,
+          initialConfig: getInitialConfig<NormalizeNumberComponentConfiguration>('NORMALIZE_NUMBER'),
+        });
+        break;
+
+      case NodeType.REPLACE_LIST:
+        const inputSchema: SchemaDefinition = {
+          id: `input-${node.id}`,
+          name: `Input Schema for ${nodeData.name}`,
+          fields: uniqueInputColumns.map((col, idx) => ({
+            id: col.id || `${node.id}_${col.name}_${idx}`,
+            name: col.name,
+            type: (col.type as DataType) || 'STRING',
+            nullable: true,
+            isKey: false,
+          })),
+          isTemporary: false,
+          isMaterialized: false,
+        };
+        setActiveEditor({
+          type: 'replaceList',
+          nodeId: node.id,
+          nodeMetadata: nodeData,
+          inputSchema,
+          initialConfig: getInitialConfig<ReplaceComponentConfiguration>('REPLACE_LIST'),
+        });
+        break;
+
+      case NodeType.REPLICATE:
+        setActiveEditor({
+          type: 'replicate',
+          nodeId: node.id,
+          nodeMetadata: nodeData,
+          inputColumns: simpleInputColumns,
+          initialConfig: getInitialConfig<ReplicateComponentConfiguration>('REPLICATE'),
+        });
+        break;
+
+      case NodeType.RECORD_MATCHING:
+        const inputFields: FieldSchema[] = uniqueInputColumns.map((col, idx) => ({
+          id: col.id || `${node.id}_${col.name}_${idx}`,
+          name: col.name,
+          type: (col.type as DataType) || 'STRING',
+          nullable: true,
+          isKey: false,
+        }));
+        setActiveEditor({
+          type: 'recordMatching',
+          nodeId: node.id,
+          nodeMetadata: nodeData,
+          inputFields,
+          initialConfig: getInitialConfig<MatchGroupComponentConfiguration>('MATCH_GROUP'),
+        });
+        break;
+
+      case NodeType.MATCH_GROUP:
+        setActiveEditor({
+          type: 'matchGroup',
+          nodeId: node.id,
+          nodeMetadata: nodeData,
+          inputColumns: simpleInputColumns,
+          initialConfig: getInitialConfig<MatchGroupComponentConfiguration>('MATCH_GROUP'),
+        });
+        break;
+
+      case NodeType.FILTER_COLUMNS:
+        const filterInputSchema: SchemaDefinition = {
+          id: `input-${node.id}`,
+          name: `Input Schema for ${nodeData.name}`,
+          fields: uniqueInputColumns.map((col, idx) => ({
+            id: col.id || `${node.id}_${col.name}_${idx}`,
+            name: col.name,
+            type: (col.type as DataType) || 'STRING',
+            nullable: true,
+            isKey: false,
+          })),
+          isTemporary: false,
+          isMaterialized: false,
+        };
+        setActiveEditor({
+          type: 'filterColumns',
+          nodeId: node.id,
+          nodeMetadata: nodeData,
+          inputSchema: filterInputSchema,
+          initialConfig: getInitialConfig<FilterColumnsComponentConfiguration>('FILTER_COLUMNS'),
+        });
+        break;
+
+      case NodeType.FILE_LOOKUP:
+        setActiveEditor({
+          type: 'fileLookup',
+          nodeId: node.id,
+          nodeMetadata: nodeData,
+          inputColumns: simpleInputColumns,
+          initialConfig: getInitialConfig<FileLookupComponentConfiguration>('FILE_LOOKUP'),
+        });
+        break;
+
+      // ==================== NEW CASES ====================
+      case NodeType.UNPIVOT_ROW:
+        setActiveEditor({
+          type: 'unpivotRow',
+          nodeId: node.id,
+          nodeMetadata: nodeData,
+          inputColumns: simpleInputColumns,
+          initialConfig: getInitialConfig<UnpivotRowComponentConfiguration>('UNPIVOT_ROW'),
+        });
+        break;
+
+      case NodeType.UNITE: {
+        const inputSchemas: InputSchema[] = inputNodes.map(n => {
+          const schema = n.data.metadata?.schemas?.output;
+          return {
+            id: n.id,
+            name: n.data.name || n.id,
+            fields: schema?.fields.map(f => ({ name: f.name, type: f.type, nullable: f.nullable })) || [],
+          };
+        });
+        setActiveEditor({
+          type: 'unite',
+          nodeId: node.id,
+          nodeMetadata: nodeData,
+          inputSchemas,
+          initialConfig: getInitialConfig<UniteComponentConfiguration>('UNITE'),
+        });
+        break;
+      }
+
+      case NodeType.UNIQ_ROW:
+        setActiveEditor({
+          type: 'uniqRow',
+          nodeId: node.id,
+          nodeMetadata: nodeData,
+          inputColumns: simpleInputColumns,
+          initialConfig: getInitialConfig<UniqRowComponentConfiguration>('UNIQ_ROW'),
+        });
+        break;
+
+      case NodeType.SPLIT_ROW:
+        setActiveEditor({
+          type: 'splitRow',
+          nodeId: node.id,
+          nodeMetadata: nodeData,
+          inputColumns: simpleInputColumns,
+          initialConfig: getInitialConfig<NormalizeComponentConfiguration>('SPLIT_ROW'),
+        });
+        break;
+
+      case NodeType.PIVOT_TO_COLUMNS_DELIMITED:
+        setActiveEditor({
+          type: 'pivotToColumnsDelimited',
+          nodeId: node.id,
+          nodeMetadata: nodeData,
+          inputColumns: simpleInputColumns,
+          initialConfig: getInitialConfig<PivotToColumnsDelimitedConfiguration>('PIVOT_TO_COLUMNS_DELIMITED'),
+        });
+        break;
+
+      case NodeType.DENORMALIZE_SORTED_ROW:
+        setActiveEditor({
+          type: 'denormalizeSortedRow',
+          nodeId: node.id,
+          nodeMetadata: nodeData,
+          inputColumns: simpleInputColumns,
+          initialConfig: getInitialConfig<DenormalizeSortedRowComponentConfiguration>('DENORMALIZE_SORTED_ROW'),
+        });
+        break;
+
+      case NodeType.DENORMALIZE:
+        setActiveEditor({
+          type: 'denormalize',
+          nodeId: node.id,
+          nodeMetadata: nodeData,
+          inputColumns: simpleInputColumns,
+          initialConfig: getInitialConfig<DenormalizeComponentConfiguration>('DENORMALIZE'),
+        });
+        break;
+
+      default:
+        showValidationFeedback(`No editor available for node type ${nodeType}`, 'info');
+    }
+  }, [nodes, edges, handleTMapDoubleClick, showValidationFeedback]);
+
   useEffect(() => {
     window.addEventListener('canvas-node-double-click', handleCanvasNodeDoubleClick as EventListener);
 
-    // Add tMap double-click handler
     const handleTMapDoubleClickEvent = (event: Event) => {
       const customEvent = event as CustomEvent;
       console.log('Received tMap double-click event:', customEvent.detail);
@@ -2465,11 +2662,8 @@ const handleTMapDoubleClick = useCallback((nodeId: string) => {
 
     window.addEventListener('canvas-tmap-double-click', handleTMapDoubleClickEvent);
 
-    // Add edge double-click handler
     const handleEdgeDoubleClick = (event: CustomEvent) => {
       const { edgeId } = event.detail;
-
-      // Here you would typically open the edge configuration UI
       showValidationFeedback(
         `Double-clicked edge: ${edgeId}. Open configuration UI here.`,
         'info',
@@ -2486,86 +2680,6 @@ const handleTMapDoubleClick = useCallback((nodeId: string) => {
     };
   }, [handleCanvasNodeDoubleClick, handleTMapDoubleClick, showValidationFeedback]);
 
-  // ==================== NEW: TMap EDITOR MODAL WITH METADATA ====================
-  /**
-   * Render tMap Editor modal with metadata support
-   */
-  const renderTMapEditorModal = () => {
-    if (!state.mapEditorState.isOpen || !state.mapEditorState.data) return null;
-
-    const { nodeId, inputColumns, outputColumns } = state.mapEditorState.data;
-    const nodeMetadata = state.mapEditorState.nodeMetadata;
-    const nodeLabel = nodeMetadata?.name || nodeId;
-
-    // Extract initial configuration from metadata
-    const initialConfig = nodeMetadata && isMapConfig(nodeMetadata.metadata?.configuration)
-      ? nodeMetadata.metadata.configuration.config
-      : undefined;
-
-    return (
-      <div className="fixed inset-0 z-[9999] bg-black bg-opacity-70 flex items-center justify-center p-4">
-        <motion.div
-          initial={{ opacity: 0, scale: 0.95 }}
-          animate={{ opacity: 1, scale: 1 }}
-          className="bg-white rounded-xl shadow-2xl w-full max-w-6xl h-[90vh] overflow-hidden"
-        >
-          <div className="flex justify-between items-center p-6 border-b bg-gradient-to-r from-blue-50 to-gray-50">
-            <div>
-              <h2 className="text-xl font-bold flex items-center">
-                <span className="mr-2">🗺️</span>
-                Map Editor
-                <span className="ml-2 text-xs bg-purple-100 text-purple-800 px-2 py-0.5 rounded">
-                  Metadata Strategy v1.0
-                </span>
-              </h2>
-              <p className="text-sm text-gray-600 mt-1">
-                Editing tMap node: <span className="font-semibold text-blue-600">{nodeLabel}</span>
-                <span className="ml-3 text-xs bg-gray-100 text-gray-800 px-2 py-0.5 rounded">
-                  {inputColumns.length} input columns • {outputColumns.length} output columns
-                </span>
-                {initialConfig && (
-                  <span className="ml-3 text-xs bg-green-100 text-green-800 px-2 py-0.5 rounded">
-                    {initialConfig.transformations.length} existing transformations
-                  </span>
-                )}
-              </p>
-            </div>
-            <button
-              onClick={closeTMapEditor}
-              className="p-2 hover:bg-gray-100 rounded-full transition-colors"
-              title="Close Map Editor"
-            >
-              <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" />
-              </svg>
-            </button>
-          </div>
-
-          <div className="h-full overflow-hidden">
-            <Suspense fallback={
-              <div className="flex items-center justify-center h-full">
-                <div className="text-center">
-                  <div className="animate-spin rounded-full h-12 w-12 border-b-2 border-blue-500 mx-auto mb-4"></div>
-                  <p className="text-gray-600">Loading Map Editor with Metadata...</p>
-                </div>
-              </div>
-            }>
-              <MapEditor
-                nodeId={nodeId}
-                nodeMetadata={nodeMetadata}
-                inputColumns={inputColumns}
-                outputColumns={outputColumns}
-                initialConfig={initialConfig}
-                onClose={closeTMapEditor}
-                onSave={handleMapEditorSave}
-              />
-            </Suspense>
-          </div>
-        </motion.div>
-      </div>
-    );
-  };
-
   // ==================== SQL GENERATION ON RUN ====================
   useEffect(() => {
     const handleToolbarRun = async (event: Event) => {
@@ -2573,16 +2687,14 @@ const handleTMapDoubleClick = useCallback((nodeId: string) => {
       const { jobName, nodes: runNodes, edges: runEdges } = customEvent.detail;
 
       console.log(`🎬 Canvas received run request for job: ${jobName}`);
+      dispatch(addLog({ level: 'INFO', message: `Starting run for job: ${jobName}`, source: 'Canvas' }));
 
       try {
-        // Convert React Flow nodes (UnifiedCanvasNode) to the old PipelineCanvasNode format
-        // that the SQL generators still expect. We populate the legacy fields from the unified metadata.
         const canvasNodes: PipelineCanvasNode[] = runNodes.map((node: Node<CanvasNodeData>) => {
           const unified = node.data;
           const config = unified.metadata?.configuration;
           const nodeType = unified.type;
 
-          // Extract legacy fields based on node type
           let joinConfig: any = undefined;
           let filterConfig: any = undefined;
           let aggregationConfig: any = undefined;
@@ -2648,7 +2760,6 @@ const handleTMapDoubleClick = useCallback((nodeId: string) => {
                 offset: config.config.sqlGeneration.limitOffset?.offset
               };
             } else if (isMapConfig(config)) {
-              // Convert map transformations to transformationRules
               transformationRules = config.config.transformations.map(t => ({
                 id: t.id,
                 type: 'map',
@@ -2664,17 +2775,32 @@ const handleTMapDoubleClick = useCallback((nodeId: string) => {
                 defaultValue: t.defaultValue
               }));
             } else if (isInputConfig(config)) {
-              // For input nodes, build tableMapping
               const fields = config.config.schema?.fields || [];
+              const sourceTableName = config.config.sourceDetails.tableName ||
+                                      unified.metadata?.postgresTableName ||
+                                      unified.metadata?.fullRepositoryMetadata?.postgresTableName ||
+                                      unified.name;
               tableMapping = {
                 schema: 'public',
-                name: config.config.sourceDetails.tableName || unified.name,
+                name: sourceTableName,
                 columns: fieldsToPostgresColumns(fields)
               };
             } else if (isOutputConfig(config)) {
-              // Output nodes might not need mapping here, but we can provide schemaMapping if needed
               schemaMappings = config.config.schemaMapping;
             }
+          }
+
+          let targetTableName: string | undefined;
+          if (config && isOutputConfig(config)) {
+            targetTableName = config.config.targetDetails.tableName ||
+                              unified.metadata?.postgresTableName ||
+                              unified.metadata?.fullRepositoryMetadata?.postgresTableName ||
+                              unified.name;
+          }
+
+          let sourceTableName: string | undefined;
+          if (config && isInputConfig(config)) {
+            sourceTableName = tableMapping?.name || unified.name;
           }
 
           return {
@@ -2690,12 +2816,13 @@ const handleTMapDoubleClick = useCallback((nodeId: string) => {
               schemaMappings,
               tableMapping,
               postgresConfig: unified.metadata?.postgresConfig,
-              description: unified.metadata?.description
+              description: unified.metadata?.description,
+              targetTableName,
+              sourceTableName
             }
           };
         });
 
-        // Convert edges (similar extraction could be done if needed)
         const canvasConnections: PipelineCanvasConnection[] = runEdges.map((edge: Edge) => ({
           id: edge.id,
           sourceNodeId: edge.source,
@@ -2708,8 +2835,7 @@ const handleTMapDoubleClick = useCallback((nodeId: string) => {
           metadata: edge.data?.metadata || {}
         }));
 
-        // Run the pipeline
-        const result: PipelineGenerationResult = await generatePipelineSQL(
+        const generationResult: PipelineGenerationResult = await generatePipelineSQL(
           canvasNodes,
           canvasConnections,
           {
@@ -2727,44 +2853,81 @@ const handleTMapDoubleClick = useCallback((nodeId: string) => {
           }
         );
 
-        // Log outcome
-        if (result.errors.length === 0) {
-          dispatch(addLog({
-            level: 'SUCCESS',
-            message: `✅ SQL generation successful for job ${jobName}`,
-            source: 'SQL Generation'
-          }));
-          dispatch(addLog({
-            level: 'INFO',
-            message: `📄 Generated SQL (${result.sql.length} characters)`,
-            source: 'SQL Generation'
-          }));
-        } else {
-          result.errors.forEach(error => {
+        console.log('📝 [Canvas Run] Full SQL:', generationResult.sql);
+
+        if (generationResult.errors.length > 0) {
+          generationResult.errors.forEach(error => {
             dispatch(addLog({
               level: 'ERROR',
               message: `❌ [${error.code}] ${error.message}`,
               source: 'SQL Generation'
             }));
           });
+          window.dispatchEvent(new CustomEvent('run-complete', {
+            detail: {
+              success: false,
+              errors: generationResult.errors,
+              sql: generationResult.sql
+            }
+          }));
+          return;
         }
-console.log('📝 [Canvas Run] Full SQL:', result.sql);
-        // Dispatch completion event
+
+        const connectionId = await getActivePostgresConnectionId();
+        if (!connectionId) {
+          const errorMsg = 'No active PostgreSQL connection. Please connect to a database first.';
+          dispatch(addLog({ level: 'ERROR', message: errorMsg, source: 'Run' }));
+          window.dispatchEvent(new CustomEvent('run-complete', {
+            detail: { success: false, error: errorMsg }
+          }));
+          return;
+        }
+
+        dispatch(addLog({ level: 'INFO', message: 'Executing generated SQL...', source: 'Run' }));
+        const executionResult: ClientQueryExecutionResult = await databaseApi.executeQuery(
+          connectionId,
+          generationResult.sql,
+          { maxRows: 1000 }
+        );
+
+        if (executionResult.success) {
+          const rowCount = executionResult.result?.rowCount ?? 0;
+          const fieldCount = executionResult.result?.fields?.length ?? 0;
+          dispatch(addLog({
+            level: 'SUCCESS',
+            message: `✅ SQL executed successfully. Rows affected: ${rowCount}, Fields: ${fieldCount}`,
+            source: 'Run'
+          }));
+          if (executionResult.result?.rows && executionResult.result.rows.length > 0) {
+            dispatch(addLog({
+              level: 'DEBUG',
+              message: `First row: ${JSON.stringify(executionResult.result.rows[0])}`,
+              source: 'Run'
+            }));
+          }
+        } else {
+          dispatch(addLog({
+            level: 'ERROR',
+            message: `❌ Execution failed: ${executionResult.error}`,
+            source: 'Run'
+          }));
+        }
+
         window.dispatchEvent(new CustomEvent('run-complete', {
           detail: {
-            success: result.errors.length === 0,
-            sql: result.sql,
-            errors: result.errors,
-            warnings: result.warnings
+            success: executionResult.success,
+            sql: generationResult.sql,
+            executionResult,
+            errors: generationResult.errors
           }
         }));
 
       } catch (error: any) {
-        console.error('Error generating SQL:', error);
+        console.error('Error during run workflow:', error);
         dispatch(addLog({
           level: 'ERROR',
-          message: `❌ SQL generation failed: ${error.message}`,
-          source: 'SQL Generation'
+          message: `❌ Run failed: ${error.message || 'Unknown error'}`,
+          source: 'Run'
         }));
         window.dispatchEvent(new CustomEvent('run-complete', {
           detail: {
@@ -2774,13 +2937,197 @@ console.log('📝 [Canvas Run] Full SQL:', result.sql);
         }));
       }
     };
-
     window.addEventListener('toolbar-run', handleToolbarRun);
 
     return () => {
       window.removeEventListener('toolbar-run', handleToolbarRun);
     };
-  }, [dispatch]); // Note: we don't depend on nodes/edges because they are passed in the event
+  }, [dispatch]);
+
+  // ==================== EDITOR SAVE HANDLERS ====================
+  const updateNodeConfiguration = useCallback((nodeId: string, configUnion: ComponentConfiguration) => {
+    setNodes(prev => {
+      const updatedNodes = prev.map(node => {
+        if (node.id === nodeId) {
+          const updatedMetadata: UnifiedNodeMetadata = {
+            ...node.data.metadata,
+            configuration: configUnion,
+            compilerMetadata: {
+              ...(node.data.metadata?.compilerMetadata || {}),
+              lastModified: new Date().toISOString(),
+            },
+          };
+          const updatedNodeData: CanvasNodeData = {
+            ...node.data,
+            metadata: updatedMetadata,
+          };
+          if (onNodeMetadataUpdate) {
+            onNodeMetadataUpdate(nodeId, updatedMetadata);
+          }
+          return { ...node, data: updatedNodeData };
+        }
+        return node;
+      });
+      syncNodesAndEdges(updatedNodes, edges);
+      return updatedNodes;
+    });
+    debouncedAutoSave();
+    showValidationFeedback('Configuration saved', 'success', { x: 100, y: 100 });
+  }, [onNodeMetadataUpdate, syncNodesAndEdges, edges, debouncedAutoSave, showValidationFeedback]);
+
+  const handleSortEditorSave = useCallback((config: SortComponentConfiguration) => {
+    if (!activeEditor || activeEditor.type !== 'sort') return;
+    const { nodeId } = activeEditor;
+    updateNodeConfiguration(nodeId, { type: 'SORT', config });
+    setActiveEditor(null);
+  }, [activeEditor, updateNodeConfiguration]);
+
+  const handleReplaceEditorSave = useCallback((config: ReplaceComponentConfiguration) => {
+    if (!activeEditor || activeEditor.type !== 'replace') return;
+    const { nodeId } = activeEditor;
+    updateNodeConfiguration(nodeId, { type: 'REPLACE', config });
+    setActiveEditor(null);
+  }, [activeEditor, updateNodeConfiguration]);
+
+  const handleJoinEditorSave = useCallback((config: JoinComponentConfiguration) => {
+    if (!activeEditor || activeEditor.type !== 'join') return;
+    const { nodeId } = activeEditor;
+    updateNodeConfiguration(nodeId, { type: 'JOIN', config });
+    setActiveEditor(null);
+  }, [activeEditor, updateNodeConfiguration]);
+
+  const handleFilterEditorSave = useCallback((config: FilterComponentConfiguration) => {
+    if (!activeEditor || activeEditor.type !== 'filter') return;
+    const { nodeId } = activeEditor;
+    updateNodeConfiguration(nodeId, { type: 'FILTER', config });
+    setActiveEditor(null);
+  }, [activeEditor, updateNodeConfiguration]);
+
+  const handleExtractXMLSave = useCallback((config: ExtractXMLFieldConfiguration) => {
+    if (!activeEditor || activeEditor.type !== 'extractXML') return;
+    const { nodeId } = activeEditor;
+    updateNodeConfiguration(nodeId, { type: 'EXTRACT_XML_FIELD', config });
+    setActiveEditor(null);
+  }, [activeEditor, updateNodeConfiguration]);
+
+  const handleExtractJSONSave = useCallback((config: ExtractJSONFieldsConfiguration) => {
+    if (!activeEditor || activeEditor.type !== 'extractJSON') return;
+    const { nodeId } = activeEditor;
+    updateNodeConfiguration(nodeId, { type: 'EXTRACT_JSON_FIELDS', config });
+    setActiveEditor(null);
+  }, [activeEditor, updateNodeConfiguration]);
+
+  const handleExtractDelimitedSave = useCallback((config: ExtractDelimitedFieldsConfiguration) => {
+    if (!activeEditor || activeEditor.type !== 'extractDelimited') return;
+    const { nodeId } = activeEditor;
+    updateNodeConfiguration(nodeId, { type: 'EXTRACT_DELIMITED', config });
+    setActiveEditor(null);
+  }, [activeEditor, updateNodeConfiguration]);
+
+  const handleConvertEditorSave = useCallback((config: ConvertComponentConfiguration) => {
+    if (!activeEditor || activeEditor.type !== 'convert') return;
+    const { nodeId } = activeEditor;
+    updateNodeConfiguration(nodeId, { type: 'CONVERT', config });
+    setActiveEditor(null);
+  }, [activeEditor, updateNodeConfiguration]);
+
+  const handleAggregateEditorSave = useCallback((config: AggregateComponentConfiguration) => {
+    if (!activeEditor || activeEditor.type !== 'aggregate') return;
+    const { nodeId } = activeEditor;
+    updateNodeConfiguration(nodeId, { type: 'AGGREGATE', config });
+    setActiveEditor(null);
+  }, [activeEditor, updateNodeConfiguration]);
+
+  const handleReplaceListEditorSave = useCallback((config: ReplaceComponentConfiguration) => {
+    if (!activeEditor || activeEditor.type !== 'replaceList') return;
+    updateNodeConfiguration(activeEditor.nodeId, { type: 'REPLACE_LIST', config });
+    setActiveEditor(null);
+  }, [activeEditor, updateNodeConfiguration]);
+
+  const handleNormalizeNumberEditorSave = useCallback((config: NormalizeNumberComponentConfiguration) => {
+    if (!activeEditor || activeEditor.type !== 'normalizeNumber') return;
+    updateNodeConfiguration(activeEditor.nodeId, { type: 'NORMALIZE_NUMBER', config });
+    setActiveEditor(null);
+  }, [activeEditor, updateNodeConfiguration]);
+
+  const handleNormalizeEditorSave = useCallback((config: NormalizeComponentConfiguration) => {
+    if (!activeEditor || activeEditor.type !== 'normalize') return;
+    updateNodeConfiguration(activeEditor.nodeId, { type: 'NORMALIZE', config });
+    setActiveEditor(null);
+  }, [activeEditor, updateNodeConfiguration]);
+
+  const handleReplicateEditorSave = useCallback((config: ReplicateComponentConfiguration) => {
+    if (!activeEditor || activeEditor.type !== 'replicate') return;
+    updateNodeConfiguration(activeEditor.nodeId, { type: 'REPLICATE', config });
+    setActiveEditor(null);
+  }, [activeEditor, updateNodeConfiguration]);
+
+  const handleRecordMatchingEditorSave = useCallback((config: MatchGroupComponentConfiguration) => {
+    if (!activeEditor || activeEditor.type !== 'recordMatching') return;
+    updateNodeConfiguration(activeEditor.nodeId, { type: 'MATCH_GROUP', config });
+    setActiveEditor(null);
+  }, [activeEditor, updateNodeConfiguration]);
+
+  const handleMatchGroupEditorSave = useCallback((config: MatchGroupComponentConfiguration) => {
+    if (!activeEditor || activeEditor.type !== 'matchGroup') return;
+    updateNodeConfiguration(activeEditor.nodeId, { type: 'MATCH_GROUP', config });
+    setActiveEditor(null);
+  }, [activeEditor, updateNodeConfiguration]);
+
+  const handleFilterColumnsEditorSave = useCallback((config: FilterColumnsComponentConfiguration) => {
+    if (!activeEditor || activeEditor.type !== 'filterColumns') return;
+    updateNodeConfiguration(activeEditor.nodeId, { type: 'FILTER_COLUMNS', config });
+    setActiveEditor(null);
+  }, [activeEditor, updateNodeConfiguration]);
+
+  const handleFileLookupEditorSave = useCallback((config: FileLookupComponentConfiguration) => {
+    if (!activeEditor || activeEditor.type !== 'fileLookup') return;
+    updateNodeConfiguration(activeEditor.nodeId, { type: 'FILE_LOOKUP', config });
+    setActiveEditor(null);
+  }, [activeEditor, updateNodeConfiguration]);
+
+  // ==================== NEW SAVE HANDLERS ====================
+  const handleUnpivotRowEditorSave = useCallback((config: UnpivotRowComponentConfiguration) => {
+    if (!activeEditor || activeEditor.type !== 'unpivotRow') return;
+    updateNodeConfiguration(activeEditor.nodeId, { type: 'UNPIVOT_ROW', config });
+    setActiveEditor(null);
+  }, [activeEditor, updateNodeConfiguration]);
+
+  const handleUniteEditorSave = useCallback((config: UniteComponentConfiguration) => {
+    if (!activeEditor || activeEditor.type !== 'unite') return;
+    updateNodeConfiguration(activeEditor.nodeId, { type: 'UNITE', config });
+    setActiveEditor(null);
+  }, [activeEditor, updateNodeConfiguration]);
+
+  const handleUniqRowEditorSave = useCallback((config: UniqRowComponentConfiguration) => {
+    if (!activeEditor || activeEditor.type !== 'uniqRow') return;
+    updateNodeConfiguration(activeEditor.nodeId, { type: 'UNIQ_ROW', config });
+    setActiveEditor(null);
+  }, [activeEditor, updateNodeConfiguration]);
+
+  const handleSplitRowEditorSave = useCallback((config: NormalizeComponentConfiguration) => {
+    if (!activeEditor || activeEditor.type !== 'splitRow') return;
+    updateNodeConfiguration(activeEditor.nodeId, { type: 'NORMALIZE', config }); // SplitRow uses NORMALIZE config
+    setActiveEditor(null);
+  }, [activeEditor, updateNodeConfiguration]);
+
+  const handlePivotToColumnsDelimitedEditorSave = useCallback((config: PivotToColumnsDelimitedConfiguration) => {
+    if (!activeEditor || activeEditor.type !== 'pivotToColumnsDelimited') return;
+    updateNodeConfiguration(activeEditor.nodeId, { type: 'PIVOT_TO_COLUMNS_DELIMITED', config });
+    setActiveEditor(null);
+  }, [activeEditor, updateNodeConfiguration]);
+
+  const handleDenormalizeSortedRowEditorSave = useCallback((config: DenormalizeSortedRowComponentConfiguration) => {
+    if (!activeEditor || activeEditor.type !== 'denormalizeSortedRow') return;
+    updateNodeConfiguration(activeEditor.nodeId, { type: 'DENORMALIZE_SORTED_ROW', config });
+    setActiveEditor(null);
+  }, [activeEditor, updateNodeConfiguration]);
+
+  const handleDenormalizeEditorSave = useCallback((config: DenormalizeComponentConfiguration) => {
+    if (!activeEditor || activeEditor.type !== 'denormalize') return;
+    updateNodeConfiguration(activeEditor.nodeId, { type: 'DENORMALIZE', config });
+    setActiveEditor(null);
+  }, [activeEditor, updateNodeConfiguration]);
 
   // ==================== RENDER COMPONENTS ====================
   const renderConnectionFeedback = () => {
@@ -2903,7 +3250,6 @@ console.log('📝 [Canvas Run] Full SQL:', result.sql);
                       outputTableName: 'matched_output'
                     };
 
-                    // Merge existing metadata to preserve required fields like 'configuration'
                     const existingMetadata = state.selectedNodeForMatchGroupWizard.metadata || {};
                     handleNodeUpdate(state.selectedNodeForMatchGroupWizard.id, {
                       metadata: {
@@ -2926,7 +3272,6 @@ console.log('📝 [Canvas Run] Full SQL:', result.sql);
     );
   };
 
-  // Render auto-save status indicator
   const renderAutoSaveStatus = () => {
     if ((!job && !canvasId) || state.autoSaveStatus === 'idle') return null;
 
@@ -2953,28 +3298,380 @@ console.log('📝 [Canvas Run] Full SQL:', result.sql);
     );
   };
 
+  // ==================== RENDER tMap EDITOR MODAL ====================
+  const renderTMapEditorModal = () => {
+    if (!state.mapEditorState.isOpen || !state.mapEditorState.data) return null;
+
+    const { nodeId, inputColumns, outputColumns } = state.mapEditorState.data;
+    const nodeMetadata = state.mapEditorState.nodeMetadata;
+    const nodeLabel = nodeMetadata?.name || nodeId;
+
+    const initialConfig = nodeMetadata && isMapConfig(nodeMetadata.metadata?.configuration)
+      ? nodeMetadata.metadata.configuration.config
+      : undefined;
+
+    return (
+      <div className="fixed inset-0 z-[9999] bg-black bg-opacity-70 flex items-center justify-center p-4">
+        <motion.div
+          initial={{ opacity: 0, scale: 0.95 }}
+          animate={{ opacity: 1, scale: 1 }}
+          className="bg-white rounded-xl shadow-2xl w-full max-w-6xl h-[90vh] overflow-hidden"
+        >
+          <div className="flex justify-between items-center p-6 border-b bg-gradient-to-r from-blue-50 to-gray-50">
+            <div>
+              <h2 className="text-xl font-bold flex items-center">
+                <span className="mr-2">🗺️</span>
+                Map Editor
+                <span className="ml-2 text-xs bg-purple-100 text-purple-800 px-2 py-0.5 rounded">
+                  Metadata Strategy v1.0
+                </span>
+              </h2>
+              <p className="text-sm text-gray-600 mt-1">
+                Editing tMap node: <span className="font-semibold text-blue-600">{nodeLabel}</span>
+                <span className="ml-3 text-xs bg-gray-100 text-gray-800 px-2 py-0.5 rounded">
+                  {inputColumns.length} input columns • {outputColumns.length} output columns
+                </span>
+                {initialConfig && (
+                  <span className="ml-3 text-xs bg-green-100 text-green-800 px-2 py-0.5 rounded">
+                    {initialConfig.transformations.length} existing transformations
+                  </span>
+                )}
+              </p>
+            </div>
+            <button
+              onClick={closeTMapEditor}
+              className="p-2 hover:bg-gray-100 rounded-full transition-colors"
+              title="Close Map Editor"
+            >
+              <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" />
+              </svg>
+            </button>
+          </div>
+
+          <div className="h-full overflow-hidden">
+            <Suspense fallback={
+              <div className="flex items-center justify-center h-full">
+                <div className="text-center">
+                  <div className="animate-spin rounded-full h-12 w-12 border-b-2 border-blue-500 mx-auto mb-4"></div>
+                  <p className="text-gray-600">Loading Map Editor with Metadata...</p>
+                </div>
+              </div>
+            }>
+              <MapEditor
+                nodeId={nodeId}
+                nodeMetadata={nodeMetadata}
+                inputColumns={inputColumns}
+                outputColumns={outputColumns}
+                initialConfig={initialConfig}
+                onClose={closeTMapEditor}
+                onSave={handleMapEditorSave}
+              />
+            </Suspense>
+          </div>
+        </motion.div>
+      </div>
+    );
+  };
+
+  // ==================== RENDER ACTIVE EDITOR MODALS ====================
+  const renderActiveEditor = () => {
+    if (!activeEditor) return null;
+
+    switch (activeEditor.type) {
+      case 'sort':
+        return (
+          <SortEditor
+            nodeId={activeEditor.nodeId}
+            nodeMetadata={activeEditor.nodeMetadata}
+            inputColumns={activeEditor.inputColumns}
+            initialConfig={activeEditor.initialConfig}
+            onClose={() => setActiveEditor(null)}
+            onSave={handleSortEditorSave}
+          />
+        );
+      case 'replace':
+        return (
+          <ReplaceEditor
+            nodeId={activeEditor.nodeId}
+            nodeMetadata={activeEditor.nodeMetadata}
+            inputColumns={activeEditor.inputColumns}
+            outputColumns={activeEditor.outputColumns}
+            initialConfig={activeEditor.initialConfig}
+            onClose={() => setActiveEditor(null)}
+            onSave={handleReplaceEditorSave}
+          />
+        );
+      case 'join':
+        return (
+          <JoinEditor
+            nodeId={activeEditor.nodeId}
+            nodeName={activeEditor.nodeMetadata.name}
+            leftSchema={activeEditor.leftSchema}
+            rightSchema={activeEditor.rightSchema}
+            initialConfig={activeEditor.initialConfig}
+            onClose={() => setActiveEditor(null)}
+            onSave={handleJoinEditorSave}
+          />
+        );
+      case 'filter':
+        return (
+          <FilterRowConfigModal
+            isOpen={true}
+            onClose={() => setActiveEditor(null)}
+            nodeId={activeEditor.nodeId}
+            nodeName={activeEditor.nodeMetadata.name}
+            inputColumns={activeEditor.inputColumns}
+            initialConfig={activeEditor.initialConfig}
+            onSave={handleFilterEditorSave}
+          />
+        );
+      case 'extractXML':
+        return (
+          <ExtractXMLFieldEditor
+            nodeId={activeEditor.nodeId}
+            nodeName={activeEditor.nodeMetadata.name}
+            inputColumns={activeEditor.inputColumns}
+            initialConfig={activeEditor.initialConfig}
+            onClose={() => setActiveEditor(null)}
+            onSave={handleExtractXMLSave}
+          />
+        );
+      case 'extractJSON':
+        return (
+          <ExtractJSONFieldsEditor
+            nodeId={activeEditor.nodeId}
+            nodeMetadata={activeEditor.nodeMetadata}
+            inputColumns={activeEditor.inputColumns}
+            initialConfig={activeEditor.initialConfig}
+            onClose={() => setActiveEditor(null)}
+            onSave={handleExtractJSONSave}
+          />
+        );
+      case 'extractDelimited':
+        return (
+          <ExtractDelimitedFieldsConfigModal
+            isOpen={true}
+            onClose={() => setActiveEditor(null)}
+            nodeId={activeEditor.nodeId}
+            nodeName={activeEditor.nodeMetadata.name}
+            inputColumns={activeEditor.inputColumns}
+            initialConfig={activeEditor.initialConfig}
+            onSave={handleExtractDelimitedSave}
+          />
+        );
+      case 'convert':
+        return (
+          <ConvertTypeEditor
+            nodeId={activeEditor.nodeId}
+            nodeMetadata={activeEditor.nodeMetadata}
+            inputColumns={activeEditor.inputColumns}
+            outputColumns={activeEditor.outputColumns}
+            initialConfig={activeEditor.initialConfig}
+            onClose={() => setActiveEditor(null)}
+            onSave={handleConvertEditorSave}
+          />
+        );
+      case 'aggregate':
+        return (
+          <AggregateEditor
+            nodeId={activeEditor.nodeId}
+            nodeMetadata={activeEditor.nodeMetadata}
+            inputColumns={activeEditor.inputColumns}
+            initialConfig={activeEditor.initialConfig}
+            onClose={() => setActiveEditor(null)}
+            onSave={handleAggregateEditorSave}
+          />
+        );
+      case 'replaceList':
+        return (
+          <ReplaceListEditor
+            nodeId={activeEditor.nodeId}
+            initialConfig={activeEditor.initialConfig}
+            inputSchema={activeEditor.inputSchema}
+            onSave={handleReplaceListEditorSave}
+            onClose={() => setActiveEditor(null)}
+          />
+        );
+      case 'normalizeNumber':
+        return (
+          <NormalizeNumberEditor
+            nodeId={activeEditor.nodeId}
+            nodeMetadata={activeEditor.nodeMetadata}
+            inputColumns={activeEditor.inputColumns}
+            initialConfig={activeEditor.initialConfig}
+            onClose={() => setActiveEditor(null)}
+            onSave={handleNormalizeNumberEditorSave}
+          />
+        );
+      case 'normalize':
+        return (
+          <NormalizeEditor
+            nodeId={activeEditor.nodeId}
+            nodeMetadata={activeEditor.nodeMetadata}
+            inputColumns={activeEditor.inputColumns}
+            initialConfig={activeEditor.initialConfig}
+            onClose={() => setActiveEditor(null)}
+            onSave={handleNormalizeEditorSave}
+          />
+        );
+      case 'replicate':
+        return (
+          <ReplicateEditor
+            nodeId={activeEditor.nodeId}
+            nodeMetadata={activeEditor.nodeMetadata}
+            inputColumns={activeEditor.inputColumns}
+            initialConfig={activeEditor.initialConfig}
+            onClose={() => setActiveEditor(null)}
+            onSave={handleReplicateEditorSave}
+          />
+        );
+      case 'recordMatching':
+        return (
+          <RecordMatchingEditor
+            nodeId={activeEditor.nodeId}
+            nodeMetadata={activeEditor.nodeMetadata}
+            inputFields={activeEditor.inputFields}
+            initialConfig={activeEditor.initialConfig}
+            onClose={() => setActiveEditor(null)}
+            onSave={handleRecordMatchingEditorSave}
+          />
+        );
+      case 'matchGroup':
+        return (
+          <MatchGroupEditor
+            nodeId={activeEditor.nodeId}
+            nodeMetadata={activeEditor.nodeMetadata}
+            inputColumns={activeEditor.inputColumns}
+            initialConfig={activeEditor.initialConfig}
+            onClose={() => setActiveEditor(null)}
+            onSave={handleMatchGroupEditorSave}
+          />
+        );
+      case 'filterColumns':
+        return (
+          <FilterColumnsEditor
+            isOpen={true}
+            onClose={() => setActiveEditor(null)}
+            onSave={handleFilterColumnsEditorSave}
+            nodeId={activeEditor.nodeId}
+            initialConfig={activeEditor.initialConfig}
+            inputSchema={activeEditor.inputSchema}
+          />
+        );
+      case 'fileLookup':
+        return (
+          <FileLookupEditor
+            nodeId={activeEditor.nodeId}
+            nodeMetadata={activeEditor.nodeMetadata}
+            inputColumns={activeEditor.inputColumns}
+            initialConfig={activeEditor.initialConfig}
+            onClose={() => setActiveEditor(null)}
+            onSave={handleFileLookupEditorSave}
+          />
+        );
+
+      // ==================== NEW CASES ====================
+      case 'unpivotRow':
+        return (
+          <UnpivotRowEditor
+            nodeId={activeEditor.nodeId}
+            nodeMetadata={activeEditor.nodeMetadata}
+            inputColumns={activeEditor.inputColumns}
+            initialConfig={activeEditor.initialConfig}
+            onClose={() => setActiveEditor(null)}
+            onSave={handleUnpivotRowEditorSave}
+          />
+        );
+
+      case 'unite':
+        return (
+          <UniteEditor
+            nodeId={activeEditor.nodeId}
+            nodeMetadata={activeEditor.nodeMetadata}
+            inputSchemas={activeEditor.inputSchemas}
+            initialConfig={activeEditor.initialConfig}
+            onClose={() => setActiveEditor(null)}
+            onSave={handleUniteEditorSave}
+          />
+        );
+
+      case 'uniqRow':
+        return (
+          <UniqRowEditor
+            nodeId={activeEditor.nodeId}
+            nodeMetadata={activeEditor.nodeMetadata}
+            inputColumns={activeEditor.inputColumns}
+            initialConfig={activeEditor.initialConfig}
+            onClose={() => setActiveEditor(null)}
+            onSave={handleUniqRowEditorSave}
+          />
+        );
+
+      case 'splitRow':
+        return (
+          <SplitRowEditor
+            nodeId={activeEditor.nodeId}
+            nodeName={activeEditor.nodeMetadata.name}
+            inputColumns={activeEditor.inputColumns}
+            initialConfig={activeEditor.initialConfig}
+            onClose={() => setActiveEditor(null)}
+            onSave={handleSplitRowEditorSave}
+          />
+        );
+
+      case 'pivotToColumnsDelimited':
+        return (
+          <PivotToColumnsDelimitedEditor
+            nodeId={activeEditor.nodeId}
+            nodeMetadata={activeEditor.nodeMetadata}
+            inputColumns={activeEditor.inputColumns}
+            initialConfig={activeEditor.initialConfig}
+            onClose={() => setActiveEditor(null)}
+            onSave={handlePivotToColumnsDelimitedEditorSave}
+          />
+        );
+
+      case 'denormalizeSortedRow':
+        return (
+          <DenormalizeSortedRowEditor
+            nodeId={activeEditor.nodeId}
+            nodeMetadata={activeEditor.nodeMetadata}
+            inputColumns={activeEditor.inputColumns}
+            initialConfig={activeEditor.initialConfig}
+            onClose={() => setActiveEditor(null)}
+            onSave={handleDenormalizeSortedRowEditorSave}
+          />
+        );
+
+      case 'denormalize':
+        return (
+          <DenormalizeEditor
+            nodeId={activeEditor.nodeId}
+            nodeMetadata={activeEditor.nodeMetadata}
+            inputColumns={activeEditor.inputColumns}
+            initialConfig={activeEditor.initialConfig}
+            onClose={() => setActiveEditor(null)}
+            onSave={handleDenormalizeEditorSave}
+          />
+        );
+
+      default:
+        return null;
+    }
+  };
+
   // ==================== MAIN RENDER ====================
   return (
     <>
-      {/* Role Selection Popup */}
       {renderRoleSelectionPopup()}
-
-      {/* Connection Feedback Overlay */}
       {renderConnectionFeedback()}
-
-      {/* Auto-save Status Indicator */}
       {renderAutoSaveStatus()}
-
-      {/* tMap Editor Modal with Metadata */}
       {renderTMapEditorModal()}
-
-      {/* Map Editor Modal */}
       {renderMapEditorModal()}
-
-      {/* Match Group Wizard */}
       {renderMatchGroupWizard()}
+      {renderActiveEditor()}
 
-      {/* Main React Flow Canvas WITH ENHANCED VALIDATION AND METADATA */}
       <div
         ref={reactFlowWrapper}
         className={`relative w-full h-full canvas-container bg-gray-50`}
@@ -2985,8 +3682,6 @@ console.log('📝 [Canvas Run] Full SQL:', result.sql);
           cursor: 'default'
         }}
       >
-
-        {/* ReactFlow WITH ENHANCED VALIDATION AND METADATA */}
         <ReactFlow
           nodes={nodes}
           edges={edges}
@@ -2996,9 +3691,7 @@ console.log('📝 [Canvas Run] Full SQL:', result.sql);
           onInit={setReactFlowInstance}
           nodeTypes={nodeTypes}
           onSelectionChange={onSelectionChange}
-          // ENHANCED VALIDATION INTEGRATION
           isValidConnection={isValidConnection}
-          // Edge double-click handler
           onEdgeDoubleClick={(event, edge) => {
             event.stopPropagation();
             const customEvent = new CustomEvent('canvas-edge-double-click', {
@@ -3009,25 +3702,18 @@ console.log('📝 [Canvas Run] Full SQL:', result.sql);
             });
             window.dispatchEvent(customEvent);
           }}
-          // UNIFIED REACT FLOW DROP HANDLERS
           onDrop={onDrop}
           onDragOver={onDragOver}
-          // ✅ Viewport change handler for persistence
           onMove={onMove}
-
           connectionMode={ConnectionMode.Loose}
           connectionLineType={ConnectionLineType.SmoothStep}
           snapToGrid={true}
           snapGrid={[15, 15]}
-
-          // ========== FIXED VIEWPORT CONFIGURATION ==========
-          // Set default viewport to 1:1 scale and center
           defaultViewport={{
             x: state.viewport.x,
             y: state.viewport.y,
             zoom: state.viewport.zoom
           }}
-
           minZoom={0.1}
           maxZoom={4}
           defaultEdgeOptions={{
@@ -3114,13 +3800,11 @@ console.log('📝 [Canvas Run] Full SQL:', result.sql);
     stroke-width: 2.5;
   }
 
-  /* Metadata highlight for tMap nodes */
   .react-flow__node-talendNode[data-component-key="tMap"] {
     border-width: 3px;
     border-color: #8b5cf6;
   }
 
-  /* Validation feedback styles */
   .validation-error-handle {
     background-color: #ef4444 !important;
     border-color: #dc2626 !important;
@@ -3136,7 +3820,6 @@ console.log('📝 [Canvas Run] Full SQL:', result.sql);
     border-color: #059669 !important;
   }
 
-  /* Metadata status indicator */
   .metadata-status-indicator {
     position: absolute;
     top: 2px;
@@ -3159,7 +3842,6 @@ console.log('📝 [Canvas Run] Full SQL:', result.sql);
     background-color: #ef4444;
   }
 
-  /* Canvas container should always fill available space */
   .canvas-container {
     position: absolute !important;
     width: 100% !important;
@@ -3170,7 +3852,6 @@ console.log('📝 [Canvas Run] Full SQL:', result.sql);
     bottom: 0;
   }
 
-  /* Ensure React Flow fills the container */
   .react-flow {
     width: 100% !important;
     height: 100% !important;
@@ -3182,7 +3863,6 @@ console.log('📝 [Canvas Run] Full SQL:', result.sql);
     height: 100% !important;
   }
 
-  /* Console overlay compatibility */
   .console-interaction-active .react-flow__viewport,
   .console-interaction-active .react-flow__nodes,
   .console-interaction-active .react-flow__edges,

@@ -310,27 +310,42 @@ const ComponentPalette: React.FC<ComponentPaletteProps> = ({ expandedCategories,
     };
   });
 
-  // Group components by category (transform only for rightPanel)
+  // Group components by category – updated to include all requested components
   const componentCategories: ComponentCategories = {
     mappingTransformation: {
       title: 'Mapping & Transformation',
       icon: React.createElement(Map, { className: "w-4 h-4" }),
       components: paletteComponents.filter(c => 
-        ['tMap', 'tSchemaMapper', 'tTypeConverter', 'tExpression'].includes(c.id)
+        [
+          'tMap', 'tSchemaMapper', 'tTypeConverter', 'tExpression',
+          'tConvertType', 'tReplace', 'tReplaceList', 'tParseRecordSet',
+          'tPivotToColumnsDelimited', 'tUnpivotRow', 'tDenormalizeSortedRow',
+          'tNormalizeNumber', 'tExtractDelimitedFields', 'tExtractRegexFields',
+          'tExtractJSONFields', 'tExtractXMLField'
+        ].includes(c.id)
       )
     },
     rowProcessing: {
       title: 'Row Processing',
       icon: React.createElement(Filter, { className: "w-4 h-4" }),
       components: paletteComponents.filter(c => 
-        ['tFilterRow', 'tSortRow', 'tAggregateRow', 'tNormalize', 'tDenormalize'].includes(c.id)
+        [
+          'tFilterRow', 'tSortRow', 'tAggregateRow', 'tNormalize', 'tDenormalize',
+          'tFilterColumns', 'tUniqRow', 'tSampleRow', 'tSchemaComplianceCheck',
+          'tAddCRCRow', 'tAddCRC', 'tStandardizeRow', 'tSurvivorshipRule',
+          'tDataMasking', 'tRuleSurvivorship', 'tAssert'
+        ].includes(c.id)
       )
     },
     dataCombination: {
       title: 'Data Combination',
       icon: React.createElement(GitMerge, { className: "w-4 h-4" }),
       components: paletteComponents.filter(c => 
-        ['tJoin', 'tSplitRow', 'tMatchGroup'].includes(c.id)
+        [
+          'tJoin', 'tSplitRow', 'tMatchGroup', 'tReplicate', 'tUnite',
+          'tFlowMerge', 'tFlowMeter', 'tFlowMeterCatcher', 'tRecordMatching',
+          'tFileLookup'
+        ].includes(c.id)
       )
     },
     dataQuality: {
@@ -344,7 +359,11 @@ const ComponentPalette: React.FC<ComponentPaletteProps> = ({ expandedCategories,
       title: 'Advanced Processing',
       icon: React.createElement(Cpu, { className: "w-4 h-4" }),
       components: paletteComponents.filter(c => 
-        ['tPivot', 'tUnpivot', 'tRowGenerator', 'tWebService', 'tLookup', 'tCache', 'tHash', 'tEncrypt', 'tDecrypt'].includes(c.id)
+        [
+          'tPivot', 'tUnpivot', 'tRowGenerator', 'tWebService', 'tLookup',
+          'tCache', 'tHash', 'tEncrypt', 'tDecrypt', 'tFlowToIterate',
+          'tIterateToFlow', 'tCacheIn', 'tCacheOut'
+        ].includes(c.id)
       )
     }
   };

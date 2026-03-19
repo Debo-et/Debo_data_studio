@@ -1831,12 +1831,15 @@ private sanitizeIdentifier(identifier: string): string {
    * Get the target table name for an output node.
    * Falls back to sanitized node name.
    */
-  private getTargetTableName(node: CanvasNode): string {
-    // Try to extract from node.metadata.targetTable (if we extend the type)
-    // Fallback to node.name sanitized
-    const name = node.name || node.id;
-    return name.toLowerCase().replace(/\s+/g, '_').replace(/[^a-z0-9_]/g, '');
+private getTargetTableName(node: CanvasNode): string {
+  // 1. Use explicitly stored targetTableName (set in handleToolbarRun)
+  if (node.metadata?.targetTableName) {
+    return node.metadata.targetTableName;
   }
+  // 2. Fallback to node.name (sanitized)
+  const name = node.name || node.id;
+  return name.toLowerCase().replace(/\s+/g, '_').replace(/[^a-z0-9_]/g, '');
+}
 
   // ==================== VALIDATION ====================
 

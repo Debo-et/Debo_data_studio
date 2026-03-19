@@ -48,19 +48,28 @@ export class OutputSQLGenerator extends BaseSQLGenerator {
       };
     }
 
-    const targetTable = config.targetDetails.tableName;
+    // 1. Try configuration's targetDetails.tableName
+    let targetTable = config.targetDetails.tableName;
+
+    // 2. If missing, look for postgresTableName in metadata
+    if (!targetTable) {
+      targetTable = node.metadata?.postgresTableName ||
+                    node.metadata?.fullRepositoryMetadata?.postgresTableName;
+    }
+
+    // 3. Final fallback to node.name (sanitized)
+    if (!targetTable) {
+      targetTable = node.name;
+    }
+
     const targetColumns = config.schemaMapping.map(m => m.targetColumn);
     const columnList = targetColumns.map(c => this.sanitizeIdentifier(c)).join(', ');
 
     let sql = `INSERT INTO ${this.sanitizeIdentifier(targetTable)} (${columnList})\n`;
-
-    // The sourceSQL should be a SELECT statement from the previous node
     sql += sourceSQL;
 
-    // Add ON CONFLICT if specified
-    if (config.writeOptions.createTable && config.targetDetails.mode === 'APPEND') {
-      // no conflict handling
-    } else if (config.targetDetails.mode === 'OVERWRITE') {
+    // Add truncate if overwrite mode
+    if (config.targetDetails.mode === 'OVERWRITE') {
       sql = `TRUNCATE ${this.sanitizeIdentifier(targetTable)};\n` + sql;
     }
 

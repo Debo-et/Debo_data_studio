@@ -478,6 +478,8 @@ export interface NodeMetadata {
   sortConfig?: SortConfig;
   matchGroupConfig?: MatchGroupConfig;
   mapEditorConfig?: MapEditorConfig;
+  targetTableName?: string;
+  sourceTableName?: string; 
   
   // PostgreSQL-specific
   postgresConfig?: {

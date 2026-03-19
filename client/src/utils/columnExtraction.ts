@@ -279,3 +279,4 @@ export const extractColumnsDirectly = (node: Node): Column[] => {
   });
   return extractColumnsFromNodeData(node.data);
 };
+

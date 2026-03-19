@@ -42,8 +42,7 @@ export interface ComponentDefinition {
   defaultDimensions: { width: number; height: number };
   defaultRole: 'INPUT' | 'TRANSFORM' | 'OUTPUT';
   description: string;
-    defaultPorts?: ConnectionPort[];   // ← add this
-                    // or ReactNode if you changed it
+  defaultPorts?: ConnectionPort[];
   source: 'sidebar' | 'rightPanel';
 }
 
@@ -54,7 +53,7 @@ export const COMPONENT_REGISTRY: Record<string, ComponentDefinition> = {
     displayName: 'DelimitedFile',
     icon: <FileText className="w-5 h-5" />,
     category: 'input',
-    defaultDimensions: { width: 30, height: 20 }, // 25% of 120x80
+    defaultDimensions: { width: 30, height: 20 },
     defaultRole: 'INPUT',
     description: 'Read delimited text files (CSV, TSV)',
     source: 'sidebar'
@@ -156,7 +155,7 @@ export const COMPONENT_REGISTRY: Record<string, ComponentDefinition> = {
     displayName: 'tMap',
     icon: <Map className="w-5 h-5" />,
     category: 'transform',
-    defaultDimensions: { width: 35, height: 25 }, // 25% of 140x100
+    defaultDimensions: { width: 35, height: 25 },
     defaultRole: 'TRANSFORM',
     description: 'Map and transform data fields',
     source: 'rightPanel'
@@ -379,6 +378,347 @@ export const COMPONENT_REGISTRY: Record<string, ComponentDefinition> = {
     defaultDimensions: { width: 30, height: 20 },
     defaultRole: 'TRANSFORM',
     description: 'Cache data for performance',
+    source: 'rightPanel'
+  },
+  // ----- Additional transform components from RightPanel -----
+  'tConvertType': {
+    id: 'tConvertType',
+    displayName: 'tConvertType',
+    icon: <Type className="w-5 h-5" />,
+    category: 'transform',
+    defaultDimensions: { width: 30, height: 20 },
+    defaultRole: 'TRANSFORM',
+    description: 'Convert data types with advanced options',
+    source: 'rightPanel'
+  },
+  'tReplace': {
+    id: 'tReplace',
+    displayName: 'tReplace',
+    icon: <Settings className="w-5 h-5" />,
+    category: 'transform',
+    defaultDimensions: { width: 30, height: 20 },
+    defaultRole: 'TRANSFORM',
+    description: 'Replace values in fields',
+    source: 'rightPanel'
+  },
+  'tReplaceList': {
+    id: 'tReplaceList',
+    displayName: 'tReplaceList',
+    icon: <Settings className="w-5 h-5" />,
+    category: 'transform',
+    defaultDimensions: { width: 30, height: 20 },
+    defaultRole: 'TRANSFORM',
+    description: 'Replace multiple values using a list',
+    source: 'rightPanel'
+  },
+  'tParseRecordSet': {
+    id: 'tParseRecordSet',
+    displayName: 'tParseRecordSet',
+    icon: <Layers className="w-5 h-5" />,
+    category: 'transform',
+    defaultDimensions: { width: 30, height: 20 },
+    defaultRole: 'TRANSFORM',
+    description: 'Parse record sets from complex fields',
+    source: 'rightPanel'
+  },
+  'tPivotToColumnsDelimited': {
+    id: 'tPivotToColumnsDelimited',
+    displayName: 'tPivotToColumnsDelimited',
+    icon: <RefreshCw className="w-5 h-5" />,
+    category: 'transform',
+    defaultDimensions: { width: 30, height: 20 },
+    defaultRole: 'TRANSFORM',
+    description: 'Pivot data to delimited columns',
+    source: 'rightPanel'
+  },
+  'tUnpivotRow': {
+    id: 'tUnpivotRow',
+    displayName: 'tUnpivotRow',
+    icon: <RotateCw className="w-5 h-5" />,
+    category: 'transform',
+    defaultDimensions: { width: 30, height: 20 },
+    defaultRole: 'TRANSFORM',
+    description: 'Unpivot rows to columns',
+    source: 'rightPanel'
+  },
+  'tDenormalizeSortedRow': {
+    id: 'tDenormalizeSortedRow',
+    displayName: 'tDenormalizeSortedRow',
+    icon: <Settings className="w-5 h-5" />,
+    category: 'transform',
+    defaultDimensions: { width: 30, height: 20 },
+    defaultRole: 'TRANSFORM',
+    description: 'Denormalize sorted rows',
+    source: 'rightPanel'
+  },
+  'tNormalizeNumber': {
+    id: 'tNormalizeNumber',
+    displayName: 'tNormalizeNumber',
+    icon: <Hash className="w-5 h-5" />,
+    category: 'transform',
+    defaultDimensions: { width: 30, height: 20 },
+    defaultRole: 'TRANSFORM',
+    description: 'Normalize number formats',
+    source: 'rightPanel'
+  },
+  'tExtractDelimitedFields': {
+    id: 'tExtractDelimitedFields',
+    displayName: 'tExtractDelimitedFields',
+    icon: <Columns className="w-5 h-5" />,
+    category: 'transform',
+    defaultDimensions: { width: 30, height: 20 },
+    defaultRole: 'TRANSFORM',
+    description: 'Extract fields from delimited strings',
+    source: 'rightPanel'
+  },
+  'tExtractRegexFields': {
+    id: 'tExtractRegexFields',
+    displayName: 'tExtractRegexFields',
+    icon: <Regex className="w-5 h-5" />,
+    category: 'transform',
+    defaultDimensions: { width: 30, height: 20 },
+    defaultRole: 'TRANSFORM',
+    description: 'Extract fields using regular expressions',
+    source: 'rightPanel'
+  },
+  'tExtractJSONFields': {
+    id: 'tExtractJSONFields',
+    displayName: 'tExtractJSONFields',
+    icon: <FileJson className="w-5 h-5" />,
+    category: 'transform',
+    defaultDimensions: { width: 30, height: 20 },
+    defaultRole: 'TRANSFORM',
+    description: 'Extract fields from JSON data',
+    source: 'rightPanel'
+  },
+  'tExtractXMLField': {
+    id: 'tExtractXMLField',
+    displayName: 'tExtractXMLField',
+    icon: <FileCode className="w-5 h-5" />,
+    category: 'transform',
+    defaultDimensions: { width: 30, height: 20 },
+    defaultRole: 'TRANSFORM',
+    description: 'Extract fields from XML data',
+    source: 'rightPanel'
+  },
+  'tFilterColumns': {
+    id: 'tFilterColumns',
+    displayName: 'tFilterColumns',
+    icon: <Filter className="w-5 h-5" />,
+    category: 'transform',
+    defaultDimensions: { width: 30, height: 20 },
+    defaultRole: 'TRANSFORM',
+    description: 'Filter columns to keep or remove',
+    source: 'rightPanel'
+  },
+  'tUniqRow': {
+    id: 'tUniqRow',
+    displayName: 'tUniqRow',
+    icon: <Layers className="w-5 h-5" />,
+    category: 'transform',
+    defaultDimensions: { width: 30, height: 20 },
+    defaultRole: 'TRANSFORM',
+    description: 'Remove duplicate rows',
+    source: 'rightPanel'
+  },
+  'tSampleRow': {
+    id: 'tSampleRow',
+    displayName: 'tSampleRow',
+    icon: <Layers className="w-5 h-5" />,
+    category: 'transform',
+    defaultDimensions: { width: 30, height: 20 },
+    defaultRole: 'TRANSFORM',
+    description: 'Sample rows from dataset',
+    source: 'rightPanel'
+  },
+  'tSchemaComplianceCheck': {
+    id: 'tSchemaComplianceCheck',
+    displayName: 'tSchemaComplianceCheck',
+    icon: <Shield className="w-5 h-5" />,
+    category: 'transform',
+    defaultDimensions: { width: 30, height: 20 },
+    defaultRole: 'TRANSFORM',
+    description: 'Check rows against schema',
+    source: 'rightPanel'
+  },
+  'tAddCRCRow': {
+    id: 'tAddCRCRow',
+    displayName: 'tAddCRCRow',
+    icon: <Hash className="w-5 h-5" />,
+    category: 'transform',
+    defaultDimensions: { width: 30, height: 20 },
+    defaultRole: 'TRANSFORM',
+    description: 'Add CRC checksum to rows',
+    source: 'rightPanel'
+  },
+  'tAddCRC': {
+    id: 'tAddCRC',
+    displayName: 'tAddCRC',
+    icon: <Hash className="w-5 h-5" />,
+    category: 'transform',
+    defaultDimensions: { width: 30, height: 20 },
+    defaultRole: 'TRANSFORM',
+    description: 'Add CRC checksum',
+    source: 'rightPanel'
+  },
+  'tStandardizeRow': {
+    id: 'tStandardizeRow',
+    displayName: 'tStandardizeRow',
+    icon: <Settings className="w-5 h-5" />,
+    category: 'transform',
+    defaultDimensions: { width: 30, height: 20 },
+    defaultRole: 'TRANSFORM',
+    description: 'Standardize row data',
+    source: 'rightPanel'
+  },
+  'tSurvivorshipRule': {
+    id: 'tSurvivorshipRule',
+    displayName: 'tSurvivorshipRule',
+    icon: <Shield className="w-5 h-5" />,
+    category: 'transform',
+    defaultDimensions: { width: 30, height: 20 },
+    defaultRole: 'TRANSFORM',
+    description: 'Apply survivorship rules',
+    source: 'rightPanel'
+  },
+  'tDataMasking': {
+    id: 'tDataMasking',
+    displayName: 'tDataMasking',
+    icon: <Lock className="w-5 h-5" />,
+    category: 'transform',
+    defaultDimensions: { width: 30, height: 20 },
+    defaultRole: 'TRANSFORM',
+    description: 'Mask sensitive data',
+    source: 'rightPanel'
+  },
+  'tRuleSurvivorship': {
+    id: 'tRuleSurvivorship',
+    displayName: 'tRuleSurvivorship',
+    icon: <Shield className="w-5 h-5" />,
+    category: 'transform',
+    defaultDimensions: { width: 30, height: 20 },
+    defaultRole: 'TRANSFORM',
+    description: 'Rule-based survivorship',
+    source: 'rightPanel'
+  },
+  'tAssert': {
+    id: 'tAssert',
+    displayName: 'tAssert',
+    icon: <Shield className="w-5 h-5" />,
+    category: 'transform',
+    defaultDimensions: { width: 30, height: 20 },
+    defaultRole: 'TRANSFORM',
+    description: 'Assert conditions on data',
+    source: 'rightPanel'
+  },
+  'tReplicate': {
+    id: 'tReplicate',
+    displayName: 'tReplicate',
+    icon: <GitMerge className="w-5 h-5" />,
+    category: 'transform',
+    defaultDimensions: { width: 30, height: 20 },
+    defaultRole: 'TRANSFORM',
+    description: 'Replicate data to multiple outputs',
+    source: 'rightPanel'
+  },
+  'tUnite': {
+    id: 'tUnite',
+    displayName: 'tUnite',
+    icon: <GitMerge className="w-5 h-5" />,
+    category: 'transform',
+    defaultDimensions: { width: 30, height: 20 },
+    defaultRole: 'TRANSFORM',
+    description: 'Unite multiple data streams',
+    source: 'rightPanel'
+  },
+  'tFlowMerge': {
+    id: 'tFlowMerge',
+    displayName: 'tFlowMerge',
+    icon: <GitMerge className="w-5 h-5" />,
+    category: 'transform',
+    defaultDimensions: { width: 30, height: 20 },
+    defaultRole: 'TRANSFORM',
+    description: 'Merge flows',
+    source: 'rightPanel'
+  },
+  'tFlowMeter': {
+    id: 'tFlowMeter',
+    displayName: 'tFlowMeter',
+    icon: <Cpu className="w-5 h-5" />,
+    category: 'transform',
+    defaultDimensions: { width: 30, height: 20 },
+    defaultRole: 'TRANSFORM',
+    description: 'Measure flow metrics',
+    source: 'rightPanel'
+  },
+  'tFlowMeterCatcher': {
+    id: 'tFlowMeterCatcher',
+    displayName: 'tFlowMeterCatcher',
+    icon: <Cpu className="w-5 h-5" />,
+    category: 'transform',
+    defaultDimensions: { width: 30, height: 20 },
+    defaultRole: 'TRANSFORM',
+    description: 'Catch flow meter data',
+    source: 'rightPanel'
+  },
+  'tRecordMatching': {
+    id: 'tRecordMatching',
+    displayName: 'tRecordMatching',
+    icon: <Search className="w-5 h-5" />,
+    category: 'transform',
+    defaultDimensions: { width: 30, height: 20 },
+    defaultRole: 'TRANSFORM',
+    description: 'Match records across datasets',
+    source: 'rightPanel'
+  },
+  'tFileLookup': {
+    id: 'tFileLookup',
+    displayName: 'tFileLookup',
+    icon: <Search className="w-5 h-5" />,
+    category: 'transform',
+    defaultDimensions: { width: 30, height: 20 },
+    defaultRole: 'TRANSFORM',
+    description: 'Lookup data from files',
+    source: 'rightPanel'
+  },
+  'tFlowToIterate': {
+    id: 'tFlowToIterate',
+    displayName: 'tFlowToIterate',
+    icon: <RotateCw className="w-5 h-5" />,
+    category: 'transform',
+    defaultDimensions: { width: 30, height: 20 },
+    defaultRole: 'TRANSFORM',
+    description: 'Convert flow to iterate',
+    source: 'rightPanel'
+  },
+  'tIterateToFlow': {
+    id: 'tIterateToFlow',
+    displayName: 'tIterateToFlow',
+    icon: <RefreshCw className="w-5 h-5" />,
+    category: 'transform',
+    defaultDimensions: { width: 30, height: 20 },
+    defaultRole: 'TRANSFORM',
+    description: 'Convert iterate to flow',
+    source: 'rightPanel'
+  },
+  'tCacheIn': {
+    id: 'tCacheIn',
+    displayName: 'tCacheIn',
+    icon: <HardDrive className="w-5 h-5" />,
+    category: 'transform',
+    defaultDimensions: { width: 30, height: 20 },
+    defaultRole: 'TRANSFORM',
+    description: 'Cache input data',
+    source: 'rightPanel'
+  },
+  'tCacheOut': {
+    id: 'tCacheOut',
+    displayName: 'tCacheOut',
+    icon: <HardDrive className="w-5 h-5" />,
+    category: 'transform',
+    defaultDimensions: { width: 30, height: 20 },
+    defaultRole: 'TRANSFORM',
+    description: 'Cache output data',
     source: 'rightPanel'
   },
   

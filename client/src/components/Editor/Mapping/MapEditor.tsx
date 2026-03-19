@@ -9,7 +9,7 @@ import {
   FieldSchema, 
   DataType,
   MapTransformation,
-  MapComponentConfiguration} from "../../types/metadata";
+  MapComponentConfiguration} from "../../../types/metadata";
 
 // Simplified Column interface for tMap integration
 export interface SimpleColumn {

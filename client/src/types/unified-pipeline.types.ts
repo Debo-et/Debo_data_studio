@@ -5,6 +5,7 @@
 // ============================================================================
 
 import React from 'react'; // ← Added for React.ReactNode
+import { DataType } from './metadata';
 
 // -------------------- ENUMS (from pipeline-types) --------------------
 export enum NodeType {
@@ -333,6 +334,7 @@ export interface MapVariable {
   isConstant: boolean;
 }
 
+
 export interface MapComponentConfiguration {
   version: string;
   transformations: MapTransformation[];
@@ -606,7 +608,660 @@ export interface OutputComponentConfiguration {
   };
 }
 
-// Union type for all component configurations
+// Add to src/types/unified-pipeline.types.ts
+
+export interface ConvertRule {
+  id: string;
+  sourceColumn: string;
+  sourceTable?: string;          // optional, if multiple input tables
+  targetColumn: string;
+  targetType: DataType | PostgreSQLDataType;
+  parameters?: {
+    length?: number;
+    precision?: number;
+    scale?: number;
+    format?: string;
+    defaultValue?: any;
+    nullHandling?: 'KEEP_NULL' | 'DEFAULT' | 'FAIL';
+    onError?: 'SKIP_ROW' | 'FAIL_JOB' | 'USE_DEFAULT' | 'SET_NULL';
+    trim?: boolean;
+    pad?: {
+      direction: 'LEFT' | 'RIGHT';
+      length: number;
+      padChar: string;
+    };
+  };
+  position: number;
+}
+
+export interface ConvertComponentConfiguration {
+  version: string;
+  rules: ConvertRule[];
+  outputSchema: SchemaDefinition;
+  sqlGeneration: {
+    requiresCasting: boolean;
+    usesConditionalLogic: boolean;
+    estimatedRowMultiplier: number;
+  };
+  compilerMetadata: {
+    lastModified: string;
+    createdBy: string;
+    ruleCount: number;
+    validationStatus: 'VALID' | 'WARNING' | 'ERROR';
+    warnings?: string[];
+    dependencies: string[];
+    compiledSql?: string;
+  };
+}
+export interface ExtractDelimitedFieldsConfiguration {
+  version: string;
+  sourceColumn: string;               // The input column containing the delimited string
+  delimiter: string;                   // Delimiter character(s) (e.g., ",", "\t", "|")
+  quoteChar?: string;                   // Optional quote character for CSV style
+  escapeChar?: string;                  // Optional escape character
+  trimWhitespace: boolean;               // Trim whitespace from extracted values
+  nullIfEmpty: boolean;                  // Treat empty string as NULL
+  outputColumns: Array<{
+    id: string;
+    name: string;                        // Output column name
+    type: DataType;                       // Data type (string, integer, date, etc.)
+    length?: number;
+    precision?: number;
+    scale?: number;
+    position: number;                     // Order (1‑based)
+  }>;
+  errorHandling: 'fail' | 'skip' | 'setNull';
+  parallelization: boolean;
+  batchSize?: number;
+  sqlGeneration?: {
+    // Placeholder for future SQL preview
+    extractExpression?: string;
+  };
+  compilerMetadata?: {
+    lastModified: string;
+    // Other metadata
+  };
+}
+
+// ==================== EXTRACT JSON FIELDS CONFIGURATION ====================
+export interface ExtractJSONFieldsConfiguration {
+  version: string;
+  sourceColumn: string;               // The input column containing JSON
+  jsonPath?: string;                   // Optional base JSONPath
+  outputColumns: Array<{
+    id: string;
+    name: string;                        // Output column name
+    jsonPath: string;                    // JSONPath to extract value
+    type: DataType;                       // Data type (STRING, INTEGER, DATE, etc.)
+    length?: number;
+    precision?: number;
+    scale?: number;
+    defaultValue?: string;
+    nullable: boolean;
+  }>;
+  errorHandling: 'fail' | 'skip' | 'setNull';
+  parallelization: boolean;
+  batchSize?: number;
+  sqlGeneration?: {
+    extractExpression?: string;
+  };
+  compilerMetadata?: {
+    lastModified: string;
+    createdBy: string;
+    ruleCount: number;
+    validationStatus: 'VALID' | 'WARNING' | 'ERROR';
+    warnings?: string[];
+    dependencies: string[];
+    compiledSql?: string;
+  };
+}
+// ==================== EXTRACT XML FIELD CONFIGURATION ====================
+export interface XPathExpression {
+  id: string;
+  outputColumn: string;                // Name of the output column
+  xpath: string;                        // XPath expression
+  dataType: DataType;                    // Target data type (STRING, INTEGER, DATE, etc.)
+  length?: number;                       // For string types
+  precision?: number;                    // For numeric types
+  scale?: number;
+  nullable: boolean;
+  defaultValue?: string;
+  position: number;                      // Order in output schema
+}
+
+export interface NamespaceMapping {
+  prefix: string;                        // e.g., "ns"
+  uri: string;                            // e.g., "http://example.com/ns"
+}
+
+export interface ExtractXMLFieldConfiguration {
+  version: string;
+  sourceColumn: string;                   // Name of the input XML column
+  xpathExpressions: XPathExpression[];
+  namespaceMappings: NamespaceMapping[];  // Optional prefix-to-URI mappings
+  errorHandling: 'fail' | 'skipRow' | 'setNull';
+  parallelization: boolean;
+  batchSize?: number;                     // Rows per batch
+  // SQL generation metadata (filled by compiler)
+  sqlGeneration?: {
+    extractExpressions: string[];          // Generated SQL for each column
+  };
+  compilerMetadata?: {
+    lastModified: string;
+    createdBy: string;
+    ruleCount: number;
+    validationStatus: 'VALID' | 'WARNING' | 'ERROR';
+    warnings: string[];
+    dependencies: string[];
+    compiledSql?: string;
+  };
+}
+
+export interface NormalizeComponentConfiguration {
+  version: string;
+  sourceColumn: string;               // the column to normalize
+  delimiter: string;
+  trimValues: boolean;
+  treatEmptyAsNull: boolean;
+  quoteChar?: string;
+  escapeChar?: string;
+  outputColumnName: string;            // name of the normalized value column
+  addRowNumber: boolean;
+  rowNumberColumnName?: string;        // e.g., "row_index"
+  keepColumns: string[];               // list of input columns to propagate
+  errorHandling: 'fail' | 'skip' | 'setNull';
+  batchSize?: number;
+  parallelization: boolean;
+  // SQL generation metadata (filled by compiler)
+  sqlGeneration?: {
+    unnestExpression: string;
+  };
+  compilerMetadata?: {
+    lastModified: string;
+    createdBy: string;
+    validationStatus: 'VALID' | 'WARNING' | 'ERROR';
+    warnings?: string[];
+  };
+}
+
+export interface UniqRowComponentConfiguration {
+  version: string;
+  /** Fields that define a unique row */
+  keyFields: string[];
+  /** Which occurrence to keep */
+  keepStrategy: 'FIRST' | 'LAST';
+  /** Whether NULLs in key fields are considered equal */
+  treatNullsAsEqual: boolean;
+  /** Optional sort order to determine first/last (if empty, natural order is used) */
+  sortFields?: Array<{ field: string; direction: 'ASC' | 'DESC' }>;
+  /** Whether to add a column with the duplicate count */
+  outputDuplicateCount?: boolean;
+  /** Name of the duplicate count column (if enabled) */
+  duplicateCountColumnName?: string;
+  /** SQL generation metadata (filled by compiler) */
+  sqlGeneration?: {
+    distinctClause: string;
+    windowFunction?: string;
+    orderByClause?: string;
+  };
+  compilerMetadata?: {
+    lastModified: string;
+    createdBy: string;
+    validationStatus: 'VALID' | 'WARNING' | 'ERROR';
+    warnings?: string[];
+    dependencies: string[];
+  };
+}
+
+// ==================== tFilterColumns Configuration ====================
+export interface FilterColumn {
+  id: string;                   // unique identifier
+  originalName: string;         // name as it comes from input
+  newName?: string;             // optional rename
+  selected: boolean;            // whether to keep the column
+  position: number;             // order in output schema
+}
+
+export interface FilterColumnsComponentConfiguration {
+  version: string;
+  columns: FilterColumn[];      // complete list (selected ones form output)
+  options: {
+    caseSensitive: boolean;     // when matching columns (if needed)
+    keepAllByDefault: boolean;  // if true, all columns are initially selected
+    errorOnMissingColumn: boolean;  // fail if an expected column is missing
+  };
+  outputSchema: SchemaDefinition;   // derived from selected columns
+  sqlGeneration: {
+    selectClause: string;       // generated SELECT clause
+    estimatedRowMultiplier: number;
+  };
+  compilerMetadata: {
+    lastModified: string;
+    createdBy: string;
+    validationStatus: 'VALID' | 'WARNING' | 'ERROR';
+    warnings: string[];
+    dependencies: string[];     // input columns used
+  };
+}
+
+
+export interface FileLookupComponentConfiguration {
+  version: string;
+  file: {
+    path: string;
+    format: 'CSV' | 'EXCEL' | 'JSON' | 'PARQUET' | 'AVRO';
+    options: Record<string, any>; // e.g., delimiter, sheet, header row
+  };
+  keyMappings: Array<{
+    inputField: string;          // field from main flow
+    fileColumn: string;           // column in lookup file
+    operator?: '=' | '!=' | '<' | '>' | '<=' | '>=';
+  }>;
+  returnFields: Array<{
+    fileColumn: string;
+    outputName: string;            // name in output schema
+    dataType?: DataType;            // optional override
+  }>;
+  cache: {
+    enabled: boolean;
+    size: number;                  // max entries
+    ttlSeconds?: number;            // time-to-live (0 = infinite)
+    type: 'LRU' | 'FIFO' | 'NONE';
+  };
+  fallback: {
+    onMissing: 'NULL' | 'DEFAULT' | 'FAIL';
+    defaultValue?: any;              // used if onMissing = 'DEFAULT'
+  };
+  errorHandling: 'FAIL' | 'SKIP_ROW' | 'LOG_CONTINUE';
+  parallelization: {
+    enabled: boolean;
+    maxThreads: number;
+    batchSize: number;
+  };
+  outputSchema: SchemaDefinition;   // derived from input + return fields
+  sqlGeneration?: {
+    joinExpression?: string;         // SQL fragment for lookup
+  };
+  compilerMetadata: {
+    lastModified: string;
+    validationStatus: 'VALID' | 'WARNING' | 'ERROR';
+    warnings: string[];
+  };
+}
+
+export interface ReplicateComponentConfiguration {
+  version: string;
+  /** Whether to add a branch identifier column */
+  addBranchIdentifier?: boolean;
+  /** Name of the branch identifier column (default "branch_id") */
+  branchIdentifierColumnName?: string;
+  /** Output schema (derived from input) */
+  outputSchema: SchemaDefinition;
+  /** SQL generation hints */
+  sqlGeneration?: {
+    passthrough: boolean;
+    estimatedRowMultiplier: number;
+  };
+  /** Compiler metadata */
+  compilerMetadata: {
+    lastModified: string;
+    createdBy: string;
+    validationStatus: 'VALID' | 'WARNING' | 'ERROR';
+    warnings?: string[];
+  };
+}
+
+export interface UniteComponentConfiguration {
+  version: string;
+  /** Union mode: ALL (include duplicates) or DISTINCT (remove duplicates) */
+  unionMode: 'ALL' | 'DISTINCT';
+  /** Whether to add a column identifying the source flow */
+  addSourceColumn: boolean;
+  /** Name of the source column (required if addSourceColumn = true) */
+  sourceColumnName?: string;
+  /** Data type of the source column (default STRING) */
+  sourceColumnType?: DataType;
+  /** How to handle schema differences: 
+   * - 'strict' – all input schemas must be identical
+   * - 'flexible' – union of all columns (missing columns become NULL)
+   */
+  schemaHandling: 'strict' | 'flexible';
+  /** Compiler metadata (filled automatically) */
+  compilerMetadata?: {
+    lastModified: string;
+    createdBy: string;
+    validationStatus: 'VALID' | 'WARNING' | 'ERROR';
+    warnings?: string[];
+    dependencies: string[];
+  };
+}
+
+export interface UnpivotRowComponentConfiguration {
+  version: string;
+  /** Columns to keep as is (key columns) */
+  keyColumns: string[];
+  /** Columns to unpivot into rows */
+  unpivotColumns: string[];
+  /** Name of the output column that will hold the original column names */
+  columnNameColumn: string;    // e.g. "attribute"
+  /** Name of the output column that will hold the values */
+  valueColumn: string;         // e.g. "value"
+  /** Optional data type for the value column (if not specified, uses input type) */
+  valueDataType?: DataType;
+  /** Whether to include rows where the value is NULL */
+  nullHandling: 'INCLUDE' | 'EXCLUDE';
+  /** Generated output schema */
+  outputSchema: SchemaDefinition;
+  /** SQL generation hints */
+  sqlGeneration: {
+    requiresUnnest: boolean;
+    estimatedRowMultiplier: number;
+    parallelizable: boolean;
+  };
+  /** Compiler metadata */
+  compilerMetadata: {
+    lastModified: string;
+    createdBy: string;
+    keyCount: number;
+    unpivotCount: number;
+    validationStatus: 'VALID' | 'WARNING' | 'ERROR';
+    warnings: string[];
+    dependencies: string[];
+    compiledSql?: string;
+  };
+}
+
+export interface DenormalizeSortedRowComponentConfiguration {
+  version: string;
+  groupByFields: string[];
+  sortKeys: Array<{
+    field: string;
+    direction: 'ASC' | 'DESC';
+    nullsFirst: boolean;
+    position: number;
+  }>;
+  denormalizedColumns: Array<{
+    sourceField: string;
+    outputField: string;
+    aggregation: 'FIRST' | 'LAST' | 'ARRAY' | 'STRING_AGG' | 'JSON_AGG' | 'OBJECT_AGG' | 'SUM' | 'AVG' | 'MIN' | 'MAX';
+    separator?: string;          // for STRING_AGG
+    distinct?: boolean;           // optional, for ARRAY_AGG DISTINCT
+  }>;
+  outputSchema: SchemaDefinition;
+  errorHandling: 'fail' | 'skip' | 'setNull';
+  batchSize: number;
+  parallelization: boolean;
+  compilerMetadata: {
+    lastModified: string;
+    validationStatus: 'VALID' | 'WARNING' | 'ERROR';
+    warnings: string[];
+    dependencies: string[];
+    estimatedOutputRows?: number;
+    compiledSql?: string;
+  };
+}
+
+export enum MatchType {
+  EXACT = 'exact',
+  FUZZY = 'fuzzy',
+  EXACT_IGNORE_CASE = 'exact_ignore_case',
+  SOUNDEX = 'soundex',
+  METAPHONE = 'metaphone',
+  LEVENSHTEIN = 'levenshtein',
+  JARO_WINKLER = 'jaro_winkler',
+}
+
+export enum SurvivorshipRuleType {
+  FIRST = 'first',
+  LAST = 'last',
+  MAX = 'max',
+  MIN = 'min',
+  SUM = 'sum',
+  AVG = 'avg',
+  CONCAT = 'concat',
+  MOST_FREQUENT = 'most_frequent',
+  ANY_NON_NULL = 'any_non_null',
+  COALESCE = 'coalesce',
+}
+
+export interface MatchKey {
+  id: string;
+  field: string;                     // input field name
+  matchType: MatchType;
+  threshold?: number;                 // for fuzzy (0.0-1.0)
+  caseSensitive: boolean;
+  ignoreNull: boolean;
+  weight?: number;                    // relative importance
+  blockingKey?: boolean;               // use for blocking (performance)
+}
+
+export interface SurvivorshipRule {
+  id: string;
+  field: string;                      // output field name
+  ruleType: SurvivorshipRuleType;
+  params?: {
+    separator?: string;                // for CONCAT
+    orderBy?: string;                  // field to determine FIRST/LAST
+    orderDirection?: 'ASC' | 'DESC';
+    defaultValue?: any;
+  };
+  sourceField?: string;                // if output field name differs from input
+}
+
+export interface MatchGroupComponentConfiguration {
+  version: string;
+  matchKeys: MatchKey[];
+  survivorshipRules: SurvivorshipRule[];
+  outputFields: string[];               // subset of fields to include (if empty, all input fields with survivorship)
+  globalOptions: {
+    matchThreshold?: number;              // overall confidence threshold (0-1)
+    maxMatchesPerRecord?: number;         // limit matches
+    nullHandling: 'match' | 'no_match' | 'ignore';
+    outputMode: 'all_matches' | 'best_match' | 'groups_only';
+    includeMatchDetails: boolean;          // add column with match info
+    parallelization: boolean;
+    batchSize: number;
+  };
+  sqlGeneration?: {
+    groupByClause?: string;
+    matchExpression?: string;
+    survivorshipExpressions?: Record<string, string>;
+  };
+  compilerMetadata: {
+    lastModified: string;
+    createdBy: string;
+    matchKeyCount: number;
+    ruleCount: number;
+    validationStatus: 'VALID' | 'WARNING' | 'ERROR';
+    warnings?: string[];
+    dependencies: string[];
+    compiledSql?: string;
+  };
+}
+export interface ExtractRegexRule {
+  id: string;
+  groupIndex: number;          // 1-based capturing group index
+  columnName: string;
+  dataType: DataType;           // e.g., STRING, INTEGER, DECIMAL, DATE, BOOLEAN
+  length?: number;              // for string types
+  precision?: number;           // for decimal
+  scale?: number;               // for decimal
+  nullable: boolean;
+  defaultValue?: string;
+  position: number;             // order in output schema
+}
+
+export interface ExtractRegexFieldsConfiguration {
+  version: string;
+  sourceColumn: string;          // name of input column
+  regexPattern: string;
+  caseInsensitive: boolean;
+  multiline: boolean;
+  dotAll: boolean;
+  rules: ExtractRegexRule[];     // one per capturing group
+  errorHandling: {
+    onNoMatch: 'fail' | 'skipRow' | 'useDefault';
+    onConversionError: 'fail' | 'skipRow' | 'setNull';
+  };
+  parallelization: boolean;
+  batchSize?: number;
+  outputSchema: SchemaDefinition; // derived from rules
+  sqlGeneration?: {
+    canPushDown: boolean;        // whether regex can be executed in DB (depends on dialect)
+    estimatedRowMultiplier: number;
+  };
+  compilerMetadata: {
+    lastModified: string;
+    createdBy: string;
+    validationStatus: 'VALID' | 'WARNING' | 'ERROR';
+    warnings: string[];
+    dependencies: string[];      // input columns used
+    compiledSql?: string;
+  };
+}
+
+
+// src/types/unified-pipeline.types.ts
+
+export interface ParseRecordSetColumn {
+  id: string;
+  name: string;                // output column name
+  type: DataType;               // e.g., STRING, INTEGER, DATE
+  length?: number;
+  precision?: number;
+  scale?: number;
+  nullable: boolean;
+  defaultValue?: string;
+  position: number;             // order in the output schema
+  // optionally, a field index (1‑based) if the source has no header
+  fieldIndex?: number;
+}
+
+export interface ParseRecordSetComponentConfiguration {
+  version: string;
+
+  // Input column selection
+  sourceColumn: string;          // name of the column containing the record set
+
+  // Delimiter settings
+  recordDelimiter: string;        // e.g., "\n", "|", "~"
+  fieldDelimiter: string;          // e.g., ",", "\t"
+  quoteChar?: string;              // optional quote character for quoted fields
+  escapeChar?: string;             // optional escape character
+
+  // Header handling
+  hasHeader: boolean;              // whether the first record contains column names
+  // If hasHeader = false, the user must define columns manually (with fieldIndex)
+  // If hasHeader = true, the column names are taken from the first record,
+  // but the user can still override types, etc.
+
+  // Data cleaning
+  trimWhitespace: boolean;         // trim values after splitting
+  nullIfEmpty: boolean;            // treat empty strings as NULL
+
+  // Output column definitions (if hasHeader = false, these are required)
+  columns: ParseRecordSetColumn[];
+
+  // Error handling & performance
+  errorHandling: 'fail' | 'skipRow' | 'setNull';
+  parallelization: boolean;
+  batchSize?: number;
+
+  // Generated output schema (filled by the system)
+  outputSchema: SchemaDefinition;
+
+  // SQL generation metadata (filled by compiler)
+  sqlGeneration?: {
+    unnestExpression?: string;      // PostgreSQL UNNEST with regexp_split_to_table
+    estimatedRowMultiplier: number;
+  };
+
+  // Compiler metadata
+  compilerMetadata: {
+    lastModified: string;
+    createdBy: string;
+    validationStatus: 'VALID' | 'WARNING' | 'ERROR';
+    warnings: string[];
+    dependencies: string[];          // input columns used
+    compiledSql?: string;
+  };
+}
+export interface NormalizeNumberRule {
+  id: string;
+  sourceColumn: string;
+  targetColumn: string;               // output column name (may be same as source)
+  method: 'minmax' | 'zscore' | 'decimalscaling' | 'log' | 'robust' | 'round' | 'custom';
+  parameters?: {
+    // Min‑Max
+    min?: number;
+    max?: number;
+    // Logarithm
+    logBase?: 'e' | '10';
+    // Round / Ceil / Floor
+    decimalPlaces?: number;
+    roundingMode?: 'round' | 'ceil' | 'floor';
+    // Custom expression
+    expression?: string;               // SQL expression using {column} placeholders
+  };
+  nullHandling: 'KEEP_NULL' | 'DEFAULT_VALUE' | 'ERROR';
+  defaultValue?: number | string;
+  outlierHandling?: 'CLIP' | 'REMOVE' | 'NONE';
+  outputDataType: PostgreSQLDataType;  // target PostgreSQL data type
+  position: number;                    // order in output schema
+}
+
+export interface NormalizeNumberComponentConfiguration {
+  version: string;
+  rules: NormalizeNumberRule[];
+  globalOptions?: {
+    nullHandling?: 'KEEP_NULL' | 'DEFAULT_VALUE' | 'ERROR';
+    outlierHandling?: 'CLIP' | 'REMOVE' | 'NONE';
+    defaultDataType?: PostgreSQLDataType;
+  };
+  outputSchema: SchemaDefinition;
+  sqlGeneration: {
+    requiresCustomExpression: boolean;
+    estimatedRowMultiplier: number;
+    parallelizable: boolean;
+  };
+  compilerMetadata: {
+    lastModified: string;
+    createdBy: string;
+    ruleCount: number;
+    validationStatus: 'VALID' | 'WARNING' | 'ERROR';
+    warnings?: string[];
+    dependencies: string[];
+    compiledSql?: string;
+  };
+}
+
+export interface DenormalizeComponentConfiguration {
+  version: string;
+  sourceColumn: string;
+  delimiter: string;
+  trimValues: boolean;
+  treatEmptyAsNull: boolean;
+  quoteChar?: string;
+  escapeChar?: string;
+  outputColumnName: string;
+  addRowNumber: boolean;
+  rowNumberColumnName?: string;
+  keepColumns: string[];
+  errorHandling: 'fail' | 'skip' | 'setNull';
+  batchSize?: number;
+  parallelization: boolean;
+  sqlGeneration?: {
+    unnestExpression: string;
+  };
+  compilerMetadata?: {
+    lastModified: string;
+    createdBy: string;
+    validationStatus: 'VALID' | 'WARNING' | 'ERROR';
+    warnings?: string[];
+  };
+}
+
+// Update ComponentConfiguration union:
 export type ComponentConfiguration =
   | { type: 'MAP'; config: MapComponentConfiguration }
   | { type: 'JOIN'; config: JoinComponentConfiguration }
@@ -616,10 +1271,163 @@ export type ComponentConfiguration =
   | { type: 'SORT'; config: SortComponentConfiguration }
   | { type: 'INPUT'; config: InputComponentConfiguration }
   | { type: 'OUTPUT'; config: OutputComponentConfiguration }
-  | { type: 'OTHER'; config: Record<string, any> };
+  | { type: 'CONVERT'; config: ConvertComponentConfiguration }
+  | { type: 'REPLACE'; config: ReplaceComponentConfiguration }
+  | { type: 'REPLACE_LIST'; config: ReplaceComponentConfiguration }              // ✅ added
+  | { type: 'FILTER_COLUMNS'; config: FilterColumnsComponentConfiguration }      // ✅ added
+  | { type: 'PIVOT_TO_COLUMNS_DELIMITED'; config: PivotToColumnsDelimitedConfiguration } // ✅ added
+  | { type: 'DENORMALIZE'; config: DenormalizeComponentConfiguration }           // ✅ added
+  | { type: 'OTHER'; config: Record<string, any> }
+  | { type: 'EXTRACT_DELIMITED'; config: ExtractDelimitedFieldsConfiguration }
+  | { type: 'EXTRACT_JSON_FIELDS'; config: ExtractJSONFieldsConfiguration }
+  | { type: 'EXTRACT_XML_FIELD'; config: ExtractXMLFieldConfiguration }
+  | { type: 'NORMALIZE'; config: NormalizeComponentConfiguration }
+  | { type: 'FILE_LOOKUP'; config: FileLookupComponentConfiguration }
+  | { type: 'REPLICATE'; config: ReplicateComponentConfiguration }
+  | { type: 'UNITE'; config: UniteComponentConfiguration }
+  | { type: 'UNIQ_ROW'; config: UniqRowComponentConfiguration }
+  | { type: 'UNPIVOT_ROW'; config: UnpivotRowComponentConfiguration }
+  | { type: 'MATCH_GROUP'; config: MatchGroupComponentConfiguration }
+  | { type: 'EXTRACT_REGEX_FIELDS'; config: ExtractRegexFieldsConfiguration }
+  | { type: 'DENORMALIZE_SORTED_ROW'; config: DenormalizeSortedRowComponentConfiguration }
+  | { type: 'NORMALIZE_NUMBER'; config: NormalizeNumberComponentConfiguration }; // ✅ only one
 
-// -------------------- FIELD / SCHEMA DEFINITIONS (from metadata.ts) --------------------
-export type DataType = 'STRING' | 'INTEGER' | 'DECIMAL' | 'BOOLEAN' | 'DATE' | 'TIMESTAMP' | 'BINARY';
+// Type guard
+export function isReplaceConfig(config: ComponentConfiguration): config is { type: 'REPLACE'; config: ReplaceComponentConfiguration } {
+  return config.type === 'REPLACE';
+}
+
+export function isExtractDelimitedConfig(
+  config: ComponentConfiguration
+): config is { type: 'EXTRACT_DELIMITED'; config: ExtractDelimitedFieldsConfiguration } {
+  return config.type === 'EXTRACT_DELIMITED';
+}
+
+export function isExtractXMLFieldConfig(config: ComponentConfiguration): config is { type: 'EXTRACT_XML_FIELD'; config: ExtractXMLFieldConfiguration } {
+  return config.type === 'EXTRACT_XML_FIELD';
+}
+
+export function isNormalizeConfig(config: ComponentConfiguration): config is { type: 'NORMALIZE'; config: NormalizeComponentConfiguration } {
+  return config.type === 'NORMALIZE';
+}
+
+export function isUniqRowConfig(config: ComponentConfiguration): config is { type: 'UNIQ_ROW'; config: UniqRowComponentConfiguration } {
+  return config.type === 'UNIQ_ROW';
+}
+
+
+export function isFileLookupConfig(
+  config: ComponentConfiguration
+): config is { type: 'FILE_LOOKUP'; config: FileLookupComponentConfiguration } {
+  return config.type === 'FILE_LOOKUP';
+}
+
+export function isReplicateConfig(
+  config: ComponentConfiguration
+): config is { type: 'REPLICATE'; config: ReplicateComponentConfiguration } {
+  return config.type === 'REPLICATE';
+}
+
+export function isUniteConfig(config: ComponentConfiguration): config is { type: 'UNITE'; config: UniteComponentConfiguration } {
+  return config.type === 'UNITE';
+}
+
+export function isUnpivotRowConfig(config: ComponentConfiguration): config is { type: 'UNPIVOT_ROW'; config: UnpivotRowComponentConfiguration } {
+  return config.type === 'UNPIVOT_ROW';
+}
+
+export function isDenormalizeSortedRowConfig(config: ComponentConfiguration): config is { type: 'DENORMALIZE_SORTED_ROW'; config: DenormalizeSortedRowComponentConfiguration } {
+  return config.type === 'DENORMALIZE_SORTED_ROW';
+}
+
+export function isMatchGroupConfig(config: ComponentConfiguration): config is { type: 'MATCH_GROUP'; config: MatchGroupComponentConfiguration } {
+  return config.type === 'MATCH_GROUP';
+}
+
+
+export function isNormalizeNumberConfig(
+  config: ComponentConfiguration
+): config is { type: 'NORMALIZE_NUMBER'; config: NormalizeNumberComponentConfiguration } {
+  return config.type === 'NORMALIZE_NUMBER';
+}
+
+export interface PivotToColumnsDelimitedConfiguration {
+  version: string;                      // e.g., "1.0"
+
+  // Input column selection
+  sourceColumn: string;                  // Column containing delimited data
+
+  // Delimiter settings
+  delimiter: string;                      // Between pairs (default: ",")
+  keyValueSeparator: string;              // Between key and value (default: ":")
+
+  // Column generation strategy
+  columnGeneration: 'fromKeys' | 'fixedList';
+  fixedColumns?: string[];                 // Required if columnGeneration = 'fixedList'
+
+  // Missing key handling
+  missingKeyHandling: 'omit' | 'null' | 'default';
+  defaultValue?: string;                   // Used if missingKeyHandling = 'default'
+
+  // Value type conversion (applied to all pivoted values)
+  valueType: 'string' | 'integer' | 'decimal' | 'date' | 'boolean';
+
+  // Optional column prefix
+  columnPrefix?: string;                    // e.g., "pivot_" → pivot_name, pivot_age
+
+  // Data cleaning options
+  trimWhitespace: boolean;                  // Trim keys and values
+  caseSensitiveKeys: boolean;               // Treat "Name" and "name" as different
+
+  // Advanced execution options
+  errorHandling: 'fail' | 'skip' | 'setNull';
+  parallelization: boolean;
+  batchSize?: number;                        // Rows per batch
+
+  // Compiler metadata (filled by the system)
+  compilerMetadata?: {
+    lastModified: string;
+    validationStatus: 'VALID' | 'WARNING' | 'ERROR';
+    warnings?: string[];
+  };
+}
+
+export interface ReplaceRule {
+  id: string;
+  column: string;
+  searchValue: string;
+  replacement: string;
+  caseSensitive: boolean;
+  regex: boolean;
+  scope: 'all' | 'first' | 'last';
+  position: number;
+}
+
+export interface ReplaceComponentConfiguration {
+  version: string;
+  rules: ReplaceRule[];
+  globalOptions?: {
+    errorHandling?: 'fail' | 'skip' | 'default';
+    emptyValueHandling?: 'skip' | 'default' | 'null';
+    parallelization?: boolean;
+    maxThreads?: number;
+    batchSize?: number;
+  };
+  outputSchema: SchemaDefinition;
+  sqlGeneration: {
+    requiresRegex?: boolean;
+    estimatedRowMultiplier?: number;
+  };
+  compilerMetadata: {
+    lastModified: string;
+    createdBy: string;
+    ruleCount: number;
+    validationStatus: 'VALID' | 'WARNING' | 'ERROR';
+    warnings?: string[];
+    dependencies: string[];
+    compiledSql?: string;
+  };
+}
 
 export interface FieldSchema {
   id: string;
@@ -950,3 +1758,6 @@ export function toUnifiedCanvasNode(oldNode: any): UnifiedCanvasNode {
     visualProperties: oldNode.visualProperties,
   };
 }
+
+export type { DataType };
+

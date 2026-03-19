@@ -8,11 +8,23 @@ export class InputSQLGenerator extends BaseSQLGenerator {
     const config = this.getInputConfig(node);
     if (!config) return this.fallbackSelect(node);
 
-    const sourceDetails = config.sourceDetails;
-    const tableName = sourceDetails.tableName || node.name;
+    // 1. Try configuration's sourceDetails.tableName
+    let tableName = config.sourceDetails.tableName;
+
+    // 2. If missing, look for postgresTableName in metadata
+    if (!tableName) {
+      tableName = node.metadata?.postgresTableName ||
+                  node.metadata?.fullRepositoryMetadata?.postgresTableName;
+    }
+
+    // 3. Final fallback to node.name
+    if (!tableName) {
+      tableName = node.name;
+    }
+
     const schema = node.metadata?.schemas?.output;
 
-    // Build column list from schema or fallback to *
+    // Build column list from schema or fallback to '*'
     let selectClause = '*';
     if (schema?.fields?.length) {
       const columns = schema.fields.map(f => this.sanitizeIdentifier(f.name)).join(', ');
@@ -83,9 +95,13 @@ export class InputSQLGenerator extends BaseSQLGenerator {
   }
 
   private fallbackSelect(node: UnifiedCanvasNode): GeneratedSQLFragment {
+    // Fallback to node.name if configuration is missing
+    const tableName = node.metadata?.postgresTableName ||
+                      node.metadata?.fullRepositoryMetadata?.postgresTableName ||
+                      node.name;
     return {
-      sql: `SELECT * FROM ${this.sanitizeIdentifier(node.name)}`,
-      dependencies: [node.name],
+      sql: `SELECT * FROM ${this.sanitizeIdentifier(tableName)}`,
+      dependencies: [tableName],
       parameters: new Map(),
       errors: [],
       warnings: ['No input configuration found, using fallback'],

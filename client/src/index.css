@@ -604,3 +604,122 @@ body.console-resizing-active .react-flow__viewport {
 .talend-node.selected {
   box-shadow: 0 0 0 3px #3b82f6, 0 6px 20px rgba(0, 0, 0, 0.15) !important;
 }
+
+/* ===== Canvas Component Styles ===== */
+@keyframes fadeIn {
+  from { opacity: 0; transform: translateY(-10px); }
+  to { opacity: 1; transform: translateY(0); }
+}
+
+.animate-fadeIn {
+  animation: fadeIn 0.3s ease-out;
+}
+
+.react-flow__node-talendNode {
+  transform-box: fill-box !important;
+  transform-origin: center !important;
+  box-sizing: border-box !important;
+}
+
+.react-flow__node-talendNode:hover {
+  transform: translateY(-1px) scale(1.02);
+  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.12);
+}
+
+.react-flow__node-talendNode.selected {
+  box-shadow: 0 0 0 2px #3b82f6, 0 4px 12px rgba(0, 0, 0, 0.12);
+  z-index: 10;
+}
+
+.react-flow__handle {
+  opacity: 0.7;
+  transition: opacity 0.2s ease, transform 0.2s ease;
+  border: 1.5px solid white;
+  width: 8px !important;
+  height: 8px !important;
+}
+
+.react-flow__handle:hover {
+  opacity: 1;
+  transform: scale(1.2);
+}
+
+.react-flow__edge-path {
+  stroke-width: 2;
+  stroke: #4b5563;
+}
+
+.react-flow__edge.selected .react-flow__edge-path {
+  stroke: #3b82f6;
+  stroke-width: 2.5;
+}
+
+.react-flow__node-talendNode[data-component-key="tMap"] {
+  border-width: 3px;
+  border-color: #8b5cf6;
+}
+
+.validation-error-handle {
+  background-color: #ef4444 !important;
+  border-color: #dc2626 !important;
+}
+
+.validation-warning-handle {
+  background-color: #f59e0b !important;
+  border-color: #d97706 !important;
+}
+
+.validation-valid-handle {
+  background-color: #10b981 !important;
+  border-color: #059669 !important;
+}
+
+.metadata-status-indicator {
+  position: absolute;
+  top: 2px;
+  right: 2px;
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  z-index: 10;
+}
+
+.metadata-valid {
+  background-color: #10b981;
+}
+
+.metadata-warning {
+  background-color: #f59e0b;
+}
+
+.metadata-error {
+  background-color: #ef4444;
+}
+
+.canvas-container {
+  position: absolute !important;
+  width: 100% !important;
+  height: 100% !important;
+  top: 0;
+  left: 0;
+  right: 0;
+  bottom: 0;
+}
+
+.react-flow {
+  width: 100% !important;
+  height: 100% !important;
+  position: absolute !important;
+}
+
+.react-flow__pane {
+  width: 100% !important;
+  height: 100% !important;
+}
+
+.console-interaction-active .react-flow__viewport,
+.console-interaction-active .react-flow__nodes,
+.console-interaction-active .react-flow__edges,
+.console-interaction-active .react-flow__pane {
+  pointer-events: none !important;
+}

@@ -4,7 +4,9 @@ import { Router, Request, Response } from 'express';
 import { databaseService } from '../database/services/database.service';
 import cors from 'cors';
 import corsOptions from '../config/cors';
+import { saveDatabaseMetadata } from '../database/services/metadata.service';
 import { createForeignTableInPostgres, dropForeignTable } from '../database/services/foreign-table.service';
+import { getAllMetadataEntries } from '../database/services/metadata.service';
 
 const router = Router();
 
@@ -41,6 +43,31 @@ router.post('/test-connection', cors(corsOptions), async (req: Request, res: Res
     });
   }
 });
+
+router.get('/metadata', cors(corsOptions), async (_req: Request, res: Response): Promise<void> => {
+  try {
+    const result = await getAllMetadataEntries();
+    res.json(result);
+  } catch (error) {
+    res.status(500).json({
+      success: false,
+      error: error instanceof Error ? error.message : String(error),
+    });
+  }
+});
+
+router.post('/metadata', cors(corsOptions), async (req: Request, res: Response): Promise<void> => {
+  try {
+    const result = await saveDatabaseMetadata(req.body);
+    res.json(result);
+  } catch (error) {
+    res.status(500).json({
+      success: false,
+      error: error instanceof Error ? error.message : String(error),
+    });
+  }
+});
+
 
 // Connect to database
 router.post('/connect', cors(corsOptions), async (req: Request, res: Response): Promise<void> => {
@@ -159,18 +186,16 @@ router.get('/:connectionId/info', cors(corsOptions), async (req: Request, res: R
 // ===========================================================================
 
 // Execute SQL query
-// database.routes.ts – updated POST /:connectionId/query
 router.post('/:connectionId/query', cors(corsOptions), async (req: Request, res: Response): Promise<void> => {
   try {
     const { connectionId } = req.params;
-    const { sql, params, options } = req.body;   // <-- extract params
+    const { sql, params, options } = req.body;
 
     if (!connectionId || !sql) {
       res.status(400).json({ success: false, error: 'Missing connectionId or sql' });
       return;
     }
 
-    // Merge params into options so they can be passed down
     const queryOptions = { ...options, params };
     const result = await databaseService.executeQuery(connectionId, sql, queryOptions);
     res.json(result);
@@ -179,6 +204,11 @@ router.post('/:connectionId/query', cors(corsOptions), async (req: Request, res:
   }
 });
 
+// ===========================================================================
+// Foreign Table Operations
+// ===========================================================================
+
+// Create foreign table
 router.post('/create-foreign-table', cors(corsOptions), async (req: Request, res: Response): Promise<void> => {
   try {
     const { 
@@ -190,15 +220,21 @@ router.post('/create-foreign-table', cors(corsOptions), async (req: Request, res
       options 
     } = req.body;
     
-    if (!connectionId || !tableName || !columns || !fileType || !filePath) {
+    // Basic validation: connectionId, tableName, columns, fileType are always required
+    if (!connectionId || !tableName || !columns || !fileType) {
       res.status(400).json({ 
         success: false, 
-        error: 'Missing required parameters: connectionId, tableName, columns, fileType, filePath' 
+        error: 'Missing required parameters: connectionId, tableName, columns, fileType' 
       });
       return;
     }
 
-    console.log(`📝 Creating foreign table: ${tableName} for ${fileType} file`);
+    // If it's a database source, filePath may be empty or missing; we'll treat that as valid.
+    // For file sources, we still need a non-empty filePath.
+    // The service function will handle the validation and decide which SQL to generate.
+    // So we just pass everything along.
+
+    console.log(`📝 Creating foreign table: ${tableName} for ${fileType} source`);
 
     // Use the existing localPostgres connection pool
     const result = await createForeignTableInPostgres(
@@ -206,7 +242,7 @@ router.post('/create-foreign-table', cors(corsOptions), async (req: Request, res
       tableName,
       columns,
       fileType,
-      filePath,
+      filePath || '',   // ensure string, empty if missing
       options
     );
 

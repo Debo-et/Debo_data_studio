@@ -29,6 +29,14 @@ export interface ForeignTableOptions {
   encoding?: string;
   pattern?: string;
   recordLength?: string;
+  // Database connection options (used when source is a database)
+  host?: string;
+  port?: string;
+  dbname?: string;
+  user?: string;
+  password?: string;
+  schema_name?: string;
+  table_name?: string;
   [key: string]: string | undefined;
 }
 
@@ -125,6 +133,80 @@ export function mapToPostgresType(
 }
 
 /**
+ * Set of database types that are treated as remote sources.
+ * Used to determine whether to generate a foreign table for a database connection.
+ */
+export const DATABASE_TYPES = new Set([
+  'postgresql', 'postgres', 'mysql', 'oracle', 'sqlserver', 'mssql',
+  'db2', 'sap-hana', 'hana', 'sybase', 'netezza', 'informix', 'firebird'
+]);
+
+/**
+ * Returns the correct FDW server name for a given database type.
+ * - PostgreSQL → 'postgres_fdw'
+ * - Others → 'ogr_fdw'
+ */
+export function getFDWServerForDatabaseType(dbType: string): string {
+  const lowerType = dbType.toLowerCase();
+  return (lowerType === 'postgresql' || lowerType === 'postgres')
+    ? 'postgres_fdw'
+    : 'ogr_fdw';
+}
+
+/**
+ * Builds a connection string for ogr_fdw based on the source database type.
+ * This string is passed as the 'datasource' option.
+ */
+export function buildOgrConnectionString(dbType: string, config: ForeignTableOptions): string {
+  const lowerType = dbType.toLowerCase();
+  switch (lowerType) {
+    case 'postgresql':
+    case 'postgres':
+      return `PG:host=${config.host} port=${config.port} dbname=${config.dbname} user=${config.user} password=${config.password}`;
+    case 'mysql':
+      return `MySQL:host=${config.host} port=${config.port} dbname=${config.dbname} user=${config.user} password=${config.password}`;
+    case 'oracle':
+      // OCI format: user/password@host:port/service
+      return `OCI:${config.user}/${config.password}@${config.host}:${config.port}/${config.dbname}`;
+    case 'sqlserver':
+    case 'mssql':
+      return `MSSQL:Server=${config.host},${config.port};Database=${config.dbname};User Id=${config.user};Password=${config.password}`;
+    default:
+      // Fallback to a generic PG‑style string – may need adjustment for other DBs
+      return `PG:host=${config.host} port=${config.port} dbname=${config.dbname} user=${config.user} password=${config.password}`;
+  }
+}
+
+/**
+ * Builds the OPTIONS clause for a database foreign table.
+ * For PostgreSQL sources, uses standard postgres_fdw options.
+ * For others, uses ogr_fdw with a datasource connection string.
+ */
+export function buildDatabaseFDWOptions(
+  dbType: string,
+  options: ForeignTableOptions = {}
+): string {
+  const lowerType = dbType.toLowerCase();
+  if (lowerType === 'postgresql' || lowerType === 'postgres') {
+    const opts = [];
+    if (options.host) opts.push(`host '${options.host}'`);
+    if (options.port) opts.push(`port '${options.port}'`);
+    if (options.dbname) opts.push(`dbname '${options.dbname}'`);
+    if (options.user) opts.push(`user '${options.user}'`);
+    if (options.password) opts.push(`password '${options.password}'`);
+    if (options.schema_name) opts.push(`schema_name '${options.schema_name}'`);
+    if (options.table_name) opts.push(`table_name '${options.table_name}'`);
+    return opts.join(',\n  ');
+  } else {
+    // ogr_fdw
+    const connectionString = buildOgrConnectionString(dbType, options);
+    const opts = [`datasource '${connectionString}'`];
+    if (options.table_name) opts.push(`table_name '${options.table_name}'`);
+    return opts.join(',\n  ');
+  }
+}
+
+/**
  * Sanitize PostgreSQL identifier (table name, column name, etc.)
  */
 export function sanitizePostgresIdentifier(identifier: string): string {
@@ -171,7 +253,7 @@ export function getFDWServerForFileType(fileType: string): string {
 }
 
 /**
- * Build FDW options for CREATE FOREIGN TABLE statement
+ * Build FDW options for CREATE FOREIGN TABLE statement (file‑based sources)
  */
 export function buildFDWOptions(
   filePath: string,
@@ -225,7 +307,8 @@ export function buildFDWOptions(
 }
 
 /**
- * Generate CREATE FOREIGN TABLE SQL statement
+ * Generate CREATE FOREIGN TABLE SQL statement.
+ * Supports both file‑based and database sources.
  */
 export function generateForeignTableSQL(
   tableName: string,
@@ -255,11 +338,21 @@ export function generateForeignTableSQL(
     })
     .join(',\n  ');
 
-  const fdwServer = getFDWServerForFileType(fileType);
-  const fdwOptions = buildFDWOptions(filePath, fileType, options);
+  let fdwServer: string;
+  let fdwOptions: string;
 
-  return `-- Auto-generated foreign table for ${fileType} file
--- Source: ${filePath}
+  const isDatabaseSource = filePath === '' && DATABASE_TYPES.has(fileType.toLowerCase());
+
+  if (isDatabaseSource) {
+    fdwServer = getFDWServerForDatabaseType(fileType);
+    fdwOptions = buildDatabaseFDWOptions(fileType, options);
+  } else {
+    fdwServer = getFDWServerForFileType(fileType);
+    fdwOptions = buildFDWOptions(filePath, fileType, options);
+  }
+
+  return `-- Auto-generated foreign table for ${isDatabaseSource ? 'database' : fileType} source
+-- Source: ${isDatabaseSource ? `database ${fileType}` : filePath}
 -- Generated: ${new Date().toISOString()}
 -- Table: ${tableName}
 
@@ -269,12 +362,12 @@ CREATE FOREIGN TABLE IF NOT EXISTS ${sanitizedTableName} (
   ${fdwOptions}
 );
 
-COMMENT ON FOREIGN TABLE ${sanitizedTableName} IS 'Foreign table for ${fileType}: ${filePath} (created ${new Date().toISOString()})';
+COMMENT ON FOREIGN TABLE ${sanitizedTableName} IS 'Foreign table for ${isDatabaseSource ? fileType : fileType} source (created ${new Date().toISOString()})';
 `;
 }
 
 /**
- * ✅ FIXED: Execute SQL using the provided DatabaseApiService instance
+ * Execute SQL using the provided DatabaseApiService instance
  */
 export async function executeSQLViaApiService(
   apiService: DatabaseApiService,

@@ -32,7 +32,6 @@ import {
   AlertCircle,
   Cpu,
   Search,
-  Shield,
   GitMerge,
   Filter,
   Map} from 'lucide-react';
@@ -317,8 +316,7 @@ const ComponentPalette: React.FC<ComponentPaletteProps> = ({ expandedCategories,
       icon: React.createElement(Map, { className: "w-4 h-4" }),
       components: paletteComponents.filter(c => 
         [
-          'tMap', 'tSchemaMapper', 'tTypeConverter', 'tExpression',
-          'tConvertType', 'tReplace', 'tReplaceList', 'tParseRecordSet',
+          'tMap', 'tConvertType', 'tReplace', 'tReplaceList', 'tParseRecordSet',
           'tPivotToColumnsDelimited', 'tUnpivotRow', 'tDenormalizeSortedRow',
           'tNormalizeNumber', 'tExtractDelimitedFields', 'tExtractRegexFields',
           'tExtractJSONFields', 'tExtractXMLField'
@@ -332,8 +330,8 @@ const ComponentPalette: React.FC<ComponentPaletteProps> = ({ expandedCategories,
         [
           'tFilterRow', 'tSortRow', 'tAggregateRow', 'tNormalize', 'tDenormalize',
           'tFilterColumns', 'tUniqRow', 'tSampleRow', 'tSchemaComplianceCheck',
-          'tAddCRCRow', 'tAddCRC', 'tStandardizeRow', 'tSurvivorshipRule',
-          'tDataMasking', 'tRuleSurvivorship', 'tAssert'
+          'tAddCRCRow', 'tStandardizeRow', 'tSurvivorshipRule',
+          'tDataMasking',  
         ].includes(c.id)
       )
     },
@@ -342,17 +340,9 @@ const ComponentPalette: React.FC<ComponentPaletteProps> = ({ expandedCategories,
       icon: React.createElement(GitMerge, { className: "w-4 h-4" }),
       components: paletteComponents.filter(c => 
         [
-          'tJoin', 'tSplitRow', 'tMatchGroup', 'tReplicate', 'tUnite',
-          'tFlowMerge', 'tFlowMeter', 'tFlowMeterCatcher', 'tRecordMatching',
+          'tJoin', 'tSplitRow', 'tMatchGroup', 'tReplicate', 'tUnite', 'tRecordMatching',
           'tFileLookup'
         ].includes(c.id)
-      )
-    },
-    dataQuality: {
-      title: 'Data Quality',
-      icon: React.createElement(Shield, { className: "w-4 h-4" }),
-      components: paletteComponents.filter(c => 
-        ['tDataQuality', 'tRegexExtract'].includes(c.id)
       )
     },
     advancedProcessing: {
@@ -360,9 +350,8 @@ const ComponentPalette: React.FC<ComponentPaletteProps> = ({ expandedCategories,
       icon: React.createElement(Cpu, { className: "w-4 h-4" }),
       components: paletteComponents.filter(c => 
         [
-          'tPivot', 'tUnpivot', 'tRowGenerator', 'tWebService', 'tLookup',
-          'tCache', 'tHash', 'tEncrypt', 'tDecrypt', 'tFlowToIterate',
-          'tIterateToFlow', 'tCacheIn', 'tCacheOut'
+          'tPivot', 'tUnpivot', 'tRowGenerator','tLookup',
+          'tCache', 'tCacheIn', 'tCacheOut'
         ].includes(c.id)
       )
     }
@@ -1174,119 +1163,6 @@ const NodePropertiesPanel: React.FC<{ onClose: () => void }> = ({ onClose }) => 
   );
 };
 
-// ==================== JOB PROPERTIES PANEL ====================
-const JobPropertiesPanel: React.FC<{ job: any; onClose: () => void }> = ({ job, onClose }) => {
-  const [jobName, setJobName] = useState(job?.name || 'Untitled Job');
-  const [jobDescription, setJobDescription] = useState(job?.description || '');
-  
-  const handleSaveJob = () => {
-    console.log('Job saved:', { jobName, jobDescription });
-  };
-  
-  return (
-    <div className="h-full overflow-y-auto p-4 space-y-6">
-      <Card className="bg-gray-800/50 border-gray-700 backdrop-blur-sm">
-        <CardHeader className="pb-3">
-          <div className="flex items-center justify-between">
-            <div className="flex items-center space-x-2">
-              <div className="p-2 rounded-lg bg-gradient-to-br from-purple-500 to-pink-600 shadow-md">
-                <SettingsIcon className="h-4 w-4 text-white" />
-              </div>
-              <div>
-                <CardTitle className="text-lg text-white">Job Properties</CardTitle>
-                <CardDescription className="text-gray-400">
-                  Configure current job
-                </CardDescription>
-              </div>
-            </div>
-            <Button
-              variant="ghost"
-              size="sm"
-              onClick={onClose}
-              className="h-8 w-8 p-0 text-gray-400 hover:text-white hover:bg-gray-700/50"
-              title="Close Job Properties"
-            >
-              <X className="h-4 w-4" />
-            </Button>
-          </div>
-        </CardHeader>
-        <CardContent className="space-y-4">
-          <div className="space-y-2">
-            <Label htmlFor="job-name">Job Name</Label>
-            <Input
-              id="job-name"
-              value={jobName}
-              onChange={(e) => setJobName(e.target.value)}
-              placeholder="Enter job name..."
-              className="bg-gray-700 border-gray-600 text-white"
-            />
-          </div>
-          
-          <div className="space-y-2">
-            <Label htmlFor="job-description">Description</Label>
-            <Textarea
-              id="job-description"
-              value={jobDescription}
-              onChange={(e) => setJobDescription(e.target.value)}
-              placeholder="Describe this job..."
-              rows={3}
-              className="bg-gray-700 border-gray-600 text-white"
-            />
-          </div>
-          
-          <div className="pt-4">
-            <Button 
-              onClick={handleSaveJob}
-              className="w-full bg-gradient-to-r from-purple-600 to-pink-600 hover:from-purple-700 hover:to-pink-700 text-white"
-            >
-              Save Job Properties
-            </Button>
-          </div>
-        </CardContent>
-      </Card>
-      
-      {job && (
-        <Card className="bg-gray-800/50 border-gray-700 backdrop-blur-sm">
-          <CardHeader>
-            <CardTitle className="text-lg text-white">Job Info</CardTitle>
-          </CardHeader>
-          <CardContent className="space-y-3">
-            <div className="flex justify-between">
-              <span className="text-gray-400">Created:</span>
-              <span className="text-white">
-                {job.createdAt ? new Date(job.createdAt).toLocaleDateString() : 'N/A'}
-              </span>
-            </div>
-            <div className="flex justify-between">
-              <span className="text-gray-400">Last Modified:</span>
-              <span className="text-white">
-                {job.lastModified ? new Date(job.lastModified).toLocaleDateString() : 'N/A'}
-              </span>
-            </div>
-            <div className="flex justify-between">
-              <span className="text-gray-400">Status:</span>
-              <Badge 
-                variant="secondary" 
-                className={
-                  job.state === 'draft' ? 'bg-yellow-500/20 text-yellow-300 border-yellow-500/30' :
-                  job.state === 'running' ? 'bg-blue-500/20 text-blue-300 border-blue-500/30' :
-                  job.state === 'completed' ? 'bg-green-500/20 text-green-300 border-green-500/30' :
-                  'bg-gray-500/20 text-gray-300 border-gray-500/30'
-                }
-              >
-                {job.state || 'draft'}
-              </Badge>
-            </div>
-            <div className="flex justify-between">
-              <span className="text-gray-400">Nodes:</span>
-              <span className="text-white">{job.nodes?.length || 0}</span>
-            </div>
-          </CardContent>
-        </Card>
-      )}
-    </div>
-  );
-};
 
 // ==================== MAIN RIGHT PANEL ====================
 const RightPanel: React.FC<RightPanelProps> = ({ currentJob = null }) => {
@@ -1466,18 +1342,7 @@ const RightPanel: React.FC<RightPanelProps> = ({ currentJob = null }) => {
             </p>
           </div>
         ) : null}
-        
-        {activeView === 'job-properties' && currentJob ? (
-          <JobPropertiesPanel job={currentJob} onClose={() => handleViewChange('components')} />
-        ) : activeView === 'job-properties' && !currentJob ? (
-          <div className="h-full flex flex-col items-center justify-center p-6 text-center">
-            <Database className="h-12 w-12 text-gray-600 mb-4" />
-            <h3 className="text-lg font-medium text-white mb-2">No Job Active</h3>
-            <p className="text-sm text-gray-400">
-              Create or open a job to view job properties
-            </p>
-          </div>
-        ) : null}
+
       </div>
     </motion.div>
   );

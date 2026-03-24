@@ -418,6 +418,35 @@ async executeQuery(
     }
   }
 
+  async saveDatabaseMetadata(metadata: any): Promise<{ success: boolean; metadataEntryId?: string; error?: string }> {
+  try {
+    const response = await this.api.post('/api/database/metadata', metadata);
+    return response.data;
+  } catch (error: any) {
+    console.error('Failed to save database metadata:', error);
+    return {
+      success: false,
+      error: this.getErrorMessage(error),
+    };
+  }
+}
+
+async getDatabaseMetadataEntries(): Promise<{
+  success: boolean;
+  entries?: any[];
+  error?: string;
+}> {
+  try {
+    const response = await this.api.get('/api/database/metadata');
+    return response.data;
+  } catch (error: any) {
+    return {
+      success: false,
+      error: this.getErrorMessage(error),
+    };
+  }
+}
+
   /**
    * List all foreign tables in the database
    */

@@ -1261,6 +1261,196 @@ export interface DenormalizeComponentConfiguration {
   };
 }
 
+export interface SampleRowComponentConfiguration {
+  version: string;
+  samplingMethod: 'firstRows' | 'percentage' | 'random';
+  sampleValue: number;          // e.g., 10 rows or 25 (for percentage)
+  randomSeed?: number;          // optional, for reproducibility
+  // Optional advanced settings
+  ignoreEmptyRows?: boolean;
+  includeHeader?: boolean;
+  // Output schema derived from input
+  outputSchema: SchemaDefinition;
+  // SQL generation hints
+  sqlGeneration?: {
+    limitClause?: string;       // e.g., "LIMIT 10"
+    sampleClause?: string;      // e.g., "TABLESAMPLE SYSTEM(10)"
+    estimatedRowMultiplier: number;
+  };
+  compilerMetadata: {
+    lastModified: string;
+    createdBy: string;
+    validationStatus: 'VALID' | 'WARNING' | 'ERROR';
+    warnings?: string[];
+    dependencies: string[];
+    compiledSql?: string;
+  };
+}
+
+// ----------------------------------------------------------------------
+// tSchemaComplianceCheck Configuration
+// ----------------------------------------------------------------------
+
+export interface ComplianceValidationRule {
+  id: string;                     // unique identifier
+  type: 'type' | 'null' | 'pattern' | 'expression' | 'range' | 'custom';
+  params?: Record<string, any>;
+  errorMessage?: string;          // custom error message if rule fails
+}
+
+export interface ExpectedColumn {
+  id: string;
+  name: string;                   // expected column name
+  dataType: DataType;             // expected PostgreSQL data type
+  nullable: boolean;              // if false, presence of NULL causes failure
+  length?: number;                // for string types
+  precision?: number;             // for numeric/decimal
+  scale?: number;
+  // additional validation rules (optional)
+  validationRules?: ComplianceValidationRule[];
+  // custom SQL expression to validate the column (e.g., "age > 0 AND age < 120")
+  expression?: string;
+  // whether this column is required to exist in the input
+  required: boolean;
+  // default value to use if column is missing (and required=false)
+  defaultValue?: string;
+}
+
+export interface SchemaComplianceCheckConfiguration {
+  version: string;
+
+  // Expected schema definition
+  expectedSchema: ExpectedColumn[];
+
+  // Validation mode
+  mode: 'strict' | 'lenient';
+  // strict: all columns must exactly match the expected schema (no extra columns)
+  // lenient: extra columns are ignored, missing columns use default if provided
+
+  // Action when a row fails validation
+  errorHandling: 'fail' | 'skipRow' | 'rejectFlow' | 'markInvalid';
+  // fail          : stop the job
+  // skipRow       : discard the row (no output)
+  // rejectFlow    : send invalid rows to a separate reject output
+  // markInvalid   : add a boolean column (e.g., "_valid") to indicate compliance
+
+  // If errorHandling = 'rejectFlow', define the reject output schema
+  rejectOutput?: {
+    enabled: boolean;
+    schema: SchemaDefinition;     // will be auto‑generated from input + error columns
+    addErrorDetails: boolean;     // add columns like "_error_messages", "_failed_rules"
+  };
+
+  // Output schema (for valid rows). If not specified, it's the input schema.
+  outputSchema?: SchemaDefinition;
+
+  // Additional options
+  options?: {
+    caseSensitiveColumnNames?: boolean;   // default false
+    trimWhitespace?: boolean;              // trim values before validation
+    nullIfEmptyString?: boolean;           // treat "" as NULL
+    continueOnFirstError?: boolean;        // stop validation after first failure per row
+    maxErrorsPerRow?: number;              // limit error collection
+  };
+
+  // SQL generation hints (filled by compiler)
+  sqlGeneration?: {
+    whereClause?: string;                 // generated filter for valid rows
+    rejectWhereClause?: string;           // generated filter for reject rows
+    estimatedRowMultiplier: number;
+  };
+
+  compilerMetadata: {
+    lastModified: string;
+    createdBy: string;
+    validationStatus: 'VALID' | 'WARNING' | 'ERROR';
+    warnings?: string[];
+    dependencies: string[];
+    compiledSql?: string;
+  };
+}
+
+
+export interface AddCRCRowComponentConfiguration {
+  version: string;                     // e.g., "1.0"
+
+  /** Which columns to include in CRC calculation (empty = all columns) */
+  includedColumns: string[];
+
+  /** CRC algorithm to use */
+  algorithm: 'CRC32' | 'CRC16' | 'CRC8';
+
+  /** Name of the output column for CRC value (e.g., "crc") */
+  outputColumnName: string;
+
+  /** How to handle NULL values in input columns */
+  nullHandling: 'SKIP_ROW' | 'USE_DEFAULT' | 'TREAT_AS_EMPTY';
+
+  /** Default value to use if nullHandling = USE_DEFAULT (applies per column) */
+  defaultValue?: string;
+
+  /** Character encoding for string conversion (default UTF-8) */
+  characterEncoding?: string;
+
+  /** Whether to compute CRC on the entire row (concatenated values) */
+  computeOnWholeRow?: boolean;
+
+  /** Optional separator to use when concatenating columns for whole row */
+  columnSeparator?: string;
+
+  /** Output schema (input columns + new CRC column) */
+  outputSchema: SchemaDefinition;
+
+  /** SQL generation hints (filled by compiler) */
+  sqlGeneration?: {
+    canPushDown: boolean;
+    requiresExpression: boolean;
+  };
+
+  /** Compiler metadata */
+  compilerMetadata: {
+    lastModified: string;
+    createdBy: string;
+    validationStatus: 'VALID' | 'WARNING' | 'ERROR';
+    warnings?: string[];
+    dependencies: string[];
+    compiledSql?: string;
+  };
+}
+
+export interface DataMaskingRule {
+  id: string;
+  column: string;
+  maskingType: 'REPLACE' | 'RANDOM' | 'NULLIFY' | 'HASH' | 'EMAIL' | 'CREDIT_CARD' | 'PHONE' | 'SSN' | 'CUSTOM';
+  parameters?: {
+    replaceValue?: string;          // for REPLACE
+    randomType?: 'STRING' | 'NUMBER' | 'UUID';
+    randomLength?: number;
+    hashAlgorithm?: 'MD5' | 'SHA1' | 'SHA256' | 'SHA512';
+    customExpression?: string;      // SQL expression for CUSTOM
+  };
+  position: number;
+}
+
+export interface DataMaskingComponentConfiguration {
+  version: string;
+  rules: DataMaskingRule[];
+  outputSchema: SchemaDefinition;
+  sqlGeneration?: {
+    selectExpressions: string[];
+    estimatedRowMultiplier: number;
+  };
+  compilerMetadata: {
+    lastModified: string;
+    createdBy: string;
+    ruleCount: number;
+    validationStatus: 'VALID' | 'WARNING' | 'ERROR';
+    warnings?: string[];
+    dependencies: string[];
+    compiledSql?: string;
+  };
+}
+
 // Update ComponentConfiguration union:
 export type ComponentConfiguration =
   | { type: 'MAP'; config: MapComponentConfiguration }
@@ -1290,7 +1480,11 @@ export type ComponentConfiguration =
   | { type: 'MATCH_GROUP'; config: MatchGroupComponentConfiguration }
   | { type: 'EXTRACT_REGEX_FIELDS'; config: ExtractRegexFieldsConfiguration }
   | { type: 'DENORMALIZE_SORTED_ROW'; config: DenormalizeSortedRowComponentConfiguration }
-  | { type: 'NORMALIZE_NUMBER'; config: NormalizeNumberComponentConfiguration }; // ✅ only one
+  | { type: 'SAMPLE_ROW'; config: SampleRowComponentConfiguration }
+  | { type: 'NORMALIZE_NUMBER'; config: NormalizeNumberComponentConfiguration }
+  | { type: 'ADD_CRC_ROW'; config: AddCRCRowComponentConfiguration }
+  | { type: 'DATA_MASKING'; config: DataMaskingComponentConfiguration }
+  | { type: 'SCHEMA_COMPLIANCE_CHECK'; config: SchemaComplianceCheckConfiguration };// ✅ only one
 
 // Type guard
 export function isReplaceConfig(config: ComponentConfiguration): config is { type: 'REPLACE'; config: ReplaceComponentConfiguration } {
@@ -1351,6 +1545,27 @@ export function isNormalizeNumberConfig(
   return config.type === 'NORMALIZE_NUMBER';
 }
 
+export function isSampleRowConfig(
+  config: ComponentConfiguration
+): config is { type: 'SAMPLE_ROW'; config: SampleRowComponentConfiguration } {
+  return config.type === 'SAMPLE_ROW';
+}
+
+export function isSchemaComplianceCheckConfig(
+  config: ComponentConfiguration
+): config is { type: 'SCHEMA_COMPLIANCE_CHECK'; config: SchemaComplianceCheckConfiguration } {
+  return config.type === 'SCHEMA_COMPLIANCE_CHECK';
+}
+
+export function isAddCRCRowConfig(
+  config: ComponentConfiguration
+): config is { type: 'ADD_CRC_ROW'; config: AddCRCRowComponentConfiguration } {
+  return config.type === 'ADD_CRC_ROW';
+}
+
+export function isDataMaskingConfig(config: ComponentConfiguration): config is { type: 'DATA_MASKING'; config: DataMaskingComponentConfiguration } {
+  return config.type === 'DATA_MASKING';
+}
 export interface PivotToColumnsDelimitedConfiguration {
   version: string;                      // e.g., "1.0"
 

@@ -1925,7 +1925,52 @@ const handleSaveXMLMetadata = useCallback(async (metadata: any) => {
     toast.error(`❌ ${error.message}`);
   }
 }, [apiService, isConnected, testConnection, convertFileViaBackend]);
+
+
+function createDatabaseTableNode(
+  tableDef: any,
+  localTableName: string,
+  connectionId: string,
+  remoteDbType: string,
+  remoteConn: any,
+  schema: string
+): RepositoryNode {
+  const columns = (tableDef.columns || []).map((col: any) => ({
+    name: col.name,
+    dataType: col.type,
+    type: col.type,
+    length: col.length,
+    precision: col.precision,
+    scale: col.scale,
+    nullable: col.nullable ?? true,
+    defaultValue: col.defaultValue,
+  }));
+
+  const nodeId = `${remoteDbType}-${Date.now()}-${Math.random().toString(36).substring(2, 8)}`;
+
+  return {
+    id: nodeId,
+    name: tableDef.tablename, // original remote table name
+    type: 'item',
+    metadata: {
+      postgresTableName: localTableName,
+      remoteDbType,
+      remoteConnection: remoteConn,
+      remoteTable: tableDef.tablename,
+      remoteSchema: schema,
+      columns,
+      connection: { connectionId },
+      createdAt: new Date().toISOString(),
+      lastModified: new Date().toISOString(),
+    },
+    draggable: true,
+    droppable: false,
+  };
+}
+
   // Database (already existing, keep as is)
+// Inside RepositorySidebar component
+
 const handleSaveDatabaseMetadata = useCallback(async (metadata: any) => {
   if (!apiService) {
     toast.error('❌ Database API service is not initialized.');
@@ -1944,19 +1989,20 @@ const handleSaveDatabaseMetadata = useCallback(async (metadata: any) => {
       return;
     }
 
-    const remoteDbType = metadata.dbType;          // e.g., 'mysql', 'oracle', 'postgresql'
-    const remoteConn = metadata.connection;        // { host, port, dbname, user, password, schema }
-    const allTables = metadata.tables || [];       // full table definitions from wizard
+    const remoteDbType = metadata.dbType;
+    const remoteConn = metadata.connection;
+    const allTables = metadata.tables || [];
+    const selectedTableIds = metadata.selectedTables || [];
 
-    if (metadata.selectedTables.length === 0) {
+    if (selectedTableIds.length === 0) {
       toast.error('❌ No tables selected.');
       return;
     }
 
     let createdCount = 0;
+    const createdTableNodes: RepositoryNode[] = [];
 
-    for (const tableId of metadata.selectedTables) {
-      // tableId is like "schema.table"
+    for (const tableId of selectedTableIds) {
       const [schema, tableName] = tableId.includes('.') ? tableId.split('.') : ['public', tableId];
       const tableDef = allTables.find(
         (t: any) => `${t.schemaname}.${t.tablename}` === tableId || t.tablename === tableName
@@ -1967,10 +2013,9 @@ const handleSaveDatabaseMetadata = useCallback(async (metadata: any) => {
         continue;
       }
 
-      // Build columns from the table's column definitions
       const columns = tableDef.columns.map((col: any) => ({
         name: col.name,
-        type: col.type,                 // PostgreSQL data type (e.g., 'integer', 'text')
+        type: col.type,
         length: col.length,
         precision: col.precision,
         scale: col.scale,
@@ -1983,12 +2028,11 @@ const handleSaveDatabaseMetadata = useCallback(async (metadata: any) => {
         continue;
       }
 
-      // Options required by the FDW (postgres_fdw, mysql_fdw, oracle_fdw, etc.)
       const options: Record<string, string> = {
         host: remoteConn.host || 'localhost',
         port: String(remoteConn.port || '5432'),
         dbname: remoteConn.dbname || '',
-        table_name: tableName,                     // remote table name
+        table_name: tableName,
         user: remoteConn.user || '',
         password: remoteConn.password || '',
       };
@@ -1996,16 +2040,14 @@ const handleSaveDatabaseMetadata = useCallback(async (metadata: any) => {
         options.schema_name = schema;
       }
 
-      // Create a unique local foreign table name (e.g., "myconn_customers")
       const localTableName = `${metadata.name}_${tableName}`.toLowerCase().replace(/[^a-z0-9_]/g, '_');
 
-      // Create the foreign table using the appropriate FDW server
       const result = await apiService.createForeignTable(
         connectionId,
         localTableName,
         columns,
-        remoteDbType,                               // e.g., 'mysql', 'oracle', 'postgresql'
-        '',                                          // filePath is empty for database FDWs
+        remoteDbType,
+        '', // filePath not needed for database source
         options
       );
 
@@ -2013,31 +2055,103 @@ const handleSaveDatabaseMetadata = useCallback(async (metadata: any) => {
         throw new Error(`Failed to create foreign table for ${tableName}: ${result.error}`);
       }
 
-      // Prepare metadata for repository node
-      const tableMetadata = {
-        name: result.tableName || localTableName,
+      const tableNode = createDatabaseTableNode(
+        tableDef,
+        result.tableName || localTableName,
+        connectionId,
         remoteDbType,
-        remoteConnection: remoteConn,
-        remoteTable: tableName,
-        remoteSchema: schema,
-        columns,
-        postgresTableName: result.tableName || localTableName,
-        connection: { connectionId },
-        createdAt: new Date().toISOString(),
-      };
+        remoteConn,
+        schema
+      );
+      createdTableNodes.push(tableNode);
+      createdCount++;
+    }
 
-      // Dispatch event to add node under "Database Connections" folder
-      window.dispatchEvent(
-        new CustomEvent('metadata-created', {
-          detail: {
-            metadata: tableMetadata,
-            type: 'database',
-            folderId: 'db-connections',            // ✅ CORRECT FOLDER ID
-          },
-        })
+    if (createdCount === 0) {
+      toast.error('❌ No tables were created.');
+      return;
+    }
+
+    // Update repository tree (create folder for the connection, add table nodes)
+    let newParentFolderId: string | null = null;
+
+    setRepositoryData(prev => {
+      const folderId = 'db-connections';
+      const dbConnectionsNode = findNodeAndParent(prev, folderId)?.node;
+      if (!dbConnectionsNode) return prev;
+
+      const connectionFolderName = metadata.name;
+      let parentFolder = dbConnectionsNode.children?.find(
+        child => child.name === connectionFolderName && child.type === 'folder'
       );
 
-      createdCount++;
+      if (!parentFolder) {
+        const newFolderId = `folder-${Date.now()}-${Math.random().toString(36).substr(2, 9)}`;
+        parentFolder = {
+          id: newFolderId,
+          name: connectionFolderName,
+          type: 'folder',
+          children: [],
+          parentId: folderId,
+          metadata: {
+            connectionId,
+            dbType: remoteDbType,
+            connectionDetails: remoteConn,
+            createdAt: new Date().toISOString(),
+          },
+        };
+        newParentFolderId = newFolderId;
+        prev = updateNodeInTree(prev, folderId, node => ({
+          ...node,
+          children: [...(node.children || []), parentFolder],
+          metadata: { ...node.metadata, count: (node.metadata?.count || 0) + 1 },
+        }));
+      }
+
+      for (const tableNode of createdTableNodes) {
+        const exists = parentFolder.children?.some(child => child.id === tableNode.id);
+        if (!exists) {
+          prev = updateNodeInTree(prev, parentFolder.id, node => ({
+            ...node,
+            children: [...(node.children || []), tableNode],
+            metadata: { ...node.metadata, count: (node.metadata?.count || 0) + 1 },
+          }));
+        }
+      }
+
+      return prev;
+    });
+
+    if (newParentFolderId) {
+      setExpandedNodes(prev => new Set([...prev, newParentFolderId]));
+    }
+
+    // ✅ NEW: Save metadata to the new schema tables
+    const metadataToSave = {
+      name: metadata.name,
+      purpose: metadata.purpose,
+      description: metadata.description,
+      dbType: remoteDbType,
+      connectionId: metadata.useExistingConnection ? metadata.selectedConnectionId : undefined,
+      connection: metadata.useExistingConnection ? undefined : {
+        host: remoteConn.host,
+        port: remoteConn.port,
+        dbname: remoteConn.dbname,
+        user: remoteConn.user,
+        password: remoteConn.password,
+        schema: remoteConn.schema,
+      },
+      tables: allTables,
+      selectedTables: selectedTableIds,
+      tableSelections: metadata.tableSelections,
+    };
+
+    const saveResult = await apiService.saveDatabaseMetadata(metadataToSave);
+    if (!saveResult.success) {
+      toast.warn(`⚠️ Foreign tables created, but metadata storage failed: ${saveResult.error}`);
+      console.warn('Metadata storage error:', saveResult.error);
+    } else {
+      console.log('✅ Database metadata saved with ID:', saveResult.metadataEntryId);
     }
 
     toast.success(`✅ Created ${createdCount} foreign table(s).`);
@@ -2045,7 +2159,7 @@ const handleSaveDatabaseMetadata = useCallback(async (metadata: any) => {
     console.error('❌ Failed to create database foreign tables:', error);
     toast.error(`❌ ${error.message || 'Could not create foreign tables'}`);
   }
-}, [apiService, isConnected, testConnection]);
+}, [apiService, isConnected, testConnection, setRepositoryData, setExpandedNodes]);
 
   const handleSaveWebServiceMetadata = useCallback(async (metadata: any) => {
     window.dispatchEvent(new CustomEvent('metadata-created', {
@@ -2218,6 +2332,141 @@ useEffect(() => {
 
   syncExistingForeignTables();
 }, [apiService, isConnected, setRepositoryData]);
+
+
+useEffect(() => {
+  if (!databaseContext.apiService || !databaseContext.isConnected) return;
+
+  const loadDatabaseMetadataEntries = async () => {
+    try {
+      const result = await databaseContext.apiService.getDatabaseMetadataEntries();
+      if (!result.success || !result.entries) {
+        console.warn('Failed to load metadata entries:', result.error);
+        return;
+      }
+
+      console.log(`📚 Loaded ${result.entries.length} database metadata entries`);
+
+      // Build nodes for each entry
+      const newFolderNodes: RepositoryNode[] = [];
+
+      for (const entry of result.entries) {
+        const folderId = `db-folder-${entry.id}`;
+        const folderName = entry.name;
+
+        // Build table nodes with columns and ordering
+        const tableNodes: RepositoryNode[] = entry.tables.map((table: any) => {
+          const columns = table.columns.map((col: any) => ({
+            name: col.name,
+            type: col.dataType,
+            dataType: col.dataType,
+            length: col.length,
+            precision: col.precision,
+            scale: col.scale,
+            nullable: col.nullable,
+            defaultValue: col.defaultValue,
+            position: col.position,
+          }));
+
+          return {
+            id: `db-table-${entry.id}-${table.id}`,
+            name: table.tableName,
+            type: 'item',
+            draggable: true,
+            droppable: false,
+            metadata: {
+              entryId: entry.id,
+              tableId: table.id,
+              schemaName: table.schemaName,
+              tableName: table.tableName,
+              tableType: table.tableType,
+              columns: columns,
+              postgresTableName: table.tableName, // actual foreign table name (same as table name)
+              connection: {
+                connectionId: entry.connection.id,
+                host: entry.connection.host,
+                port: entry.connection.port,
+                dbname: entry.connection.databaseName,
+                user: entry.connection.username,
+                schema: entry.connection.schema,
+              },
+              dbType: entry.dbType,
+              position: table.position, // store position for sorting
+            },
+            parentId: folderId,
+          };
+        });
+
+        // Sort table nodes by stored position
+        tableNodes.sort((a, b) => (a.metadata?.position || 0) - (b.metadata?.position || 0));
+
+        // Create folder node
+        const folderNode: RepositoryNode = {
+          id: folderId,
+          name: folderName,
+          type: 'folder',
+          children: tableNodes,
+          draggable: false,
+          droppable: true,
+          metadata: {
+            entryId: entry.id,
+            connectionId: entry.connection.id,
+            connectionDetails: entry.connection,
+            dbType: entry.dbType,
+            createdAt: entry.createdAt,
+            updatedAt: entry.updatedAt,
+          },
+        };
+
+        newFolderNodes.push(folderNode);
+      }
+
+      // Merge into repositoryData
+      setRepositoryData(prev => {
+        const dbConnectionsIndex = prev.findIndex(n => n.id === 'db-connections');
+        if (dbConnectionsIndex === -1) return prev;
+
+        const dbConnectionsNode = prev[dbConnectionsIndex];
+        // Remove any existing folder nodes that came from metadata entries (by checking metadata.entryId)
+        const existingChildren = dbConnectionsNode.children || [];
+        const filteredChildren = existingChildren.filter(child => {
+          // Keep system folders or items without entryId metadata
+          return !(child.metadata && child.metadata.entryId);
+        });
+
+        // Add new folder nodes (skip duplicates)
+        const newChildren = [...filteredChildren];
+        for (const folderNode of newFolderNodes) {
+          const exists = newChildren.some(c => c.metadata?.entryId === folderNode.metadata?.entryId);
+          if (!exists) {
+            newChildren.push(folderNode);
+          }
+        }
+
+        // Sort folder nodes alphabetically (or by creation date if preferred)
+        newChildren.sort((a, b) => a.name.localeCompare(b.name));
+
+        const updatedDbConnectionsNode = {
+          ...dbConnectionsNode,
+          children: newChildren,
+          metadata: {
+            ...dbConnectionsNode.metadata,
+            count: newChildren.length,
+          },
+        };
+
+        const newTree = [...prev];
+        newTree[dbConnectionsIndex] = updatedDbConnectionsNode;
+        return newTree;
+      });
+
+    } catch (error) {
+      console.error('Error loading metadata entries:', error);
+    }
+  };
+
+  loadDatabaseMetadataEntries();
+}, [databaseContext.apiService, databaseContext.isConnected, setRepositoryData]);
   // ==================== METADATA EXPANSION ON NEW NODES ====================
   useEffect(() => {
     if (metadataSettings.autoExpandNew) {
@@ -2247,6 +2496,305 @@ useEffect(() => {
       '\nFull repositoryData:', repositoryData
     );
   }, [repositoryData]);
+
+  useEffect(() => {
+  if (!databaseContext.apiService || !databaseContext.isConnected) return;
+
+  const loadDatabaseMetadataEntries = async () => {
+    try {
+      const result = await databaseContext.apiService.getDatabaseMetadataEntries();
+      if (!result.success || !result.entries) {
+        console.warn('Failed to load metadata entries:', result.error);
+        return;
+      }
+
+      console.log(`📚 Loaded ${result.entries.length} database metadata entries`);
+
+      // Build nodes for each entry
+      const newFolderNodes: RepositoryNode[] = [];
+
+      for (const entry of result.entries) {
+        const folderId = `db-folder-${entry.id}`;
+        const folderName = entry.name;
+
+        // Build table nodes with columns and ordering
+        const tableNodes: RepositoryNode[] = entry.tables.map((table: any) => {
+          const columns = table.columns.map((col: any) => ({
+            name: col.name,
+            type: col.dataType,
+            dataType: col.dataType,
+            length: col.length,
+            precision: col.precision,
+            scale: col.scale,
+            nullable: col.nullable,
+            defaultValue: col.defaultValue,
+            position: col.position,
+          }));
+
+          return {
+            id: `db-table-${entry.id}-${table.id}`,
+            name: table.tableName,
+            type: 'item',
+            draggable: true,
+            droppable: false,
+            metadata: {
+              entryId: entry.id,
+              tableId: table.id,
+              schemaName: table.schemaName,
+              tableName: table.tableName,
+              tableType: table.tableType,
+              columns: columns,
+              postgresTableName: table.tableName, // actual foreign table name (same as table name)
+              connection: {
+                connectionId: entry.connection.id,
+                host: entry.connection.host,
+                port: entry.connection.port,
+                dbname: entry.connection.databaseName,
+                user: entry.connection.username,
+                schema: entry.connection.schema,
+              },
+              dbType: entry.dbType,
+              position: table.position, // store position for sorting
+            },
+            parentId: folderId,
+          };
+        });
+
+        // Sort table nodes by stored position
+        tableNodes.sort((a, b) => (a.metadata?.position || 0) - (b.metadata?.position || 0));
+
+        // Create folder node
+        const folderNode: RepositoryNode = {
+          id: folderId,
+          name: folderName,
+          type: 'folder',
+          children: tableNodes,
+          draggable: false,
+          droppable: true,
+          metadata: {
+            entryId: entry.id,
+            connectionId: entry.connection.id,
+            connectionDetails: entry.connection,
+            dbType: entry.dbType,
+            createdAt: entry.createdAt,
+            updatedAt: entry.updatedAt,
+          },
+        };
+
+        newFolderNodes.push(folderNode);
+      }
+
+      // Merge into repositoryData
+      setRepositoryData(prev => {
+        const dbConnectionsIndex = prev.findIndex(n => n.id === 'db-connections');
+        if (dbConnectionsIndex === -1) return prev;
+
+        const dbConnectionsNode = prev[dbConnectionsIndex];
+        // Remove any existing folder nodes that came from metadata entries (by checking metadata.entryId)
+        const existingChildren = dbConnectionsNode.children || [];
+        const filteredChildren = existingChildren.filter(child => {
+          // Keep system folders or items without entryId metadata
+          return !(child.metadata && child.metadata.entryId);
+        });
+
+        // Add new folder nodes (skip duplicates)
+        const newChildren = [...filteredChildren];
+        for (const folderNode of newFolderNodes) {
+          const exists = newChildren.some(c => c.metadata?.entryId === folderNode.metadata?.entryId);
+          if (!exists) {
+            newChildren.push(folderNode);
+          }
+        }
+
+        // Sort folder nodes alphabetically (or by creation date if preferred)
+        newChildren.sort((a, b) => a.name.localeCompare(b.name));
+
+        const updatedDbConnectionsNode = {
+          ...dbConnectionsNode,
+          children: newChildren,
+          metadata: {
+            ...dbConnectionsNode.metadata,
+            count: newChildren.length,
+          },
+        };
+
+        const newTree = [...prev];
+        newTree[dbConnectionsIndex] = updatedDbConnectionsNode;
+        return newTree;
+      });
+
+    } catch (error) {
+      console.error('Error loading metadata entries:', error);
+    }
+  };
+
+  loadDatabaseMetadataEntries();
+}, [databaseContext.apiService, databaseContext.isConnected, setRepositoryData]);
+
+useEffect(() => {
+  const apiService = databaseContext.apiService;
+  const isConnected = databaseContext.isConnected;
+  if (!apiService || !isConnected) {
+    console.log('[Metadata Load] Skipped: apiService or connection not ready');
+    return;
+  }
+
+  const loadDatabaseMetadataEntries = async () => {
+    console.log('[Metadata Load] Starting load...');
+
+    try {
+      console.log('[Metadata Load] Fetching entries from /api/database/metadata');
+      const result = await apiService.getDatabaseMetadataEntries();
+      console.log('[Metadata Load] API response:', result);
+
+      if (!result.success) {
+        console.warn('[Metadata Load] API failed:', result.error);
+        return;
+      }
+
+      if (!result.entries || result.entries.length === 0) {
+        console.log('[Metadata Load] No entries found');
+        return;
+      }
+
+      console.log(`[Metadata Load] Received ${result.entries.length} entries`);
+      if (result.entries.length > 0) {
+        console.log('[Metadata Load] Sample entry:', {
+          id: result.entries[0].id,
+          name: result.entries[0].name,
+          tablesCount: result.entries[0].tables?.length,
+          firstTable: result.entries[0].tables?.[0]?.tableName,
+        });
+      }
+
+      const newFolderNodes: RepositoryNode[] = [];
+
+      for (const entry of result.entries) {
+        console.log(`[Metadata Load] Building folder for entry: ${entry.name} (id: ${entry.id})`);
+        const folderId = `db-folder-${entry.id}`;
+
+        const tableNodes: RepositoryNode[] = (entry.tables || []).map((table: any, idx: number) => {
+          const columns = (table.columns || []).map((col: any) => ({
+            name: col.name,
+            type: col.dataType,
+            dataType: col.dataType,
+            length: col.length,
+            precision: col.precision,
+            scale: col.scale,
+            nullable: col.nullable,
+            defaultValue: col.defaultValue,
+            position: col.position,
+          }));
+
+          return {
+            id: `db-table-${entry.id}-${table.id || idx}`,
+            name: table.tableName,
+            type: 'item' as const,
+            draggable: true,
+            droppable: false,
+            metadata: {
+              entryId: entry.id,
+              tableId: table.id,
+              schemaName: table.schemaName,
+              tableName: table.tableName,
+              tableType: table.tableType,
+              columns: columns,
+              postgresTableName: table.tableName,
+              connection: {
+                connectionId: entry.connection?.id,
+                host: entry.connection?.host,
+                port: entry.connection?.port,
+                dbname: entry.connection?.databaseName,
+                user: entry.connection?.username,
+                schema: entry.connection?.schema,
+              },
+              dbType: entry.dbType,
+              position: table.position ?? idx,
+            },
+            parentId: folderId,
+          };
+        });
+
+        tableNodes.sort((a, b) => (a.metadata?.position || 0) - (b.metadata?.position || 0));
+        console.log(`[Metadata Load] Built ${tableNodes.length} tables for folder ${entry.name}`);
+
+        const folderNode: RepositoryNode = {
+          id: folderId,
+          name: entry.name,
+          type: 'folder' as const,
+          children: tableNodes,
+          draggable: false,
+          droppable: true,
+          metadata: {
+            entryId: entry.id,
+            connectionId: entry.connection?.id,
+            connectionDetails: entry.connection,
+            dbType: entry.dbType,
+            createdAt: entry.createdAt,
+            updatedAt: entry.updatedAt,
+          },
+        };
+        newFolderNodes.push(folderNode);
+      }
+
+      console.log(`[Metadata Load] Created ${newFolderNodes.length} folder nodes`);
+
+      setRepositoryData(prev => {
+        // Locate db-connections recursively
+        const dbConnectionsNodeInfo = findNodeAndParent(prev, 'db-connections');
+        if (!dbConnectionsNodeInfo) {
+          console.error('[Metadata Load] db-connections folder not found in repository tree!');
+          return prev;
+        }
+
+        const dbConnectionsNode = dbConnectionsNodeInfo.node;
+        const existingChildren = dbConnectionsNode.children || [];
+
+        // Filter out any existing metadata‑based folders (those with entryId metadata)
+        const filteredChildren = existingChildren.filter(child => {
+          const hasEntryId = child.metadata && (child.metadata as any).entryId;
+          if (hasEntryId) {
+            console.log(`[Metadata Load] Removing old folder: ${child.name} (entryId: ${(child.metadata as any).entryId})`);
+          }
+          return !hasEntryId;
+        });
+
+        // Add new folder nodes, skipping duplicates
+        const newChildren = [...filteredChildren];
+        for (const folderNode of newFolderNodes) {
+          const exists = newChildren.some(c => (c.metadata as any)?.entryId === folderNode.metadata?.entryId);
+          if (!exists) {
+            newChildren.push(folderNode);
+            console.log(`[Metadata Load] Added folder: ${folderNode.name}`);
+          } else {
+            console.log(`[Metadata Load] Skipping duplicate folder: ${folderNode.name}`);
+          }
+        }
+
+        // Sort folders alphabetically (optional)
+        newChildren.sort((a, b) => a.name.localeCompare(b.name));
+
+        const updatedDbConnectionsNode = {
+          ...dbConnectionsNode,
+          children: newChildren,
+          metadata: {
+            ...dbConnectionsNode.metadata,
+            count: newChildren.length,
+          },
+        };
+
+        // Apply the update in the tree using the existing helper
+        const newTree = updateNodeInTree(prev, 'db-connections', () => updatedDbConnectionsNode);
+        return newTree;
+      });
+
+    } catch (error) {
+      console.error('[Metadata Load] Unexpected error:', error);
+    }
+  };
+
+  loadDatabaseMetadataEntries();
+}, [databaseContext.apiService, databaseContext.isConnected, setRepositoryData]);
 
   // 🔥 Force expand metadata and any category that has children
   useEffect(() => {

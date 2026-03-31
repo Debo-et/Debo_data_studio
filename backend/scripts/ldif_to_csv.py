@@ -7,6 +7,14 @@ import sys
 import csv
 import ldif
 
+
+def decode_value(v):
+    """Decode bytes to string, handling None values."""
+    if v is None:
+        return ''
+    return v.decode('utf-8', errors='replace')
+
+
 def main():
     if len(sys.argv) != 3:
         print("Usage: ldif_to_csv.py <input_file> <output_file>", file=sys.stderr)
@@ -24,9 +32,9 @@ def main():
             flat['dn'] = dn
             for attr, values in entry.items():
                 if len(values) == 1:
-                    flat[attr] = values[0].decode('utf-8', errors='replace')
+                    flat[attr] = decode_value(values[0])
                 else:
-                    flat[attr] = '|'.join(v.decode('utf-8', errors='replace') for v in values)
+                    flat[attr] = '|'.join(decode_value(v) for v in values)
             entries.append(flat)
 
     if not entries:
@@ -43,6 +51,7 @@ def main():
         writer = csv.DictWriter(outf, fieldnames=headers, restval='', extrasaction='ignore')
         writer.writeheader()
         writer.writerows(entries)
+
 
 if __name__ == '__main__':
     main()

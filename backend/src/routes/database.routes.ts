@@ -4,9 +4,8 @@ import { Router, Request, Response } from 'express';
 import { databaseService } from '../database/services/database.service';
 import cors from 'cors';
 import corsOptions from '../config/cors';
-import { saveDatabaseMetadata } from '../database/services/metadata.service';
 import { createForeignTableInPostgres, dropForeignTable } from '../database/services/foreign-table.service';
-import { getAllMetadataEntries } from '../database/services/metadata.service';
+import { getAllMetadataEntries, saveDatabaseMetadata } from '../database/services/metadata.service';
 
 const router = Router();
 
@@ -56,15 +55,21 @@ router.get('/metadata', cors(corsOptions), async (_req: Request, res: Response):
   }
 });
 
-router.post('/metadata', cors(corsOptions), async (req: Request, res: Response): Promise<void> => {
+router.post('/:connectionId/query', cors(corsOptions), async (req: Request, res: Response): Promise<void> => {
   try {
-    const result = await saveDatabaseMetadata(req.body);
+    const { connectionId } = req.params;
+    const { sql, params = [], options } = req.body;   // ✅ default to []
+
+    if (!connectionId || !sql) {
+      res.status(400).json({ success: false, error: 'Missing connectionId or sql' });
+      return;
+    }
+
+    const queryOptions = { ...options, params };
+    const result = await databaseService.executeQuery(connectionId, sql, queryOptions);
     res.json(result);
   } catch (error) {
-    res.status(500).json({
-      success: false,
-      error: error instanceof Error ? error.message : String(error),
-    });
+    res.status(500).json({ success: false, error: error instanceof Error ? error.message : String(error) });
   }
 });
 
@@ -186,10 +191,12 @@ router.get('/:connectionId/info', cors(corsOptions), async (req: Request, res: R
 // ===========================================================================
 
 // Execute SQL query
+// backend/src/routes/database.routes.ts
+
 router.post('/:connectionId/query', cors(corsOptions), async (req: Request, res: Response): Promise<void> => {
   try {
     const { connectionId } = req.params;
-    const { sql, params, options } = req.body;
+    const { sql, params = [], options } = req.body;   // ← default to empty array
 
     if (!connectionId || !sql) {
       res.status(400).json({ success: false, error: 'Missing connectionId or sql' });
@@ -204,11 +211,25 @@ router.post('/:connectionId/query', cors(corsOptions), async (req: Request, res:
   }
 });
 
+router.post('/metadata', cors(corsOptions), async (req: Request, res: Response): Promise<void> => {
+  try {
+    const result = await saveDatabaseMetadata(req.body);
+    res.json(result);
+  } catch (error) {
+    res.status(500).json({
+      success: false,
+      error: error instanceof Error ? error.message : String(error),
+    });
+  }
+});
+
 // ===========================================================================
 // Foreign Table Operations
 // ===========================================================================
 
 // Create foreign table
+// backend/src/routes/database.routes.ts
+
 router.post('/create-foreign-table', cors(corsOptions), async (req: Request, res: Response): Promise<void> => {
   try {
     const { 
@@ -217,10 +238,10 @@ router.post('/create-foreign-table', cors(corsOptions), async (req: Request, res
       columns, 
       fileType, 
       filePath, 
-      options 
+      options,
+      serverName    // <-- ADD THIS
     } = req.body;
     
-    // Basic validation: connectionId, tableName, columns, fileType are always required
     if (!connectionId || !tableName || !columns || !fileType) {
       res.status(400).json({ 
         success: false, 
@@ -229,21 +250,17 @@ router.post('/create-foreign-table', cors(corsOptions), async (req: Request, res
       return;
     }
 
-    // If it's a database source, filePath may be empty or missing; we'll treat that as valid.
-    // For file sources, we still need a non-empty filePath.
-    // The service function will handle the validation and decide which SQL to generate.
-    // So we just pass everything along.
-
     console.log(`📝 Creating foreign table: ${tableName} for ${fileType} source`);
-
-    // Use the existing localPostgres connection pool
+    
+    // Pass serverName to the service
     const result = await createForeignTableInPostgres(
       connectionId,
       tableName,
       columns,
       fileType,
-      filePath || '',   // ensure string, empty if missing
-      options
+      filePath || '',
+      options,
+      serverName    // <-- ADD THIS
     );
 
     res.json(result);

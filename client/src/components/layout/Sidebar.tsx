@@ -13,6 +13,8 @@ import RegexMetadataWizard from '../../Wizard/RegexMetadataWizard';
 import LDIFMetadataWizard from '../../Wizard/LDIFMetadataWizard';
 import WebServiceMetadataWizard from '../../Wizard/WebServiceMetadataWizard';
 import DatabaseMetadataWizard from '../../Wizard/DatabaseMetadataWizard';
+import SAPConnectionWizard from '../../Wizard/SAPConnectionWizard';
+import LDAPConnectionWizard from '../../Wizard/LDAPConnectionWizard';
 
 // Import React components from Wizard
 import ContextMenu from '../../Wizard/ContextMenu';
@@ -22,12 +24,14 @@ import * as Layout from './SidebarLayout';
 import * as State from './SidebarState';
 import * as Handlers from './SidebarHandlers';
 import * as Utils from './SidebarUtils';
+import { LDAPConnectionFormData } from '../../types/types';
 
 // Import types
 import {
   RepositoryNode,
   ExcelMetadataFormData,
-  DeletionHistoryItem
+  DeletionHistoryItem,
+  FTPConnectionFormData
 } from '../../types/types';
 
 // Import icons
@@ -52,6 +56,8 @@ import {
 
 // ==================== CANVAS PERSISTENCE ====================
 import { canvasPersistence } from '../../services/canvas-persistence.service';
+import FTPConnectionWizard from '@/Wizard/FTPConnectionWizard';
+import SalesforceConnectionWizard, { SalesforceConnectionFormData } from '@/Wizard/SalesforceConnectionWizard';
 
 // ============================================================================
 // 🛡️ MODULE-LEVEL CACHE – survives component remounts
@@ -427,6 +433,10 @@ const RepositorySidebar: React.FC<EnhancedRepositorySidebarProps> = ({
   const [ldifWizardOpen, setLdifWizardOpen] = useState(false);
   const [webServiceWizardOpen, setWebServiceWizardOpen] = useState(false);
   const [databaseWizardOpen, setDatabaseWizardOpen] = useState(false);
+  const [sapWizardOpen, setSapWizardOpen] = useState(false);
+  const [ftpWizardOpen, setFtpWizardOpen] = useState(false);
+  const [ldapWizardOpen, setLdapWizardOpen] = useState(false);
+  const [salesforceWizardOpen, setSalesforceWizardOpen] = useState(false);
 
   const contextMenuRef = useRef<HTMLDivElement>(null);
   const jobDesignContextMenuRef = useRef<HTMLDivElement>(null);
@@ -516,69 +526,71 @@ useEffect(() => {
 }, [isConnected, setRepositoryData, setExpandedNodes, onCanvasSelect]);
   // ==================== METADATA CREATION EVENT LISTENER ====================
   useEffect(() => {
-    const handleMetadataCreated = (event: CustomEvent) => {
-      console.log('📥 metadata-created event received:', event.detail);
-      const { metadata, type, folderId } = event.detail;
+  const handleMetadataCreated = (event: CustomEvent) => {
+    console.log('🔔 metadata-created event received:', event.detail);
+    const { metadata, type, folderId } = event.detail;
+    const nodeId = `${type}-${Date.now()}-${Math.random().toString(36).substr(2, 9)}`;
+    const newNode: RepositoryNode = {
+      id: nodeId,
+      name: metadata.name || `New ${type}`,
+      type: 'item',
+      metadata: {
+        ...metadata,
+        type: type,
+        createdAt: new Date().toISOString(),
+        lastModified: new Date().toISOString()
+      },
+      draggable: true,
+      droppable: false,
+      parentId: folderId
+    };
 
-      const nodeId = `${type}-${Date.now()}-${Math.random().toString(36).substr(2, 9)}`;
+    console.log('🆕 New node to add:', newNode);
+    console.log('📁 Target folder ID:', folderId);
 
-      const newNode: RepositoryNode = {
-        id: nodeId,
-        name: metadata.name || `New ${type}`,
-        type: 'item',
-        metadata: {
-          ...metadata,
-          type: type,
-          createdAt: new Date().toISOString(),
-          lastModified: new Date().toISOString()
-        },
-        draggable: true,
-        droppable: false,
-        parentId: folderId
-      };
+    setRepositoryData(prev => {
+      console.log('🔍 Current repository tree (before):', prev);
+      const found = findNodeAndParent(prev, folderId);
+      if (!found) {
+        console.warn(`❌ Folder ${folderId} not found in repository tree!`);
+        return prev;
+      }
+      console.log(`✅ Folder ${folderId} found. Current children:`, found.node.children?.length ?? 0);
 
-      console.log('🆕 New repository node created:', newNode);
-
-      setRepositoryData(prev => {
-        // Recursively find the folder and add the child
-        const found = findNodeAndParent(prev, folderId);
-        if (!found) {
-          console.warn(`Folder ${folderId} not found, cannot add node`);
-          return prev;
-        }
-        return updateNodeInTree(prev, folderId, folder => {
-          const existingChildren = folder.children || [];
-          const isDuplicate = existingChildren.some(
-            child => child.id === nodeId || child.name === newNode.name
-          );
-          if (!isDuplicate) {
-            return {
-              ...folder,
-              children: [...existingChildren, newNode],
-              metadata: {
-                ...folder.metadata,
-                count: (folder.metadata?.count || 0) + 1
-              }
-            };
-          }
+      const updatedTree = updateNodeInTree(prev, folderId, folder => {
+        const existingChildren = folder.children || [];
+        const isDuplicate = existingChildren.some(
+          child => child.id === nodeId || child.name === newNode.name
+        );
+        if (isDuplicate) {
+          console.warn(`⚠️ Duplicate node (${newNode.name}) – skipping addition`);
           return folder;
-        });
+        }
+        console.log(`➕ Adding node to folder ${folderId}`);
+        return {
+          ...folder,
+          children: [...existingChildren, newNode],
+          metadata: {
+            ...folder.metadata,
+            count: (folder.metadata?.count || 0) + 1
+          }
+        };
       });
 
-      setSelectedNode(nodeId);
+      // After update, check if the node is there
+      const newFolder = findNodeAndParent(updatedTree, folderId);
+      console.log(`📂 After update, folder ${folderId} has ${newFolder?.node.children?.length ?? 0} children`);
+      return updatedTree;
+    });
 
-      toast.success(`✅ "${newNode.name}" created successfully`, {
-        position: "bottom-right",
-        autoClose: 3000,
-      });
-    };
+    setExpandedNodes(prev => new Set([...prev, folderId, nodeId]));
+    setSelectedNode(nodeId);
+    toast.success(`✅ "${newNode.name}" created successfully`);
+  };
 
-    const listener = handleMetadataCreated as EventListener;
-    window.addEventListener('metadata-created', listener);
-    return () => {
-      window.removeEventListener('metadata-created', listener);
-    };
-  }, [setRepositoryData]);
+  window.addEventListener('metadata-created', handleMetadataCreated as EventListener);
+  return () => window.removeEventListener('metadata-created', handleMetadataCreated as EventListener);
+}, [setRepositoryData]);
 
   // ==================== METADATA EXPANSION HANDLERS ====================
   const handleToggleMetadata = useCallback((nodeId: string) => {
@@ -1140,6 +1152,26 @@ const handleCreateJobWizard = useCallback(() => {
     setContextMenu(null);
   }, []);
 
+  const handleOpenSAPWizard = useCallback(() => {
+  setSapWizardOpen(true);
+  setContextMenu(null);
+}, []);
+
+const handleOpenFTPWizard = useCallback(() => {
+  setFtpWizardOpen(true);
+  setContextMenu(null);
+}, []);
+
+const handleOpenLDAPWizard = useCallback(() => {
+  setLdapWizardOpen(true);
+  setContextMenu(null);
+}, []);
+
+const handleOpenSalesforceWizard = useCallback(() => {
+  setSalesforceWizardOpen(true);
+  setContextMenu(null);
+}, []);
+
   // ==================== CREATE CANVAS FROM JOB ====================
   const handleCreateCanvasFromJob = useCallback(async (jobNode: RepositoryNode) => {
     const jobName = jobNode.name;
@@ -1494,24 +1526,31 @@ const reportErrorToConsul = (error: any) => {
 
 // Modified function
 const handleSaveXMLMetadata = useCallback(async (metadata: any) => {
+  console.log('🚀 [XML] Save started with metadata:', metadata);
+
   if (!apiService) {
-    reportErrorToConsul('❌ API service not available');
+    console.error('❌ [XML] No API service');
+    toast.error('❌ Database API service is not available.');
     return;
   }
+
   try {
     if (!isConnected && !(await testConnection())) {
-      reportErrorToConsul('❌ No active PostgreSQL connection');
+      console.error('❌ [XML] No active PostgreSQL connection');
       return;
     }
+
     const connectionId = await getActivePostgresConnectionId(apiService);
-    if (!connectionId) throw new Error('No PostgreSQL connection');
+    if (!connectionId) throw new Error('No active PostgreSQL connection found.');
+    console.log('✅ [XML] Connection ID:', connectionId);
 
     if (!metadata.file) {
-      reportErrorToConsul('❌ No file provided');
+      console.error('❌ [XML] No file provided');
       return;
     }
 
-    // Convert XML to CSV via backend
+    // Convert XML to CSV
+    console.log('🔄 [XML] Converting file to CSV via backend...');
     const csvPath = await convertFileViaBackend(
       metadata.file,
       '/api/convert/xml',
@@ -1520,6 +1559,7 @@ const handleSaveXMLMetadata = useCallback(async (metadata: any) => {
         columns: JSON.stringify(metadata.schema || []),
       }
     );
+    console.log('✅ [XML] CSV created at:', csvPath);
 
     const columns = (metadata.schema || []).map((col: any) => ({
       name: col.name,
@@ -1527,125 +1567,147 @@ const handleSaveXMLMetadata = useCallback(async (metadata: any) => {
       nullable: true,
     }));
     if (columns.length === 0) {
-      reportErrorToConsul('❌ No columns defined');
+      console.error('❌ [XML] No columns defined');
       return;
     }
+    console.log('📋 [XML] Columns:', columns);
 
-    const options = { format: 'xml' };
+    const options = {
+      delimiter: ',',
+      header: 'true',
+      format: 'csv',
+    };
 
     const result = await apiService.createForeignTable(
       connectionId,
       metadata.name,
       columns,
-      'xml',
+      'delimited',
       csvPath,
       options
     );
     if (!result.success) throw new Error(result.error);
+    console.log('✅ [XML] Foreign table created:', result);
 
     metadata.postgresTableName = result.tableName || metadata.name;
 
-    await apiService.insertDataSourceMetadata(connectionId, {
+    const insertResult = await apiService.insertDataSourceMetadata(connectionId, {
       name: metadata.name,
-      type: 'xml',
+      type: 'xml',               // store original type
       filePath: csvPath,
       foreignTableName: result.tableName || metadata.name,
       options,
     });
+    if (!insertResult.success) {
+      console.warn('⚠️ [XML] Metadata insertion warning:', insertResult.error);
+    } else {
+      console.log('✅ [XML] Metadata recorded with ID:', insertResult.id);
+    }
 
+    // Dispatch event to sidebar
+    console.log('📡 [XML] Dispatching metadata-created event for folderId="file-xml"');
     window.dispatchEvent(new CustomEvent('metadata-created', {
       detail: { metadata, type: 'xml', folderId: 'file-xml' }
     }));
-    toast.success(`✅ XML table "${metadata.name}" created`);
+
+    toast.success(`✅ XML table "${metadata.name}" created successfully!`);
   } catch (error: any) {
-    reportErrorToConsul(`❌ ${error.message}`);
+    console.error('❌ [XML] Error:', error);
+    toast.error(`❌ ${error.message || 'Could not create XML foreign table.'}`);
   }
 }, [apiService, isConnected, testConnection, convertFileViaBackend]);
 
   // Positional: convert via backend
- const handleSavePositionalMetadata = useCallback(async (metadata: any) => {
+const handleSavePositionalMetadata = useCallback(async (metadata: any) => {
+  console.log('🚀 [Positional] Save started with metadata:', metadata);
+
   if (!apiService) {
-    reportErrorToConsul('❌ API service not available');
+    console.error('❌ [Positional] No API service');
+    toast.error('❌ Database API service is not available.');
     return;
   }
+
   try {
     if (!isConnected && !(await testConnection())) {
-      reportErrorToConsul('❌ No active PostgreSQL connection');
+      console.error('❌ [Positional] No active PostgreSQL connection');
       return;
     }
+
     const connectionId = await getActivePostgresConnectionId(apiService);
-    if (!connectionId) throw new Error('No PostgreSQL connection');
+    if (!connectionId) throw new Error('No active PostgreSQL connection found.');
+    console.log('✅ [Positional] Connection ID:', connectionId);
 
     if (!metadata.file) {
-      reportErrorToConsul('❌ No file provided');
+      console.error('❌ [Positional] No file provided');
       return;
     }
 
-    // Convert positional file to CSV
+    console.log('🔄 [Positional] Converting file to CSV via backend...');
     const csvPath = await convertFileViaBackend(
       metadata.file,
       '/api/convert/positional',
       {
-        columns: JSON.stringify(metadata.schema || []), // ✅ fixed property
+        columns: JSON.stringify(metadata.schema || []),
       }
     );
-
-    // Map columns for foreign table creation
-    const mapDataType = (type: string): string => {
-      const typeMap: Record<string, string> = {
-        'String': 'TEXT',
-        'Integer': 'INTEGER',
-        'Decimal': 'NUMERIC',
-        'Date': 'DATE',
-        'Boolean': 'BOOLEAN',
-      };
-      return typeMap[type] || 'TEXT';
-    };
+    console.log('✅ [Positional] CSV created at:', csvPath);
 
     const columns = (metadata.schema || []).map((col: any) => ({
       name: col.name,
-      type: mapDataType(col.type),
+      type: col.type,
       length: col.length,
       nullable: true,
     }));
-
     if (columns.length === 0) {
-      reportErrorToConsul('❌ No columns defined');
+      console.error('❌ [Positional] No columns defined');
       return;
     }
+    console.log('📋 [Positional] Columns:', columns);
 
-    const options = { format: 'fixed' };
+    const options = {
+      delimiter: ',',
+      header: 'false',
+      format: 'csv',
+    };
 
     const result = await apiService.createForeignTable(
       connectionId,
       metadata.name,
       columns,
-      'positional',
+      'delimited',
       csvPath,
       options
     );
     if (!result.success) throw new Error(result.error);
+    console.log('✅ [Positional] Foreign table created:', result);
 
     metadata.postgresTableName = result.tableName || metadata.name;
 
-    await apiService.insertDataSourceMetadata(connectionId, {
+    const insertResult = await apiService.insertDataSourceMetadata(connectionId, {
       name: metadata.name,
-      type: 'positional',
+      type: 'positional',       // store original type
       filePath: csvPath,
       foreignTableName: result.tableName || metadata.name,
       options,
     });
+    if (!insertResult.success) {
+      console.warn('⚠️ [Positional] Metadata insertion warning:', insertResult.error);
+    } else {
+      console.log('✅ [Positional] Metadata recorded with ID:', insertResult.id);
+    }
 
-    window.dispatchEvent(
-      new CustomEvent('metadata-created', {
-        detail: { metadata, type: 'positional', folderId: 'file-positional' },
-      })
-    );
-    toast.success(`✅ Positional table "${metadata.name}" created`);
+    console.log('📡 [Positional] Dispatching metadata-created event for folderId="file-positional"');
+    window.dispatchEvent(new CustomEvent('metadata-created', {
+      detail: { metadata, type: 'positional', folderId: 'file-positional' }
+    }));
+
+    toast.success(`✅ Positional table "${metadata.name}" created successfully!`);
   } catch (error: any) {
-    reportErrorToConsul(`❌ ${error.message}`);
+    console.error('❌ [Positional] Error:', error);
+    toast.error(`❌ ${error.message || 'Could not create positional foreign table.'}`);
   }
 }, [apiService, isConnected, testConnection, convertFileViaBackend]);
+
   // File Schema: likely a combination of schema file + data file. We'll assume metadata contains both.
   const handleSaveFileSchemaMetadata = useCallback(async (metadata: any) => {
     if (!apiService) { toast.error('❌ API service not available'); return; }
@@ -1926,6 +1988,38 @@ const handleSaveXMLMetadata = useCallback(async (metadata: any) => {
   }
 }, [apiService, isConnected, testConnection, convertFileViaBackend]);
 
+const handleSaveFTPConnection = useCallback(async (data: FTPConnectionFormData) => {
+  // Here you can call a backend API to store the connection (e.g., save to a database)
+  // For demonstration, we just dispatch the event to add a node.
+  window.dispatchEvent(new CustomEvent('metadata-created', {
+    detail: {
+      metadata: {
+        ...data,
+        type: 'ftp-sftp',
+        createdAt: new Date().toISOString(),
+      },
+      type: 'ftp-sftp',
+      folderId: 'ftp-sftp', // as defined in the default repository structure
+    }
+  }));
+  toast.success(`✅ FTP/SFTP connection "${data.name}" created`);
+}, []);
+
+
+const handleSaveLDAPConnection = useCallback(async (data: LDAPConnectionFormData) => {
+  window.dispatchEvent(new CustomEvent('metadata-created', {
+    detail: {
+      metadata: {
+        ...data,
+        type: 'ldap',
+        createdAt: new Date().toISOString(),
+      },
+      type: 'ldap',
+      folderId: 'ldap', // This matches the folder ID in the default repository structure
+    }
+  }));
+  toast.success(`✅ LDAP connection "${data.name}" created`);
+}, []);
 
 function createDatabaseTableNode(
   tableDef: any,
@@ -1968,34 +2062,60 @@ function createDatabaseTableNode(
   };
 }
 
-  // Database (already existing, keep as is)
-// Inside RepositorySidebar component
-
+// ============================================================================
+// handleSaveDatabaseMetadata – Modified to use createForeignTableViaBackend
+// ============================================================================
 const handleSaveDatabaseMetadata = useCallback(async (metadata: any) => {
   if (!apiService) {
-    toast.error('❌ Database API service is not initialized.');
+    console.error('❌ Database API service is not initialized.');
     return;
   }
 
   try {
     if (!isConnected && !(await testConnection())) {
-      toast.error('❌ No active PostgreSQL connection.');
+      console.error('❌ No active PostgreSQL connection.');
       return;
     }
 
     const connectionId = await getActivePostgresConnectionId(apiService);
     if (!connectionId) {
-      toast.error('❌ No active PostgreSQL connection found.');
+      console.error('❌ No active PostgreSQL connection found.');
       return;
     }
 
     const remoteDbType = metadata.dbType;
     const remoteConn = metadata.connection;
+
+    // --- 1. Create a unique foreign server name ---
+    const baseName = metadata.name.replace(/[^a-z0-9]/gi, '_');
+    const serverName = `remote_server_${baseName}_${Date.now()}`;
+    console.log(`🌐 Creating foreign server: ${serverName}`);
+
+    const createServerResult = await apiService.createForeignServer(
+      connectionId,
+      serverName,
+      remoteDbType,
+      {
+        host: remoteConn.host,
+        port: remoteConn.port,
+        dbname: remoteConn.dbname,
+        user: remoteConn.user,
+        password: remoteConn.password,
+        schema: remoteConn.schema,
+      }
+    );
+
+    if (!createServerResult.success) {
+      throw new Error(`Failed to create foreign server: ${createServerResult.error}`);
+    }
+    console.log(`✅ Foreign server created: ${serverName}`);
+
+    // --- 2. Create foreign tables for each selected table ---
     const allTables = metadata.tables || [];
     const selectedTableIds = metadata.selectedTables || [];
 
     if (selectedTableIds.length === 0) {
-      toast.error('❌ No tables selected.');
+      console.error('❌ No tables selected.');
       return;
     }
 
@@ -2024,31 +2144,30 @@ const handleSaveDatabaseMetadata = useCallback(async (metadata: any) => {
       }));
 
       if (columns.length === 0) {
-        toast.error(`❌ No columns defined for table ${tableName}.`);
+        console.error(`❌ No columns defined for table ${tableName}.`);
         continue;
       }
 
+      // ✅ Simplified options: only table_name and schema_name are passed.
+      // Connection details are already in the foreign server.
       const options: Record<string, string> = {
-        host: remoteConn.host || 'localhost',
-        port: String(remoteConn.port || '5432'),
-        dbname: remoteConn.dbname || '',
         table_name: tableName,
-        user: remoteConn.user || '',
-        password: remoteConn.password || '',
       };
       if (schema && schema !== 'public') {
         options.schema_name = schema;
       }
 
-      const localTableName = `${metadata.name}_${tableName}`.toLowerCase().replace(/[^a-z0-9_]/g, '_');
+      const localTableName = tableName.toLowerCase().replace(/[^a-z0-9_]/g, '_');
 
-      const result = await apiService.createForeignTable(
+      // ✅ Use the new backend endpoint via createForeignTableViaBackend
+      const result = await apiService.createForeignTableViaBackend(
         connectionId,
         localTableName,
         columns,
-        remoteDbType,
-        '', // filePath not needed for database source
-        options
+        remoteDbType,   // fileType – indicates a database source
+        '',             // filePath – empty for database
+        options,
+        serverName      // ← the server we just created
       );
 
       if (!result.success) {
@@ -2068,11 +2187,11 @@ const handleSaveDatabaseMetadata = useCallback(async (metadata: any) => {
     }
 
     if (createdCount === 0) {
-      toast.error('❌ No tables were created.');
+      console.error('❌ No tables were created.');
       return;
     }
 
-    // Update repository tree (create folder for the connection, add table nodes)
+    // --- 3. Update repository tree with new nodes ---
     let newParentFolderId: string | null = null;
 
     setRepositoryData(prev => {
@@ -2126,7 +2245,7 @@ const handleSaveDatabaseMetadata = useCallback(async (metadata: any) => {
       setExpandedNodes(prev => new Set([...prev, newParentFolderId]));
     }
 
-    // ✅ NEW: Save metadata to the new schema tables
+    // --- 4. Save metadata to the new schema tables (optional) ---
     const metadataToSave = {
       name: metadata.name,
       purpose: metadata.purpose,
@@ -2171,6 +2290,19 @@ const handleSaveDatabaseMetadata = useCallback(async (metadata: any) => {
     }));
     toast.success(`✅ Web service "${metadata.name}" saved`, { autoClose: 3000 });
   }, []);
+
+  const handleSaveSalesforceConnection = useCallback((metadata: SalesforceConnectionFormData) => {
+  // Dispatch custom event to add node under "salesforce" folder
+  window.dispatchEvent(new CustomEvent('metadata-created', {
+    detail: {
+      metadata,
+      type: 'salesforce',
+      folderId: 'salesforce' // this is the folder under metadata
+    }
+  }));
+  toast.success(`✅ Salesforce connection "${metadata.name}" saved`);
+}, []);
+
 
   // ============================================================================
   // ✅ FIXED: INITIAL SYNC FROM POSTGRESQL – now works with nested categories
@@ -3031,6 +3163,8 @@ useEffect(() => {
               onCreateJobWizard={handleCreateJobWizard} 
               onOpenWebServiceWizard={handleOpenWebServiceWizard}
               onOpenDatabaseWizard={handleOpenDatabaseWizard}
+              onOpenFTPWizard={handleOpenFTPWizard} 
+              onOpenLDAPWizard={handleOpenLDAPWizard} 
             />
           </div>
         )}
@@ -3144,9 +3278,37 @@ useEffect(() => {
         onClose={() => setDatabaseWizardOpen(false)}
         onSave={handleSaveDatabaseMetadata}
       />
+<SAPConnectionWizard
+  isOpen={sapWizardOpen}
+  onClose={() => setSapWizardOpen(false)}
+  onSave={async (data) => {
+    // Optional: additional logic after save (refresh tree, etc.)
+    console.log('SAP connection saved:', data);
+  }}
+/>
+
+<FTPConnectionWizard
+  isOpen={ftpWizardOpen}
+  onClose={() => setFtpWizardOpen(false)}
+  onSave={handleSaveFTPConnection}
+/>
+
+<SalesforceConnectionWizard
+  isOpen={salesforceWizardOpen}
+  onClose={() => setSalesforceWizardOpen(false)}
+  onSave={handleSaveSalesforceConnection}
+/>
+
+<LDAPConnectionWizard
+  isOpen={ldapWizardOpen}
+  onClose={() => setLdapWizardOpen(false)}
+  onSave={handleSaveLDAPConnection}
+/>
 
       <Layout.ToastContainerWrapper />
     </>
+
+    
   );
 };
 

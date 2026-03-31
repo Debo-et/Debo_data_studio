@@ -11,6 +11,7 @@ import {
   Network,
   Globe,
   Briefcase,
+  Server,
 } from 'lucide-react';
 
 export interface WizardConfig {
@@ -135,5 +136,22 @@ export const WIZARD_CONFIG: WizardConfig[] = [
     icon: <Database className="h-4 w-4" />,
     handlerProp: 'onOpenDatabaseWizard',
   },
+    {
+    id: 'ftp-sftp',
+    label: 'FTP/SFTP Connection',
+    handlerProp: 'onOpenFTPWizard',
+    icon: <Server className="h-4 w-4" />,
+    isCreation: true,
+    nodeType: 'folder', // or you can match by node.id
+  },
+
+  {
+  id: 'ldap-connection',
+  label: 'LDAP Connection',
+  icon: <Database className="h-4 w-4" />,
+  handlerProp: 'onOpenLDAPWizard',
+  isCreation: true,
+  nodeType: ['metadata'], // or any relevant node type
+}
   // Add more wizardType mappings as needed...
 ];

@@ -1,5 +1,5 @@
 // XMLMetadataWizard.tsx
-import React, { useState, useRef } from 'react';
+import React, { useState, useRef, useCallback, useEffect } from 'react';
 import { motion } from 'framer-motion';
 import { Button } from '../components/ui/Button';
 import {
@@ -18,10 +18,19 @@ import {
   XMLElement
 } from '../types/types';
 
-const XMLMetadataWizard: React.FC<XMLMetadataWizardProps> = ({ 
-  isOpen, 
-  onClose, 
-  onSave 
+// Helper functions for path conversion
+const xpathToDotPath = (xpath: string): string => {
+  return xpath.replace(/^\//, '').replace(/\//g, '.');
+};
+
+const dotPathToXPath = (dotPath: string): string => {
+  return '/' + dotPath.replace(/\./g, '/');
+};
+
+const XMLMetadataWizard: React.FC<XMLMetadataWizardProps> = ({
+  isOpen,
+  onClose,
+  onSave
 }) => {
   const [currentStep, setCurrentStep] = useState(1);
   const [formData, setFormData] = useState<XMLMetadataFormData>({
@@ -35,24 +44,78 @@ const XMLMetadataWizard: React.FC<XMLMetadataWizardProps> = ({
     schemaType: 'inferred',
     elements: [],
     attributes: [],
-    structure: []
+    structure: [],
+    rowXPath: '',
+    schema: []
   });
 
-  const [, setXmlContent] = useState<string>('');
+  const [xmlContent, setXmlContent] = useState<string>('');
   const [isLoading, setIsLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const [, setParsedStructure] = useState<any>(null);
+  const [parsedStructure, setParsedStructure] = useState<any>(null);
+  const [rowXPath, setRowXPath] = useState('');                     // local state for row XPath
+  const [filteredColumns, setFilteredColumns] = useState<Array<{ name: string; type: string; sample: string }>>([]);
 
   const fileInputRef = useRef<HTMLInputElement>(null);
   const totalSteps = 5;
+
+  // Data types for dropdown
+  const dataTypes = ['String', 'Integer', 'Decimal', 'Date', 'Boolean'];
+
+  // Helper to get filtered columns based on row XPath (converted to dot notation)
+  const getFilteredColumns = useCallback(() => {
+    if (!rowXPath || !formData.elements.length) return [];
+
+    // Convert user XPath to dot notation for matching
+    const dotPath = xpathToDotPath(rowXPath);
+    const prefix = dotPath + '.';
+
+    // Find all elements whose path starts with prefix and is not the parent itself
+    const filtered = formData.elements.filter(elem => {
+      return elem.path.startsWith(prefix) && elem.path !== dotPath;
+    });
+
+    // Build unique column names using the last segment of the path
+    const unique = new Map<string, { name: string; type: string; sample: string }>();
+    filtered.forEach(elem => {
+      const parts = elem.path.split('.');
+      const colName = parts[parts.length - 1];
+      if (!unique.has(colName)) {
+        unique.set(colName, {
+          name: colName,
+          type: elem.type === 'complex' ? 'String' : (elem.type === 'simple' ? 'String' : elem.type),
+          sample: elem.sampleData || ''
+        });
+      } else {
+        const existing = unique.get(colName)!;
+        if (existing.type === 'String' && elem.type !== 'complex') {
+          existing.type = elem.type;
+        }
+        if (elem.sampleData && !existing.sample) {
+          existing.sample = elem.sampleData;
+        }
+      }
+    });
+
+    return Array.from(unique.values());
+  }, [rowXPath, formData.elements]);
+
+  // Update filtered columns whenever rowXPath or elements change
+  useEffect(() => {
+    if (rowXPath && formData.elements.length) {
+      const cols = getFilteredColumns();
+      setFilteredColumns(cols);
+    } else {
+      setFilteredColumns([]);
+    }
+  }, [rowXPath, formData.elements, getFilteredColumns]);
 
   // Parse XML file and extract structure
   const parseXML = (xmlString: string): any => {
     try {
       const parser = new DOMParser();
       const xmlDoc = parser.parseFromString(xmlString, 'text/xml');
-      
-      // Check for parsing errors
+
       const parseError = xmlDoc.getElementsByTagName('parsererror')[0];
       if (parseError) {
         throw new Error('XML parsing error: ' + parseError.textContent);
@@ -72,8 +135,7 @@ const XMLMetadataWizard: React.FC<XMLMetadataWizardProps> = ({
 
     const extractFromNode = (node: Element, level: number = 0, path: string = ''): any => {
       const currentPath = path ? `${path}.${node.nodeName}` : node.nodeName;
-      
-      // Extract element information
+
       const element: XMLElement = {
         name: node.nodeName,
         type: node.childElementCount > 0 ? 'complex' : 'simple',
@@ -86,7 +148,6 @@ const XMLMetadataWizard: React.FC<XMLMetadataWizardProps> = ({
 
       elements.push(element);
 
-      // Extract attributes
       Array.from(node.attributes).forEach(attr => {
         attributes.push({
           name: attr.name,
@@ -95,7 +156,6 @@ const XMLMetadataWizard: React.FC<XMLMetadataWizardProps> = ({
         });
       });
 
-      // Build structure object
       const nodeStructure = {
         name: node.nodeName,
         type: node.childElementCount > 0 ? 'complex' : 'simple',
@@ -108,7 +168,6 @@ const XMLMetadataWizard: React.FC<XMLMetadataWizardProps> = ({
         children: [] as any[]
       };
 
-      // Recursively process child elements
       Array.from(node.children).forEach(child => {
         if (child.nodeType === Node.ELEMENT_NODE) {
           const childStructure = extractFromNode(child as Element, level + 1, currentPath);
@@ -121,7 +180,6 @@ const XMLMetadataWizard: React.FC<XMLMetadataWizardProps> = ({
     };
 
     extractFromNode(rootElement);
-
     return { elements, attributes, structure, rootElement: rootElement.nodeName };
   };
 
@@ -130,10 +188,8 @@ const XMLMetadataWizard: React.FC<XMLMetadataWizardProps> = ({
     const file = event.target.files?.[0];
     if (!file) return;
 
-    // Validate file type
     const validExtensions = ['.xml'];
     const fileExtension = file.name.toLowerCase().slice(file.name.lastIndexOf('.'));
-    
     if (!validExtensions.includes(fileExtension)) {
       setError('Please select a valid XML file (.xml)');
       return;
@@ -141,21 +197,18 @@ const XMLMetadataWizard: React.FC<XMLMetadataWizardProps> = ({
 
     setError(null);
     setIsLoading(true);
-    
+
     const reader = new FileReader();
-    
     reader.onload = (e) => {
       try {
         const content = e.target?.result as string;
         setXmlContent(content);
-        
-        // Parse XML and extract metadata
+
         const rootElement = parseXML(content);
         const metadata = extractXMLMetadata(rootElement);
-        
+
         setParsedStructure(metadata);
-        
-        // Update form data
+
         updateFormData({
           file,
           filePath: file.name,
@@ -164,7 +217,7 @@ const XMLMetadataWizard: React.FC<XMLMetadataWizardProps> = ({
           attributes: metadata.attributes,
           structure: metadata.structure
         });
-        
+
         setIsLoading(false);
       } catch (err: any) {
         setError(`Failed to process XML file: ${err.message}`);
@@ -183,23 +236,12 @@ const XMLMetadataWizard: React.FC<XMLMetadataWizardProps> = ({
   // Infer data type from sample data
   const inferDataType = (value: string): string => {
     if (!value) return 'String';
-    
-    // Check for boolean
-    if (['true', 'false', 'yes', 'no', '1', '0'].includes(value.toLowerCase())) {
-      return 'Boolean';
-    }
-    
-    // Check for number
+    if (['true', 'false', 'yes', 'no', '1', '0'].includes(value.toLowerCase())) return 'Boolean';
     if (!isNaN(Number(value)) && value.trim() !== '') {
       return Number.isInteger(Number(value)) ? 'Integer' : 'Decimal';
     }
-    
-    // Check for date
     const date = new Date(value);
-    if (!isNaN(date.getTime())) {
-      return 'Date';
-    }
-    
+    if (!isNaN(date.getTime())) return 'Date';
     return 'String';
   };
 
@@ -208,11 +250,46 @@ const XMLMetadataWizard: React.FC<XMLMetadataWizardProps> = ({
     setFormData(prev => ({ ...prev, ...updates }));
   };
 
-  // Update element field
-  const updateElement = (index: number, field: string, value: string) => {
-    const newElements = [...formData.elements];
-    newElements[index] = { ...newElements[index], [field]: value };
-    updateFormData({ elements: newElements });
+  // Update column type in filteredColumns
+  const updateColumnType = (index: number, newType: string) => {
+    const updated = [...filteredColumns];
+    updated[index] = { ...updated[index], type: newType };
+    setFilteredColumns(updated);
+  };
+
+  // Auto-detect row XPath
+  const autoDetectRowXPath = () => {
+    if (!formData.elements.length) return;
+
+    // Count occurrences of each possible parent path (in dot notation)
+    const counts: Record<string, number> = {};
+    formData.elements.forEach(elem => {
+      const parts = elem.path.split('.');
+      if (parts.length > 1) {
+        const parentPath = parts.slice(0, -1).join('.');
+        counts[parentPath] = (counts[parentPath] || 0) + 1;
+      }
+    });
+
+    let bestDotPath = '';
+    let maxCount = 0;
+    Object.entries(counts).forEach(([path, count]) => {
+      if (count > maxCount) {
+        maxCount = count;
+        bestDotPath = path;
+      }
+    });
+
+    if (bestDotPath) {
+      // Convert dot path to XPath (with leading slash)
+      const xpath = dotPathToXPath(bestDotPath);
+      setRowXPath(xpath);
+    } else if (formData.rootElement && formData.structure[0]?.children?.length) {
+      // Fallback: root element's first child
+      const firstChild = formData.structure[0].children[0].name;
+      const xpath = `/${formData.rootElement}/${firstChild}`;
+      setRowXPath(xpath);
+    }
   };
 
   const handleNext = () => {
@@ -228,7 +305,31 @@ const XMLMetadataWizard: React.FC<XMLMetadataWizardProps> = ({
   };
 
   const handleSave = () => {
-    onSave(formData);
+    // Validate row XPath and columns
+    if (!rowXPath) {
+      setError('Please set a row XPath in Step 3.');
+      setCurrentStep(3);
+      return;
+    }
+    if (filteredColumns.length === 0) {
+      setError('No columns found. Please check your row XPath or file structure.');
+      setCurrentStep(3);
+      return;
+    }
+
+    // Build schema from filteredColumns
+    const schema = filteredColumns.map(col => ({
+      name: col.name,
+      type: col.type
+    }));
+
+    const finalFormData: XMLMetadataFormData = {
+      ...formData,
+      rowXPath,
+      schema
+    };
+
+    onSave(finalFormData);
     handleClose();
   };
 
@@ -247,15 +348,16 @@ const XMLMetadataWizard: React.FC<XMLMetadataWizardProps> = ({
       schemaType: 'inferred',
       elements: [],
       attributes: [],
-      structure: []
+      structure: [],
+      rowXPath: '',
+      schema: []
     });
     setXmlContent('');
     setParsedStructure(null);
     setError(null);
+    setRowXPath('');
+    setFilteredColumns([]);
   };
-
-  // Data types for dropdown
-  const dataTypes = ['String', 'Integer', 'Decimal', 'Date', 'Boolean', 'Complex'];
 
   // Render XML structure tree
   const renderStructureTree = () => {
@@ -272,10 +374,9 @@ const XMLMetadataWizard: React.FC<XMLMetadataWizardProps> = ({
 
     const renderNode = (node: any, level: number = 0) => {
       const paddingLeft = level * 20;
-      
       return (
         <div key={node.path} className="mb-1">
-          <div 
+          <div
             className="flex items-center space-x-2 py-1 hover:bg-gray-50 dark:hover:bg-gray-700 rounded"
             style={{ paddingLeft: `${paddingLeft}px` }}
           >
@@ -328,32 +429,18 @@ const XMLMetadataWizard: React.FC<XMLMetadataWizardProps> = ({
           <table className="w-full text-sm">
             <thead className="bg-gray-100 dark:bg-gray-800">
               <tr>
-                <th className="px-3 py-2 text-left font-medium text-gray-700 dark:text-gray-300">
-                  Element
-                </th>
-                <th className="px-3 py-2 text-left font-medium text-gray-700 dark:text-gray-300">
-                  Attribute Name
-                </th>
-                <th className="px-3 py-2 text-left font-medium text-gray-700 dark:text-gray-300">
-                  Value
-                </th>
-                <th className="px-3 py-2 text-left font-medium text-gray-700 dark:text-gray-300">
-                  Inferred Type
-                </th>
+                <th className="px-3 py-2 text-left font-medium text-gray-700 dark:text-gray-300">Element</th>
+                <th className="px-3 py-2 text-left font-medium text-gray-700 dark:text-gray-300">Attribute Name</th>
+                <th className="px-3 py-2 text-left font-medium text-gray-700 dark:text-gray-300">Value</th>
+                <th className="px-3 py-2 text-left font-medium text-gray-700 dark:text-gray-300">Inferred Type</th>
               </tr>
             </thead>
             <tbody className="divide-y divide-gray-200 dark:divide-gray-600">
               {formData.attributes.map((attr, index) => (
                 <tr key={index} className="hover:bg-gray-50 dark:hover:bg-gray-700">
-                  <td className="px-3 py-2 text-gray-600 dark:text-gray-300">
-                    {attr.element}
-                  </td>
-                  <td className="px-3 py-2 text-gray-600 dark:text-gray-300">
-                    @{attr.name}
-                  </td>
-                  <td className="px-3 py-2 text-gray-600 dark:text-gray-300">
-                    {attr.value}
-                  </td>
+                  <td className="px-3 py-2 text-gray-600 dark:text-gray-300">{attr.element}</td>
+                  <td className="px-3 py-2 text-gray-600 dark:text-gray-300">@{attr.name}</td>
+                  <td className="px-3 py-2 text-gray-600 dark:text-gray-300">{attr.value}</td>
                   <td className="px-3 py-2">
                     <span className="text-xs bg-blue-100 dark:bg-blue-900 text-blue-800 dark:text-blue-200 px-2 py-1 rounded">
                       {inferDataType(attr.value)}
@@ -362,7 +449,7 @@ const XMLMetadataWizard: React.FC<XMLMetadataWizardProps> = ({
                 </tr>
               ))}
             </tbody>
-          </table>
+           </table>
         </div>
       </div>
     );
@@ -387,12 +474,7 @@ const XMLMetadataWizard: React.FC<XMLMetadataWizardProps> = ({
               Step {currentStep} of {totalSteps}
             </p>
           </div>
-          <Button
-            variant="ghost"
-            size="sm"
-            onClick={handleClose}
-            className="h-8 w-8 p-0"
-          >
+          <Button variant="ghost" size="sm" onClick={handleClose} className="h-8 w-8 p-0">
             <X className="h-4 w-4" />
           </Button>
         </div>
@@ -417,7 +499,7 @@ const XMLMetadataWizard: React.FC<XMLMetadataWizardProps> = ({
               <p className="text-sm text-gray-600 dark:text-gray-400">
                 Enter a Name for the metadata entry. Optionally, add a Purpose and Description to clarify its use.
               </p>
-              
+
               <div className="space-y-4">
                 <div>
                   <label className="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-1">
@@ -431,7 +513,7 @@ const XMLMetadataWizard: React.FC<XMLMetadataWizardProps> = ({
                     placeholder="Enter metadata name"
                   />
                 </div>
-                
+
                 <div>
                   <label className="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-1">
                     Purpose
@@ -444,7 +526,7 @@ const XMLMetadataWizard: React.FC<XMLMetadataWizardProps> = ({
                     placeholder="Enter purpose"
                   />
                 </div>
-                
+
                 <div>
                   <label className="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-1">
                     Description
@@ -469,9 +551,8 @@ const XMLMetadataWizard: React.FC<XMLMetadataWizardProps> = ({
               <p className="text-sm text-gray-600 dark:text-gray-400">
                 Click Browse to locate and select your XML file. The application will automatically parse the file and extract its structure.
               </p>
-              
+
               <div className="space-y-4">
-                {/* Hidden file input */}
                 <input
                   type="file"
                   ref={fileInputRef}
@@ -479,7 +560,7 @@ const XMLMetadataWizard: React.FC<XMLMetadataWizardProps> = ({
                   accept=".xml"
                   className="hidden"
                 />
-                
+
                 <div>
                   <label className="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-1">
                     XML File *
@@ -527,8 +608,8 @@ const XMLMetadataWizard: React.FC<XMLMetadataWizardProps> = ({
                       <span className="font-medium">XML parsed successfully!</span>
                     </div>
                     <p className="text-sm text-green-700 dark:text-green-400 mt-1">
-                      Root element: <strong>{formData.rootElement}</strong> | 
-                      Elements: <strong>{formData.elements.length}</strong> | 
+                      Root element: <strong>{formData.rootElement}</strong> |
+                      Elements: <strong>{formData.elements.length}</strong> |
                       Attributes: <strong>{formData.attributes.length}</strong>
                     </p>
                   </div>
@@ -543,9 +624,9 @@ const XMLMetadataWizard: React.FC<XMLMetadataWizardProps> = ({
                 XML Structure Analysis
               </h3>
               <p className="text-sm text-gray-600 dark:text-gray-400">
-                Review the extracted XML structure, including elements, attributes, and hierarchical relationships.
+                Review the extracted XML structure and specify the XPath that identifies the repeating rows.
               </p>
-              
+
               {!formData.rootElement ? (
                 <div className="text-center py-8 text-gray-500 dark:text-gray-400">
                   <Code className="h-12 w-12 mx-auto mb-4 opacity-50" />
@@ -557,24 +638,31 @@ const XMLMetadataWizard: React.FC<XMLMetadataWizardProps> = ({
                     <h4 className="font-medium text-gray-900 dark:text-white mb-2">Structure Overview</h4>
                     {renderStructureTree()}
                   </div>
-                  
+
                   <div>
                     <h4 className="font-medium text-gray-900 dark:text-white mb-2">Attributes</h4>
                     {renderAttributesTable()}
                   </div>
-                  
+
                   <div>
                     <label className="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-1">
-                      Schema Type
+                      Row XPath *
                     </label>
-                    <select
-                      value={formData.schemaType}
-                      onChange={(e) => updateFormData({ schemaType: e.target.value as 'inferred' | 'custom' })}
-                      className="w-full px-3 py-2 border border-gray-300 dark:border-gray-600 rounded-md focus:outline-none focus:ring-2 focus:ring-blue-500 dark:bg-gray-700 dark:text-white"
-                    >
-                      <option value="inferred">Inferred from XML</option>
-                      <option value="custom">Custom Schema</option>
-                    </select>
+                    <div className="flex space-x-2">
+                      <input
+                        type="text"
+                        value={rowXPath}
+                        onChange={(e) => setRowXPath(e.target.value)}
+                        className="flex-1 px-3 py-2 border border-gray-300 dark:border-gray-600 rounded-md focus:outline-none focus:ring-2 focus:ring-blue-500 dark:bg-gray-700 dark:text-white"
+                        placeholder="e.g., /catalog/book"
+                      />
+                      <Button variant="outline" onClick={autoDetectRowXPath}>
+                        Auto‑detect
+                      </Button>
+                    </div>
+                    <p className="text-xs text-gray-500 dark:text-gray-400 mt-1">
+                      XPath to the repeating element that represents a row. Example: <code>/catalog/book</code>
+                    </p>
                   </div>
                 </div>
               )}
@@ -584,49 +672,46 @@ const XMLMetadataWizard: React.FC<XMLMetadataWizardProps> = ({
           {currentStep === 4 && (
             <div className="space-y-4">
               <h3 className="text-lg font-medium text-gray-900 dark:text-white">
-                Define Element Schema
+                Define Column Schema
               </h3>
               <p className="text-sm text-gray-600 dark:text-gray-400">
-                Review and configure the data types for each XML element. The types have been inferred from the sample data.
+                Configure the data types for each column extracted from the row XPath.
               </p>
-              
-              {formData.elements.length === 0 ? (
+
+              {!rowXPath ? (
                 <div className="text-center py-8 text-gray-500 dark:text-gray-400">
                   <Code className="h-12 w-12 mx-auto mb-4 opacity-50" />
-                  <p>No elements available. Please complete previous steps.</p>
+                  <p>Please set the row XPath in Step 3 first.</p>
+                </div>
+              ) : filteredColumns.length === 0 ? (
+                <div className="text-center py-8 text-gray-500 dark:text-gray-400">
+                  <AlertCircle className="h-12 w-12 mx-auto mb-4 opacity-50" />
+                  <p>No columns found for the given row XPath. Please adjust the XPath or check your XML structure.</p>
                 </div>
               ) : (
                 <div className="border border-gray-200 dark:border-gray-600 rounded-md overflow-hidden">
                   <table className="w-full text-sm">
                     <thead className="bg-gray-50 dark:bg-gray-700">
                       <tr>
-                        <th className="px-4 py-3 text-left font-medium text-gray-700 dark:text-gray-300">Element Name</th>
-                        <th className="px-4 py-3 text-left font-medium text-gray-700 dark:text-gray-300">Path</th>
-                        <th className="px-4 py-3 text-left font-medium text-gray-700 dark:text-gray-300">Type</th>
-                        <th className="px-4 py-3 text-left font-medium text-gray-700 dark:text-gray-300">Level</th>
+                        <th className="px-4 py-3 text-left font-medium text-gray-700 dark:text-gray-300">Column Name</th>
+                        <th className="px-4 py-3 text-left font-medium text-gray-700 dark:text-gray-300">Data Type</th>
                         <th className="px-4 py-3 text-left font-medium text-gray-700 dark:text-gray-300">Sample Data</th>
                       </tr>
                     </thead>
                     <tbody className="divide-y divide-gray-200 dark:divide-gray-600">
-                      {formData.elements.map((element, index) => (
-                        <tr key={index} className="hover:bg-gray-50 dark:hover:bg-gray-700/50">
+                      {filteredColumns.map((col, idx) => (
+                        <tr key={idx} className="hover:bg-gray-50 dark:hover:bg-gray-700/50">
                           <td className="px-4 py-3">
                             <div className="flex items-center space-x-2">
-                              <FolderTree className="h-3 w-3 text-blue-500" />
                               <span className="font-medium text-gray-700 dark:text-gray-300">
-                                {element.name}
+                                {col.name}
                               </span>
                             </div>
                           </td>
-                          <td className="px-4 py-3 text-gray-600 dark:text-gray-300">
-                            <code className="text-xs bg-gray-100 dark:bg-gray-600 px-2 py-1 rounded">
-                              {element.path}
-                            </code>
-                          </td>
                           <td className="px-4 py-3">
                             <select
-                              value={element.type}
-                              onChange={(e) => updateElement(index, 'type', e.target.value)}
+                              value={col.type}
+                              onChange={(e) => updateColumnType(idx, e.target.value)}
                               className="w-full px-2 py-1 border border-gray-300 dark:border-gray-600 rounded focus:outline-none focus:ring-1 focus:ring-blue-500 dark:bg-gray-700 dark:text-white"
                             >
                               {dataTypes.map(type => (
@@ -635,13 +720,8 @@ const XMLMetadataWizard: React.FC<XMLMetadataWizardProps> = ({
                             </select>
                           </td>
                           <td className="px-4 py-3">
-                            <span className="text-xs bg-gray-100 dark:bg-gray-600 text-gray-700 dark:text-gray-300 px-2 py-1 rounded">
-                              Level {element.level}
-                            </span>
-                          </td>
-                          <td className="px-4 py-3">
                             <div className="text-xs text-gray-500 dark:text-gray-400 max-w-xs truncate">
-                              {element.sampleData || 'No data'}
+                              {col.sample || 'No sample'}
                             </div>
                           </td>
                         </tr>
@@ -661,7 +741,7 @@ const XMLMetadataWizard: React.FC<XMLMetadataWizardProps> = ({
               <p className="text-sm text-gray-600 dark:text-gray-400">
                 Review your XML metadata configuration and click Finish to save it to the Repository.
               </p>
-              
+
               <div className="bg-green-50 dark:bg-green-900/20 border border-green-200 dark:border-green-800 rounded-md p-4">
                 <div className="flex items-center space-x-2 text-green-800 dark:text-green-300">
                   <CheckCircle className="h-5 w-5" />
@@ -671,7 +751,7 @@ const XMLMetadataWizard: React.FC<XMLMetadataWizardProps> = ({
                   Your XML metadata configuration is complete and ready to be saved to the repository.
                 </p>
               </div>
-              
+
               <div className="grid grid-cols-2 gap-6">
                 <div className="space-y-4">
                   <h4 className="font-medium text-gray-900 dark:text-white">Configuration Summary</h4>
@@ -689,36 +769,32 @@ const XMLMetadataWizard: React.FC<XMLMetadataWizardProps> = ({
                       <span className="text-gray-900 dark:text-white">{formData.rootElement || 'Not detected'}</span>
                     </div>
                     <div className="flex justify-between">
-                      <span className="text-gray-500 dark:text-gray-400">Schema Type:</span>
-                      <span className="text-gray-900 dark:text-white">{formData.schemaType}</span>
+                      <span className="text-gray-500 dark:text-gray-400">Row XPath:</span>
+                      <span className="text-gray-900 dark:text-white font-mono text-xs">{rowXPath || 'Not set'}</span>
                     </div>
                     <div className="flex justify-between">
-                      <span className="text-gray-500 dark:text-gray-400">Total Elements:</span>
-                      <span className="text-gray-900 dark:text-white">{formData.elements.length}</span>
-                    </div>
-                    <div className="flex justify-between">
-                      <span className="text-gray-500 dark:text-gray-400">Total Attributes:</span>
-                      <span className="text-gray-900 dark:text-white">{formData.attributes.length}</span>
+                      <span className="text-gray-500 dark:text-gray-400">Total Columns:</span>
+                      <span className="text-gray-900 dark:text-white">{filteredColumns.length}</span>
                     </div>
                   </div>
                 </div>
 
-                {formData.elements.length > 0 && (
+                {filteredColumns.length > 0 && (
                   <div className="space-y-3">
-                    <h4 className="font-medium text-gray-900 dark:text-white">Structure Summary</h4>
+                    <h4 className="font-medium text-gray-900 dark:text-white">Column Summary</h4>
                     <div className="border border-gray-200 dark:border-gray-600 rounded-md p-3 max-h-48 overflow-y-auto">
                       <div className="space-y-2 text-sm">
-                        {formData.elements.slice(0, 10).map((element, index) => (
-                          <div key={index} className="flex justify-between items-center py-1 border-b border-gray-100 dark:border-gray-700 last:border-b-0">
-                            <span className="text-gray-600 dark:text-gray-400 font-medium">{element.name}</span>
+                        {filteredColumns.slice(0, 10).map((col, idx) => (
+                          <div key={idx} className="flex justify-between items-center py-1 border-b border-gray-100 dark:border-gray-700 last:border-b-0">
+                            <span className="text-gray-600 dark:text-gray-400 font-medium">{col.name}</span>
                             <span className="text-gray-900 dark:text-white text-xs bg-blue-100 dark:bg-blue-900 px-2 py-1 rounded">
-                              {element.type}
+                              {col.type}
                             </span>
                           </div>
                         ))}
-                        {formData.elements.length > 10 && (
+                        {filteredColumns.length > 10 && (
                           <div className="text-center text-gray-500 dark:text-gray-400 text-xs">
-                            ... and {formData.elements.length - 10} more elements
+                            ... and {filteredColumns.length - 10} more columns
                           </div>
                         )}
                       </div>
@@ -732,22 +808,23 @@ const XMLMetadataWizard: React.FC<XMLMetadataWizardProps> = ({
 
         {/* Footer */}
         <div className="flex items-center justify-between p-6 border-t border-gray-200 dark:border-gray-700">
-          <Button
-            variant="outline"
-            onClick={currentStep === 1 ? handleClose : handleBack}
-          >
+          <Button variant="outline" onClick={currentStep === 1 ? handleClose : handleBack}>
             <ArrowLeft className="h-4 w-4 mr-2" />
             {currentStep === 1 ? 'Cancel' : 'Back'}
           </Button>
-          
+
           <div className="flex items-center space-x-3">
             <span className="text-sm text-gray-500 dark:text-gray-400">
               Step {currentStep} of {totalSteps}
             </span>
             {currentStep < totalSteps ? (
-              <Button 
+              <Button
                 onClick={handleNext}
-                disabled={(currentStep === 2 && !formData.file) || (currentStep === 3 && !formData.rootElement)}
+                disabled={
+                  (currentStep === 1 && !formData.name.trim()) ||
+                  (currentStep === 2 && !formData.file) ||
+                  (currentStep === 3 && !rowXPath)
+                }
               >
                 Next
                 <ArrowRight className="h-4 w-4 ml-2" />

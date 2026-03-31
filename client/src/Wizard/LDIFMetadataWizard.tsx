@@ -1,4 +1,4 @@
-// LDIFMetadataWizard.tsx
+// LDIFMetadataWizard.tsx – FULLY FIXED
 import React, { useState, useRef } from 'react';
 import { motion } from 'framer-motion';
 import { Button } from '../components/ui/Button';
@@ -11,7 +11,8 @@ import {
   FolderTree,
   AlertCircle,
   Users,
-  Key} from 'lucide-react';
+  Key
+} from 'lucide-react';
 import {
   LDIFMetadataFormData,
   LDIFMetadataWizardProps,
@@ -48,90 +49,57 @@ const LDIFMetadataWizard: React.FC<LDIFMetadataWizardProps> = ({
   const fileInputRef = useRef<HTMLInputElement>(null);
   const totalSteps = 5;
 
-  // In the parseLDIF function, update the currentAttribute initialization and usage:
+  // ==================== LDIF PARSER (FIXED) ====================
+  const parseLDIF = (content: string): { entries: LDIFEntry[], baseDN?: string } => {
+    const entries: LDIFEntry[] = [];
+    const lines = content.split('\n');
+    let currentEntry: Partial<LDIFEntry> = {};
+    let currentAttribute: Partial<LDIFAttribute> & { values: string[] } = { values: [] };
+    let entryIndex = 0;
 
-const parseLDIF = (content: string): { entries: LDIFEntry[], baseDN?: string } => {
-  const entries: LDIFEntry[] = [];
-  const lines = content.split('\n');
-  let currentEntry: Partial<LDIFEntry> = {};
-  // Initialize currentAttribute with values array
-  let currentAttribute: Partial<LDIFAttribute> & { values: string[] } = { values: [] };
-  let entryIndex = 0;
+    for (let i = 0; i < lines.length; i++) {
+      const line = lines[i].trim();
+      
+      // Skip empty lines and comments
+      if (!line || line.startsWith('#')) continue;
 
-  for (let i = 0; i < lines.length; i++) {
-    const line = lines[i].trim();
-    
-    // Skip empty lines and comments
-    if (!line || line.startsWith('#')) continue;
+      // Check for DN line (start of new entry)
+      if (line.toLowerCase().startsWith('dn:')) {
+        // Save previous entry if exists
+        if (currentEntry.dn && currentEntry.attributes) {
+          // Save the last attribute if it exists
+          if (currentAttribute.name && currentAttribute.values.length > 0) {
+            currentEntry.attributes.push({
+              name: currentAttribute.name,
+              values: currentAttribute.values,
+              type: inferAttributeType(currentAttribute.name, currentAttribute.values[0]),
+              isMultiValued: currentAttribute.values.length > 1,
+              isBinary: isBinaryData(currentAttribute.values[0])
+            });
+            currentAttribute = { values: [] };
+          }
 
-    // Check for DN line (start of new entry)
-    if (line.toLowerCase().startsWith('dn:')) {
-      // Save previous entry if exists
-      if (currentEntry.dn && currentEntry.attributes) {
-        // Save the last attribute if it exists
-        if (currentAttribute.name && currentAttribute.values.length > 0) {
-          currentEntry.attributes.push({
-            name: currentAttribute.name,
-            values: currentAttribute.values,
-            type: inferAttributeType(currentAttribute.name, currentAttribute.values[0]),
-            isMultiValued: currentAttribute.values.length > 1,
-            isBinary: isBinaryData(currentAttribute.values[0])
+          entries.push({
+            dn: currentEntry.dn,
+            objectClasses: currentEntry.objectClasses || [],
+            attributes: currentEntry.attributes,
+            entryIndex: entryIndex++
           });
-          // Reset current attribute
-          currentAttribute = { values: [] };
         }
 
-        entries.push({
-          dn: currentEntry.dn,
-          objectClasses: currentEntry.objectClasses || [],
-          attributes: currentEntry.attributes,
-          entryIndex: entryIndex++
-        });
-      }
-
-      // Start new entry
-      const dn = line.substring(3).trim();
-      currentEntry = {
-        dn,
-        objectClasses: [],
-        attributes: []
-      };
-      // Reset current attribute for new entry
-      currentAttribute = { values: [] };
-      continue;
-    }
-
-    // Handle attribute lines
-    if (line.includes(':')) {
-      const colonIndex = line.indexOf(':');
-      const attributeName = line.substring(0, colonIndex).trim();
-      let attributeValue = line.substring(colonIndex + 1).trim();
-
-      // Handle folded lines (lines starting with space)
-      if (attributeValue === '' && i + 1 < lines.length) {
-        let nextLine = lines[i + 1].trim();
-        while (nextLine.startsWith(' ')) {
-          attributeValue += nextLine.trim();
-          i++;
-          if (i + 1 >= lines.length) break;
-          nextLine = lines[i + 1].trim();
-        }
-      }
-
-      // Handle objectClass attribute specially
-      if (attributeName.toLowerCase() === 'objectclass') {
-        if (!currentEntry.objectClasses) currentEntry.objectClasses = [];
-        currentEntry.objectClasses.push(attributeValue);
+        // Start new entry
+        const dn = line.substring(3).trim();
+        currentEntry = {
+          dn,
+          objectClasses: [],
+          attributes: []
+        };
+        currentAttribute = { values: [] };
         continue;
       }
 
-      // Check if this is a continuation of the same attribute
-      if (currentAttribute.name === attributeName) {
-        // Add to existing multi-valued attribute
-        currentAttribute.values.push(attributeValue);
-        currentAttribute.isMultiValued = true;
-      } else {
-        // Save previous attribute if exists
+      // Handle separator lines (end of a modify operation block)
+      if (line === '-') {
         if (currentAttribute.name && currentAttribute.values.length > 0) {
           currentEntry.attributes?.push({
             name: currentAttribute.name,
@@ -140,58 +108,100 @@ const parseLDIF = (content: string): { entries: LDIFEntry[], baseDN?: string } =
             isMultiValued: currentAttribute.values.length > 1,
             isBinary: isBinaryData(currentAttribute.values[0])
           });
+          currentAttribute = { values: [] };
+        }
+        continue;
+      }
+
+      // Handle attribute lines
+      if (line.includes(':')) {
+        const colonIndex = line.indexOf(':');
+        const attributeName = line.substring(0, colonIndex).trim();
+        let attributeValue = line.substring(colonIndex + 1).trim();
+
+        // Handle folded lines (lines starting with space)
+        if (attributeValue === '' && i + 1 < lines.length) {
+          let nextLine = lines[i + 1].trim();
+          while (nextLine.startsWith(' ')) {
+            attributeValue += nextLine.trim();
+            i++;
+            if (i + 1 >= lines.length) break;
+            nextLine = lines[i + 1].trim();
+          }
         }
 
-        // Start new attribute
-        currentAttribute = {
-          name: attributeName,
-          values: [attributeValue],
-          isMultiValued: false,
-          isBinary: isBinaryData(attributeValue)
-        };
+        // --- SKIP OPERATION LINES ---
+        const lowerAttrName = attributeName.toLowerCase();
+        if (lowerAttrName === 'add' || lowerAttrName === 'replace' || lowerAttrName === 'delete') {
+          continue;
+        }
+
+        // Handle objectClass attribute specially
+        if (lowerAttrName === 'objectclass') {
+          if (!currentEntry.objectClasses) currentEntry.objectClasses = [];
+          currentEntry.objectClasses.push(attributeValue);
+          continue;
+        }
+
+        // Check if this is a continuation of the same attribute
+        if (currentAttribute.name === attributeName) {
+          currentAttribute.values.push(attributeValue);
+          currentAttribute.isMultiValued = true;
+        } else {
+          // Save previous attribute if exists
+          if (currentAttribute.name && currentAttribute.values.length > 0) {
+            currentEntry.attributes?.push({
+              name: currentAttribute.name,
+              values: currentAttribute.values,
+              type: inferAttributeType(currentAttribute.name, currentAttribute.values[0]),
+              isMultiValued: currentAttribute.values.length > 1,
+              isBinary: isBinaryData(currentAttribute.values[0])
+            });
+          }
+
+          // Start new attribute
+          currentAttribute = {
+            name: attributeName,
+            values: [attributeValue],
+            isMultiValued: false,
+            isBinary: isBinaryData(attributeValue)
+          };
+        }
       }
     }
-  }
 
-  // Save the last entry
-  if (currentEntry.dn && currentEntry.attributes) {
-    // Save the last attribute if it exists
-    if (currentAttribute.name && currentAttribute.values.length > 0) {
-      currentEntry.attributes.push({
-        name: currentAttribute.name,
-        values: currentAttribute.values,
-        type: inferAttributeType(currentAttribute.name, currentAttribute.values[0]),
-        isMultiValued: currentAttribute.values.length > 1,
-        isBinary: currentAttribute.isBinary || false
+    // Save the last entry
+    if (currentEntry.dn && currentEntry.attributes) {
+      if (currentAttribute.name && currentAttribute.values.length > 0) {
+        currentEntry.attributes.push({
+          name: currentAttribute.name,
+          values: currentAttribute.values,
+          type: inferAttributeType(currentAttribute.name, currentAttribute.values[0]),
+          isMultiValued: currentAttribute.values.length > 1,
+          isBinary: currentAttribute.isBinary || false
+        });
+      }
+
+      entries.push({
+        dn: currentEntry.dn,
+        objectClasses: currentEntry.objectClasses || [],
+        attributes: currentEntry.attributes,
+        entryIndex: entryIndex
       });
     }
 
-    entries.push({
-      dn: currentEntry.dn,
-      objectClasses: currentEntry.objectClasses || [],
-      attributes: currentEntry.attributes,
-      entryIndex: entryIndex
-    });
-  }
+    const baseDN = entries.length > 0 ? extractBaseDN(entries[0].dn) : undefined;
+    return { entries, baseDN };
+  };
 
-  // Extract base DN from first entry if available
-  const baseDN = entries.length > 0 ? extractBaseDN(entries[0].dn) : undefined;
-
-  return { entries, baseDN };
-};
-
-  // Extract base DN from full DN
   const extractBaseDN = (dn: string): string => {
     const parts = dn.split(',');
-    // Return the last 2-3 components as base DN
     return parts.slice(-2).join(',');
   };
 
-  // Infer attribute type based on name and sample value
   const inferAttributeType = (name: string, value: string): string => {
     const nameLower = name.toLowerCase();
     
-    // Common LDAP attribute type mappings
     if (nameLower.includes('uid') || nameLower.includes('cn')) return 'Distinguished Name';
     if (nameLower.includes('mail')) return 'Email';
     if (nameLower.includes('telephone') || nameLower.includes('phone')) return 'Telephone';
@@ -201,9 +211,7 @@ const parseLDIF = (content: string): { entries: LDIFEntry[], baseDN?: string } =
     if (nameLower.includes('jpegphoto') || nameLower.includes('photo')) return 'Binary';
     if (nameLower.includes('count') || nameLower.includes('gidnumber')) return 'Integer';
     
-    // Infer from value
     if (!value) return 'String';
-    
     if (value.match(/^\d+$/)) return 'Integer';
     if (value.match(/^\d+\.\d+$/)) return 'Decimal';
     if (value.match(/^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$/)) return 'Email';
@@ -212,40 +220,44 @@ const parseLDIF = (content: string): { entries: LDIFEntry[], baseDN?: string } =
     return 'String';
   };
 
-  // Check if data appears to be binary
   const isBinaryData = (value: string): boolean => {
-    // Simple heuristic: if it contains many non-printable characters or is base64-like
     const nonPrintableRatio = (value.match(/[\x00-\x1F\x7F-\x9F]/g) || []).length / value.length;
     return nonPrintableRatio > 0.3 || value.length > 1000;
   };
 
-  // Generate schema from entries
   const generateSchema = (entries: LDIFEntry[]): LDIFSchemaDefinition[] => {
     const schemaMap = new Map<string, LDIFSchemaDefinition>();
-    
     entries.forEach(entry => {
       entry.attributes.forEach(attr => {
         if (!schemaMap.has(attr.name)) {
           schemaMap.set(attr.name, {
             name: attr.name,
             type: attr.type,
-            required: false, // Would need more analysis to determine
+            required: false,
             multiValued: attr.isMultiValued,
             description: `LDAP attribute: ${attr.name}`
           });
         }
       });
     });
-    
     return Array.from(schemaMap.values());
   };
 
-  // Handle file selection and parsing
+  // ==================== CONVERT SCHEMA TO COLUMNS ====================
+  const schemaToColumns = (schema: LDIFSchemaDefinition[]) => {
+    return schema.map(attr => ({
+      name: attr.name,
+      type: attr.type,
+      nullable: true,
+      // You can optionally add length if your schema contains it
+    }));
+  };
+
+  // ==================== FILE HANDLING ====================
   const handleFileSelect = (event: React.ChangeEvent<HTMLInputElement>) => {
     const file = event.target.files?.[0];
     if (!file) return;
 
-    // Validate file type
     const validExtensions = ['.ldif', '.ldf'];
     const fileExtension = file.name.toLowerCase().slice(file.name.lastIndexOf('.'));
     
@@ -264,13 +276,10 @@ const parseLDIF = (content: string): { entries: LDIFEntry[], baseDN?: string } =
         const content = e.target?.result as string;
         setLdifContent(content);
         
-        // Parse LDIF and extract metadata
         const { entries, baseDN } = parseLDIF(content);
         const schema = generateSchema(entries);
-        
         const totalAttributes = entries.reduce((count, entry) => count + entry.attributes.length, 0);
         
-        // Update form data
         updateFormData({
           file,
           filePath: file.name,
@@ -279,7 +288,7 @@ const parseLDIF = (content: string): { entries: LDIFEntry[], baseDN?: string } =
           schema,
           totalEntries: entries.length,
           totalAttributes,
-          encoding: 'UTF-8' // LDIF is typically UTF-8
+          encoding: 'UTF-8'
         });
         
         setIsLoading(false);
@@ -297,7 +306,6 @@ const parseLDIF = (content: string): { entries: LDIFEntry[], baseDN?: string } =
     reader.readAsText(file);
   };
 
-  // Update form data
   const updateFormData = (updates: Partial<LDIFMetadataFormData>) => {
     setFormData(prev => ({ ...prev, ...updates }));
   };
@@ -314,14 +322,20 @@ const parseLDIF = (content: string): { entries: LDIFEntry[], baseDN?: string } =
     }
   };
 
+  // ==================== SAVE HANDLER WITH COLUMNS ====================
   const handleSave = () => {
-    onSave(formData);
+    const columns = schemaToColumns(formData.schema);
+    if (columns.length === 0) {
+      setError("No columns detected. Please check that your LDIF file contains valid attributes.");
+      return;
+    }
+    // Pass the columns along with the rest of the form data
+    onSave({ ...formData, columns } as any);
     handleClose();
   };
 
   const handleClose = () => {
     onClose();
-    // Reset state
     setCurrentStep(1);
     setFormData({
       name: '',
@@ -341,7 +355,7 @@ const parseLDIF = (content: string): { entries: LDIFEntry[], baseDN?: string } =
     setError(null);
   };
 
-  // Render entries table
+  // ==================== RENDER HELPERS ====================
   const renderEntriesTable = () => {
     if (!formData.entries || formData.entries.length === 0) {
       return (
@@ -365,15 +379,9 @@ const parseLDIF = (content: string): { entries: LDIFEntry[], baseDN?: string } =
           <table className="w-full text-sm">
             <thead className="bg-gray-100 dark:bg-gray-800">
               <tr>
-                <th className="px-3 py-2 text-left font-medium text-gray-700 dark:text-gray-300">
-                  DN
-                </th>
-                <th className="px-3 py-2 text-left font-medium text-gray-700 dark:text-gray-300">
-                  Object Classes
-                </th>
-                <th className="px-3 py-2 text-left font-medium text-gray-700 dark:text-gray-300">
-                  Attributes
-                </th>
+                <th className="px-3 py-2 text-left font-medium text-gray-700 dark:text-gray-300">DN</th>
+                <th className="px-3 py-2 text-left font-medium text-gray-700 dark:text-gray-300">Object Classes</th>
+                <th className="px-3 py-2 text-left font-medium text-gray-700 dark:text-gray-300">Attributes</th>
               </tr>
             </thead>
             <tbody className="divide-y divide-gray-200 dark:divide-gray-600">
@@ -415,7 +423,6 @@ const parseLDIF = (content: string): { entries: LDIFEntry[], baseDN?: string } =
     );
   };
 
-  // Render schema table
   const renderSchemaTable = () => {
     if (!formData.schema || formData.schema.length === 0) {
       return (
@@ -439,26 +446,16 @@ const parseLDIF = (content: string): { entries: LDIFEntry[], baseDN?: string } =
           <table className="w-full text-sm">
             <thead className="bg-gray-100 dark:bg-gray-800">
               <tr>
-                <th className="px-3 py-2 text-left font-medium text-gray-700 dark:text-gray-300">
-                  Attribute Name
-                </th>
-                <th className="px-3 py-2 text-left font-medium text-gray-700 dark:text-gray-300">
-                  Type
-                </th>
-                <th className="px-3 py-2 text-left font-medium text-gray-700 dark:text-gray-300">
-                  Multi-valued
-                </th>
-                <th className="px-3 py-2 text-left font-medium text-gray-700 dark:text-gray-300">
-                  Required
-                </th>
+                <th className="px-3 py-2 text-left font-medium text-gray-700 dark:text-gray-300">Attribute Name</th>
+                <th className="px-3 py-2 text-left font-medium text-gray-700 dark:text-gray-300">Type</th>
+                <th className="px-3 py-2 text-left font-medium text-gray-700 dark:text-gray-300">Multi-valued</th>
+                <th className="px-3 py-2 text-left font-medium text-gray-700 dark:text-gray-300">Required</th>
               </tr>
             </thead>
             <tbody className="divide-y divide-gray-200 dark:divide-gray-600">
               {formData.schema.map((attr, index) => (
                 <tr key={index} className="hover:bg-gray-50 dark:hover:bg-gray-700">
-                  <td className="px-3 py-2 font-medium text-gray-700 dark:text-gray-300">
-                    {attr.name}
-                  </td>
+                  <td className="px-3 py-2 font-medium text-gray-700 dark:text-gray-300">{attr.name}</td>
                   <td className="px-3 py-2">
                     <span className="text-xs bg-green-100 dark:bg-green-900 text-green-800 dark:text-green-200 px-2 py-1 rounded">
                       {attr.type}
@@ -538,18 +535,13 @@ const parseLDIF = (content: string): { entries: LDIFEntry[], baseDN?: string } =
         <div className="p-6 max-h-[60vh] overflow-y-auto">
           {currentStep === 1 && (
             <div className="space-y-4">
-              <h3 className="text-lg font-medium text-gray-900 dark:text-white">
-                General Properties
-              </h3>
+              <h3 className="text-lg font-medium text-gray-900 dark:text-white">General Properties</h3>
               <p className="text-sm text-gray-600 dark:text-gray-400">
                 Enter a Name for the LDIF metadata entry. Optionally, add a Purpose and Description to clarify its use.
               </p>
-              
               <div className="space-y-4">
                 <div>
-                  <label className="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-1">
-                    Name *
-                  </label>
+                  <label className="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-1">Name *</label>
                   <input
                     type="text"
                     value={formData.name}
@@ -558,11 +550,8 @@ const parseLDIF = (content: string): { entries: LDIFEntry[], baseDN?: string } =
                     placeholder="Enter LDIF metadata name"
                   />
                 </div>
-                
                 <div>
-                  <label className="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-1">
-                    Purpose
-                  </label>
+                  <label className="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-1">Purpose</label>
                   <input
                     type="text"
                     value={formData.purpose}
@@ -571,11 +560,8 @@ const parseLDIF = (content: string): { entries: LDIFEntry[], baseDN?: string } =
                     placeholder="Enter purpose"
                   />
                 </div>
-                
                 <div>
-                  <label className="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-1">
-                    Description
-                  </label>
+                  <label className="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-1">Description</label>
                   <textarea
                     value={formData.description}
                     onChange={(e) => updateFormData({ description: e.target.value })}
@@ -590,15 +576,11 @@ const parseLDIF = (content: string): { entries: LDIFEntry[], baseDN?: string } =
 
           {currentStep === 2 && (
             <div className="space-y-4">
-              <h3 className="text-lg font-medium text-gray-900 dark:text-white">
-                File Selection
-              </h3>
+              <h3 className="text-lg font-medium text-gray-900 dark:text-white">File Selection</h3>
               <p className="text-sm text-gray-600 dark:text-gray-400">
                 Click Browse to locate and select your LDIF file. The application will automatically parse the file and extract its structure.
               </p>
-              
               <div className="space-y-4">
-                {/* Hidden file input */}
                 <input
                   type="file"
                   ref={fileInputRef}
@@ -606,11 +588,8 @@ const parseLDIF = (content: string): { entries: LDIFEntry[], baseDN?: string } =
                   accept=".ldif,.ldf"
                   className="hidden"
                 />
-                
                 <div>
-                  <label className="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-1">
-                    LDIF File *
-                  </label>
+                  <label className="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-1">LDIF File *</label>
                   <div className="flex space-x-2">
                     <input
                       type="text"
@@ -666,13 +645,10 @@ const parseLDIF = (content: string): { entries: LDIFEntry[], baseDN?: string } =
 
           {currentStep === 3 && (
             <div className="space-y-4">
-              <h3 className="text-lg font-medium text-gray-900 dark:text-white">
-                LDIF Structure Analysis
-              </h3>
+              <h3 className="text-lg font-medium text-gray-900 dark:text-white">LDIF Structure Analysis</h3>
               <p className="text-sm text-gray-600 dark:text-gray-400">
                 Review the extracted LDIF structure, including directory entries and their attributes.
               </p>
-              
               {!formData.totalEntries ? (
                 <div className="text-center py-8 text-gray-500 dark:text-gray-400">
                   <FolderTree className="h-12 w-12 mx-auto mb-4 opacity-50" />
@@ -684,11 +660,8 @@ const parseLDIF = (content: string): { entries: LDIFEntry[], baseDN?: string } =
                     <h4 className="font-medium text-gray-900 dark:text-white mb-2">Directory Entries</h4>
                     {renderEntriesTable()}
                   </div>
-                  
                   <div>
-                    <label className="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-1">
-                      Base DN
-                    </label>
+                    <label className="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-1">Base DN</label>
                     <input
                       type="text"
                       value={formData.baseDN}
@@ -704,13 +677,10 @@ const parseLDIF = (content: string): { entries: LDIFEntry[], baseDN?: string } =
 
           {currentStep === 4 && (
             <div className="space-y-4">
-              <h3 className="text-lg font-medium text-gray-900 dark:text-white">
-                Schema Definition
-              </h3>
+              <h3 className="text-lg font-medium text-gray-900 dark:text-white">Schema Definition</h3>
               <p className="text-sm text-gray-600 dark:text-gray-400">
                 Review the inferred schema from the LDIF file. You can modify attribute types and properties as needed.
               </p>
-              
               {formData.schema.length === 0 ? (
                 <div className="text-center py-8 text-gray-500 dark:text-gray-400">
                   <Key className="h-12 w-12 mx-auto mb-4 opacity-50" />
@@ -719,11 +689,8 @@ const parseLDIF = (content: string): { entries: LDIFEntry[], baseDN?: string } =
               ) : (
                 <div className="space-y-4">
                   {renderSchemaTable()}
-                  
                   <div>
-                    <label className="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-1">
-                      Validation Mode
-                    </label>
+                    <label className="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-1">Validation Mode</label>
                     <select
                       value={formData.validationMode}
                       onChange={(e) => updateFormData({ validationMode: e.target.value as 'strict' | 'lenient' | 'custom' })}
@@ -741,13 +708,10 @@ const parseLDIF = (content: string): { entries: LDIFEntry[], baseDN?: string } =
 
           {currentStep === 5 && (
             <div className="space-y-4">
-              <h3 className="text-lg font-medium text-gray-900 dark:text-white">
-                Finish and Save
-              </h3>
+              <h3 className="text-lg font-medium text-gray-900 dark:text-white">Finish and Save</h3>
               <p className="text-sm text-gray-600 dark:text-gray-400">
                 Review your LDIF metadata configuration and click Finish to save it to the Repository.
               </p>
-              
               <div className="bg-green-50 dark:bg-green-900/20 border border-green-200 dark:border-green-800 rounded-md p-4">
                 <div className="flex items-center space-x-2 text-green-800 dark:text-green-300">
                   <CheckCircle className="h-5 w-5" />
@@ -757,7 +721,6 @@ const parseLDIF = (content: string): { entries: LDIFEntry[], baseDN?: string } =
                   Your LDIF metadata configuration is complete and ready to be saved to the repository.
                 </p>
               </div>
-              
               <div className="grid grid-cols-2 gap-6">
                 <div className="space-y-4">
                   <h4 className="font-medium text-gray-900 dark:text-white">Configuration Summary</h4>
@@ -792,7 +755,6 @@ const parseLDIF = (content: string): { entries: LDIFEntry[], baseDN?: string } =
                     </div>
                   </div>
                 </div>
-
                 {formData.schema.length > 0 && (
                   <div className="space-y-3">
                     <h4 className="font-medium text-gray-900 dark:text-white">Schema Summary</h4>

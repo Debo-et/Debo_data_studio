@@ -262,11 +262,17 @@ function buildFDWOptions(
 /**
  * Generate CREATE FOREIGN TABLE SQL for a database source.
  */
+// backend/src/database/services/foreign-table.service.ts
+
+/**
+ * Generate CREATE FOREIGN TABLE SQL for a database source.
+ */
 function generateDatabaseForeignTableSQL(
   tableName: string,
   columns: ColumnDefinition[],
   dbType: string,
-  options: ForeignTableOptions = {}
+  options: ForeignTableOptions = {},
+  serverName?: string   // <-- NEW: optional server name
 ): string {
   const sanitizedTableName = sanitizePostgresIdentifier(tableName);
 
@@ -289,7 +295,8 @@ function generateDatabaseForeignTableSQL(
     })
     .join(',\n  ');
 
-  const fdwServer = getFDWServerForDatabaseType(dbType);
+  // Use the provided serverName if given; otherwise fall back to the default FDW server
+  const fdwServer = serverName || getFDWServerForDatabaseType(dbType);
   const fdwOptions = buildDatabaseFDWOptions(dbType, options);
 
   return `-- Auto-generated foreign table for database ${dbType} source
@@ -305,7 +312,6 @@ CREATE FOREIGN TABLE IF NOT EXISTS ${sanitizedTableName} (
 COMMENT ON FOREIGN TABLE ${sanitizedTableName} IS 'Foreign table for database ${dbType} (created ${new Date().toISOString()})';
 `;
 }
-
 /**
  * Generate CREATE FOREIGN TABLE SQL for a file source.
  */
@@ -403,13 +409,16 @@ async function checkConnectionHealth(): Promise<boolean> {
  * Main function to create foreign table in PostgreSQL.
  * Handles both file-based and database sources.
  */
+// backend/src/database/services/foreign-table.service.ts
+
 export async function createForeignTableInPostgres(
   _connectionId: string,
   tableName: string,
   columns: ColumnDefinition[],
   fileType: string,
   filePath: string,
-  options: ForeignTableOptions = {}
+  options: ForeignTableOptions = {},
+  serverName?: string   // <-- already present
 ): Promise<CreateForeignTableResult> {
   Logger.info(`Creating foreign table: ${tableName} for ${fileType} source`);
 
@@ -448,10 +457,10 @@ export async function createForeignTableInPostgres(
       };
     }
 
-    // 3. Generate SQL based on source type
+    // 3. Generate SQL based on source type, passing serverName for database sources
     let sql: string;
     if (isDatabaseSource) {
-      sql = generateDatabaseForeignTableSQL(tableName, columns, fileType, options);
+      sql = generateDatabaseForeignTableSQL(tableName, columns, fileType, options, serverName);
     } else {
       sql = generateFileForeignTableSQL(tableName, columns, fileType, filePath, options);
     }
@@ -481,6 +490,7 @@ export async function createForeignTableInPostgres(
       };
     } catch (queryError) {
       Logger.error(`SQL execution failed: ${queryError instanceof Error ? queryError.message : String(queryError)}`);
+      Logger.error(`Stack: ${queryError instanceof Error ? queryError.stack : 'No stack'}`);
 
       let errorMessage = 'Unknown error creating foreign table';
       if (queryError instanceof Error) {
@@ -522,7 +532,6 @@ export async function createForeignTableInPostgres(
     };
   }
 }
-
 /**
  * Drop a foreign table
  */

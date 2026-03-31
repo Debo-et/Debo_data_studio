@@ -2,6 +2,8 @@
 
 import { BaseSQLGenerator, SQLGenerationContext, GeneratedSQLFragment, SQLGenerationError } from './BaseSQLGenerator';
 import { CanvasNode, SchemaMapping, TransformationRule, PostgreSQLDataType, SortConfig, CanvasConnection } from '../types/pipeline-types';
+import { mapToPostgresType } from '@/api/postgres-foreign-table';
+import { UnifiedCanvasNode } from '@/types/unified-pipeline.types';
 
 // Import MapEditor types for canvas integration
 interface ColumnDefinition {
@@ -48,31 +50,44 @@ export interface CanvasMappingContext {
 export class MapSQLGenerator extends BaseSQLGenerator {
   // ==================== TEMPLATE METHOD IMPLEMENTATIONS ====================
 
-  protected generateSelectStatement(context: SQLGenerationContext): GeneratedSQLFragment {
-    const { node, connection } = context;
-    const mappings = this.extractSchemaMappings(node, connection);
-    
-    if (mappings.length === 0) {
-      return this.generateFallbackSelect(context);
-    }
+protected generateSelectStatement(context: SQLGenerationContext): GeneratedSQLFragment {
+  const { node, connection } = context;
+  const mappings = this.extractSchemaMappings(node, connection);
 
-    // Build SELECT clause with mappings
-    const selectColumns = this.generateMappedColumns(mappings, node.metadata?.transformationRules || []);
-    
-    return {
-      sql: `SELECT ${selectColumns}`,
-      dependencies: this.extractSourceDependencies(mappings),
-      parameters: new Map(),
-      errors: [],
-      warnings: [],
-      metadata: {
-        generatedAt: new Date().toISOString(),
-        fragmentType: 'map_select',
-        lineCount: 1
-      }
-    };
+  if (mappings.length === 0) {
+    return this.generateFallbackSelect(context);
   }
 
+  // Build SELECT clause with mappings – now includes type casting
+  const selectColumns = this.generateMappedColumns(
+    mappings,
+    node.metadata?.transformationRules || [],
+    node   // <-- pass node to access output schema
+  );
+
+  // Determine the source table/CTE reference
+  let sourceRef = 'source_table';
+  if (connection && connection.sourceNodeId) {
+    sourceRef = connection.sourceNodeId;
+  } else {
+    this.logger?.warn('tMap node has no incoming connection; using placeholder source.');
+  }
+
+  const sql = `SELECT ${selectColumns} FROM ${this.sanitizeIdentifier(sourceRef)}`;
+
+  return {
+    sql,
+    dependencies: this.extractSourceDependencies(mappings),
+    parameters: new Map(),
+    errors: [],
+    warnings: connection ? [] : ['No incoming connection found for tMap node. Using placeholder source.'],
+    metadata: {
+      generatedAt: new Date().toISOString(),
+      fragmentType: 'map_select',
+      lineCount: 1
+    }
+  };
+}
   protected generateJoinConditions(_context: SQLGenerationContext): GeneratedSQLFragment {
     // MAP nodes typically don't have JOIN conditions
     return this.emptyFragment('join_conditions');
@@ -962,19 +977,20 @@ export class MapSQLGenerator extends BaseSQLGenerator {
     transformationRules: TransformationRule[],
     options: { useCoalesce?: boolean; parameterize?: boolean }
   ): string {
-    const sourceCol = sourceColumns.find(c => c.name === mapping.sourceColumn);
-    
-    // Base expression
-    let expression = mapping.sourceColumn;
+    // Base expression – use sanitized qualified identifier to handle column names with spaces
+    let expression = this.sanitizeQualifiedIdentifier(mapping.sourceColumn);
 
     // Apply data type conversion if needed
-    if (mapping.dataTypeConversion && sourceCol) {
-      expression = this.applyDataTypeConversion(
-        expression,
-        sourceCol.dataType,
-        mapping.dataTypeConversion.to,
-        mapping.dataTypeConversion.params
-      );
+    if (mapping.dataTypeConversion) {
+      const sourceCol = sourceColumns.find(c => c.name === mapping.sourceColumn.split('.').pop());
+      if (sourceCol) {
+        expression = this.applyDataTypeConversion(
+          expression,
+          sourceCol.dataType,
+          mapping.dataTypeConversion.to,
+          mapping.dataTypeConversion.params
+        );
+      }
     }
 
     // Apply transformation if specified
@@ -1182,7 +1198,7 @@ export class MapSQLGenerator extends BaseSQLGenerator {
     rules.forEach((rule: TransformationRule) => {
       if (rule.condition) {
         const condition = this.sanitizeCondition(rule.condition);
-        const value = rule.params?.value || this.sanitizeIdentifier(sourceColumn);
+        const value = rule.params?.value || this.sanitizeQualifiedIdentifier(sourceColumn);
         caseParts.push(`WHEN ${condition} THEN ${value}`);
       }
     });
@@ -1191,8 +1207,8 @@ export class MapSQLGenerator extends BaseSQLGenerator {
     let elseClause = defaultValue 
       ? this.sanitizeValue(defaultValue)
       : baseTransformation 
-        ? baseTransformation.replace('?', this.sanitizeIdentifier(sourceColumn))
-        : this.sanitizeIdentifier(sourceColumn);
+        ? baseTransformation.replace('?', this.sanitizeQualifiedIdentifier(sourceColumn))
+        : this.sanitizeQualifiedIdentifier(sourceColumn);
     
     return `CASE ${caseParts.join(' ')} ELSE ${elseClause} END AS ${this.sanitizeIdentifier(targetColumn)}`;
   }
@@ -1208,11 +1224,14 @@ export class MapSQLGenerator extends BaseSQLGenerator {
     const sourceColumnNames = new Set(sourceColumns.map(c => c.name));
     
     mappings.forEach(mapping => {
+      // Extract the column name from qualified identifier
+      const sourceColumnSimple = mapping.sourceColumn.split('.').pop() || mapping.sourceColumn;
+      
       // Check if source column exists
-      if (!sourceColumnNames.has(mapping.sourceColumn)) {
+      if (!sourceColumnNames.has(sourceColumnSimple)) {
         errors.push({
           code: 'SOURCE_COLUMN_NOT_FOUND',
-          message: `Source column "${mapping.sourceColumn}" not found`,
+          message: `Source column "${sourceColumnSimple}" not found`,
           severity: 'ERROR',
           field: 'sourceColumn'
         });
@@ -1220,7 +1239,7 @@ export class MapSQLGenerator extends BaseSQLGenerator {
       
       // Validate data type conversions
       if (mapping.dataTypeConversion) {
-        const sourceCol = sourceColumns.find(c => c.name === mapping.sourceColumn);
+        const sourceCol = sourceColumns.find(c => c.name === sourceColumnSimple);
         if (sourceCol) {
           const isCompatible = this.validateDataTypeCompatibility(
             sourceCol.dataType,
@@ -1455,41 +1474,60 @@ export class MapSQLGenerator extends BaseSQLGenerator {
     return mappings;
   }
 
-  private generateMappedColumns(
-    mappings: SchemaMapping[],
-    transformationRules: TransformationRule[]
-  ): string {
-    const columns: string[] = [];
-    
-    mappings.forEach(mapping => {
-      const matchingRules = transformationRules.filter((rule: TransformationRule) => 
-        rule.params?.targetColumn === mapping.targetColumn
-      );
-      
-      if (matchingRules.length > 0) {
-        const caseStatement = this.buildCaseStatement(
-          mapping.sourceColumn,
-          mapping.targetColumn,
-          matchingRules,
-          mapping.transformation,
-          mapping.defaultValue
-        );
-        
-        if (caseStatement) {
-          columns.push(caseStatement);
-        } else {
-          columns.push(this.buildSimpleMapping(mapping));
-        }
-      } else {
-        columns.push(this.buildSimpleMapping(mapping));
-      }
-    });
-    
-    return columns.join(', ');
+  // In MapSQLGenerator.ts, inside generateMappedColumns method
+
+private generateMappedColumns(
+  mappings: SchemaMapping[],
+  transformationRules: TransformationRule[],
+  node: UnifiedCanvasNode
+): string {
+  // Build a map of target column -> expected PostgreSQL type
+  const outputFields = node.metadata?.schemas?.output?.fields || [];
+  const targetTypeMap = new Map<string, string>();
+  for (const field of outputFields) {
+    // Convert application DataType (e.g., 'Integer') to PostgreSQL type string
+    const pgType = mapToPostgresType(field.type, field.length, field.precision, field.scale);
+    targetTypeMap.set(field.name, pgType);
   }
 
+  const columns: string[] = [];
+
+  for (const mapping of mappings) {
+    let expression = this.sanitizeQualifiedIdentifier(mapping.sourceColumn);
+
+    // Apply transformation if present
+    if (mapping.transformation) {
+      expression = mapping.transformation.replace('?', expression);
+    }
+
+    // Apply default value handling (COALESCE)
+    if (mapping.defaultValue && !mapping.transformation) {
+      expression = `COALESCE(${expression}, ${this.sanitizeValue(mapping.defaultValue)})`;
+    }
+
+    // Apply additional transformation rules (case, arithmetic, etc.)
+    const rules = transformationRules.filter(r => r.params?.targetColumn === mapping.targetColumn);
+    if (rules.length > 0) {
+      expression = this.applyTransformationRules(expression, rules);
+    }
+
+    // ----- ADD EXPLICIT TYPE CAST -----
+    const targetType = targetTypeMap.get(mapping.targetColumn);
+    if (targetType && targetType !== 'TEXT') {
+      // Only cast if target is not TEXT and expression doesn't already have a cast
+      if (!expression.toLowerCase().includes('::')) {
+        expression = `(${expression})::${targetType}`;
+      }
+    }
+
+    columns.push(`${expression} AS ${this.sanitizeIdentifier(mapping.targetColumn)}`);
+  }
+
+  return columns.join(', ');
+}
+
   private buildSimpleMapping(mapping: SchemaMapping): string {
-    let expression = this.sanitizeIdentifier(mapping.sourceColumn);
+    let expression = this.sanitizeQualifiedIdentifier(mapping.sourceColumn);
     
     if (mapping.transformation) {
       expression = mapping.transformation.replace('?', expression);
@@ -1989,5 +2027,25 @@ FROM ${primarySourceTable.name}`;
     }
     
     return dp[m][n];
+  }
+
+  // ==================== NEW HELPER METHOD FOR QUALIFIED IDENTIFIERS ====================
+
+  /**
+   * Sanitize a qualified identifier (table.column) by quoting each part individually.
+   * This ensures that column names containing spaces are correctly quoted.
+   */
+  private sanitizeQualifiedIdentifier(qualifiedName: string): string {
+    const parts = qualifiedName.split('.');
+    if (parts.length === 1) {
+      // Unqualified column name
+      return this.sanitizeIdentifier(parts[0]);
+    }
+    // Qualified: table.column (or more parts)
+    const tablePart = parts[0];
+    const columnPart = parts.slice(1).join('.'); // handle multiple dots (rare)
+    // Table part is likely a CTE name – already safe, but we sanitize for consistency
+    // Column part must be sanitized
+    return `${this.sanitizeIdentifier(tablePart)}.${this.sanitizeIdentifier(columnPart)}`;
   }
 }

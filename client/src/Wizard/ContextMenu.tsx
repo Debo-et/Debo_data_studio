@@ -6,6 +6,8 @@ import {
   Trash2,
   Copy,
   Edit,
+  Server,
+  Database,
 } from 'lucide-react';
 import { RepositoryNode } from '../types/types';
 import { WIZARD_CONFIG, WizardConfig } from '../config/wizard-registry';
@@ -31,6 +33,8 @@ interface ContextMenuProps {
   onOpenLDAPWizard?: () => void;
   onOpenDatabaseWizard?: () => void;
   onCreateJobWizard?: () => void;
+  onOpenFTPWizard?: () => void;
+  onOpenSalesforceWizard?: () => void;
 }
 
 // Helper: count child nodes (unchanged)
@@ -63,6 +67,7 @@ const ContextMenu: React.FC<ContextMenuProps> = ({
   onCreateItem,
   onDelete,
   onBulkDelete,
+  onOpenSalesforceWizard,
   ...wizardHandlers
 }) => {
   const menuRef = useRef<HTMLDivElement>(null);
@@ -281,7 +286,15 @@ const ContextMenu: React.FC<ContextMenuProps> = ({
               </span>
             </button>
           )}
-
+{node.id === 'salesforce' && (
+  <button
+    onClick={() => handleClick(() => onOpenSalesforceWizard?.())}
+    className="flex items-center space-x-2 w-full px-3 py-2 text-sm text-gray-700 dark:text-gray-200 hover:bg-gray-100 dark:hover:bg-gray-700"
+  >
+    <Database className="h-4 w-4" />
+    <span>Salesforce Connection</span>
+  </button>
+)}
           {node.type !== 'folder' && !isSystemNode() && (
             <button
               onClick={() => {
@@ -299,8 +312,20 @@ const ContextMenu: React.FC<ContextMenuProps> = ({
               Move to Recycle Bin
             </button>
           )}
+
+          {node.id === 'ftp-sftp' && (
+  <button
+    onClick={() => handleClick(() => wizardHandlers.onOpenFTPWizard?.())}
+    className="flex items-center space-x-2 w-full px-3 py-2 text-sm text-gray-700 dark:text-gray-200 hover:bg-gray-100 dark:hover:bg-gray-700"
+  >
+    <Server className="h-4 w-4" />
+    <span>FTP/SFTP Connection</span>
+  </button>
+)}
         </>
       )}
+
+      
     </div>
   );
 };

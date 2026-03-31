@@ -43,7 +43,7 @@ import { useAppDispatch } from '../hooks';
 import { addLog } from '../store/slices/logsSlice';
 import { generatePipelineSQL, PipelineGenerationResult } from '../generators/SQLGenerationPipeline';
 import { CanvasNode as PipelineCanvasNode, CanvasConnection as PipelineCanvasConnection, ConnectionStatus } from '../types/pipeline-types';
-import { NodeType, isMapConfig, isJoinConfig, isFilterConfig, isAggregateConfig, isSortConfig, isInputConfig, isOutputConfig, NodeStatus } from '../types/unified-pipeline.types';
+import { NodeType, isMapConfig, isJoinConfig, isFilterConfig, isAggregateConfig, isSortConfig, isInputConfig, isOutputConfig, NodeStatus, UnifiedNodeMetadata, ComponentConfiguration } from '../types/unified-pipeline.types';
 import {
   ActiveEditor,
   CanvasNodeData,
@@ -77,6 +77,7 @@ import {
   ActiveEditorRenderer,
 } from './canvas.modals';
 import databaseApi from '@/services/database-api.service';
+import { mapToPostgresType } from '@/api/postgres-foreign-table';
 
 const nodeTypes: NodeTypes = {
   talendNode: TalendNode,
@@ -372,116 +373,131 @@ const Canvas = forwardRef<{ forceSave: () => Promise<void> }, ExtendedCanvasProp
   }, []);
 
   const onDrop = useCallback((event: React.DragEvent) => {
-    event.preventDefault();
-    if (!reactFlowInstance) return;
-    const position = screenToFlowPosition({ x: event.clientX, y: event.clientY });
-    const reactFlowData = event.dataTransfer.getData('application/reactflow');
-    if (!reactFlowData) return;
-    try {
-      const data: ReactFlowDragData = JSON.parse(reactFlowData);
-      if (data.type !== 'reactflow-component') return;
-      const componentDef = COMPONENT_REGISTRY[data.componentId];
-      if (!componentDef) return;
+  event.preventDefault();
+  if (!reactFlowInstance) return;
+  const position = screenToFlowPosition({ x: event.clientX, y: event.clientY });
+  const reactFlowData = event.dataTransfer.getData('application/reactflow');
+  if (!reactFlowData) return;
+  try {
+    const data: ReactFlowDragData = JSON.parse(reactFlowData);
+    if (data.type !== 'reactflow-component') return;
+    const componentDef = COMPONENT_REGISTRY[data.componentId];
+    if (!componentDef) return;
 
-      let baseName = data.metadata?.originalNodeName || data.metadata?.repositoryMetadata?.name || data.metadata?.name || componentDef.displayName;
-      const cleanBaseName = baseName.replace(/_(INPUT|OUTPUT|TRANSFORM)_/i, '_').replace(/_+$/, '');
-      const isInputCategory = componentDef.category === 'input';
-      const label = nameGenerator.generate(cleanBaseName, isInputCategory ? 'TRANSFORM' : componentDef.defaultRole);
-      const columns = extractColumnsFromDragData(data.metadata);
-      const componentRole = isInputCategory ? 'TRANSFORM' : componentDef.defaultRole;
-      const configuration = createInitialComponentConfiguration(componentDef.id, componentRole, data.metadata);
+    let baseName = data.metadata?.originalNodeName || data.metadata?.repositoryMetadata?.name || data.metadata?.name || componentDef.displayName;
+    const cleanBaseName = baseName.replace(/_(INPUT|OUTPUT|TRANSFORM)_/i, '_').replace(/_+$/, '');
+    const isInputCategory = componentDef.category === 'input';
+    const label = nameGenerator.generate(cleanBaseName, isInputCategory ? 'TRANSFORM' : componentDef.defaultRole);
+    const columns = extractColumnsFromDragData(data.metadata);
+    const componentRole = isInputCategory ? 'TRANSFORM' : componentDef.defaultRole;
+    const configuration = createInitialComponentConfiguration(componentDef.id, componentRole, data.metadata);
 
-      const fields = columns.map((col: any, idx) => ({
-        id: col.id || `${cleanBaseName}_${idx}`,
-        name: col.name || `Column_${idx + 1}`,
-        type: col.type || 'STRING',
-        length: col.length,
-        precision: col.precision,
-        scale: col.scale,
-        nullable: col.nullable !== false,
-        isKey: col.isKey || col.primaryKey || false,
-        defaultValue: col.defaultValue,
-        description: col.description,
-        originalName: col.originalName,
-        transformation: col.expression,
-        metadata: { original: col },
-      }));
+    const fields = columns.map((col: any, idx) => ({
+      id: col.id || `${cleanBaseName}_${idx}`,
+      name: col.name || `Column_${idx + 1}`,
+      type: col.type || 'STRING',
+      length: col.length,
+      precision: col.precision,
+      scale: col.scale,
+      nullable: col.nullable !== false,
+      isKey: col.isKey || col.primaryKey || false,
+      defaultValue: col.defaultValue,
+      description: col.description,
+      originalName: col.originalName,
+      transformation: col.expression,
+      metadata: { original: col },
+    }));
 
-      const schemas: any = {};
-      if (componentRole === 'INPUT') {
-        schemas.output = { id: `${cleanBaseName}_output_schema`, name: `${label} Output Schema`, fields, isTemporary: false, isMaterialized: false };
-        if (configuration.type === 'INPUT') configuration.config.schema = schemas.output;
-      } else if (componentRole === 'OUTPUT') {
-        schemas.input = [{ id: `${cleanBaseName}_input_schema`, name: `${label} Input Schema`, fields, isTemporary: false, isMaterialized: false }];
-      } else {
-        schemas.input = [{ id: `${cleanBaseName}_input_schema`, name: `${label} Input Schema`, fields, isTemporary: false, isMaterialized: false }];
-        schemas.output = { id: `${cleanBaseName}_output_schema`, name: `${label} Output Schema`, fields, isTemporary: false, isMaterialized: false };
-      }
-
-      const nodeData: CanvasNodeData = {
-        id: `node-${Date.now()}-${cleanBaseName}`,
-        name: label,
-        type: mapComponentKeyToNodeType(componentDef.id, componentRole),
-        nodeType: componentRole === 'INPUT' ? 'input' : componentRole === 'OUTPUT' ? 'output' : 'transform',
-        componentCategory: componentDef.category,
-        position,
-        size: { width: componentDef.defaultDimensions.width * 2, height: componentDef.defaultDimensions.height * 2 },
-        metadata: {
-          configuration,
-          schemas,
-          description: componentDef.description,
-          tags: [],
-          version: '1.0',
-          createdBy: 'canvas',
-          createdAt: new Date().toISOString(),
-          updatedAt: new Date().toISOString(),
-          displayName: componentDef.displayName,
-          cleanType: cleanBaseName,
-          scaleFactor: 0.6,
-          visualScaling: { fontSizeScale: 0.6, iconScale: 0.6, handleScale: 0.6 },
-          repositoryNodeId: data.metadata?.repositoryNodeId,
-          repositoryNodeType: data.metadata?.repositoryNodeType,
-          originalNodeName: data.metadata?.originalNodeName,
-          originalNodeType: data.metadata?.originalNodeType,
-          fullRepositoryMetadata: data.metadata?.repositoryMetadata,
-          extractedColumns: columns,
-          dragMetadata: data.metadata,
-          source: data.source,
-          sourceType: data.metadata?.sourceType,
-          category: componentDef.category,
-          isDataSource: componentDef.category === 'input' || componentDef.category === 'output',
-        },
-        status: NodeStatus.IDLE,
-        draggable: true,
-        technology: componentDef.id,
-        visualProperties: { color: getCategoryColor(componentDef.category), icon: componentDef.icon },
-      };
-      const newNode: Node<CanvasNodeData> = { id: nodeData.id, type: 'talendNode', position, data: nodeData, style: { width: nodeData.size.width, height: nodeData.size.height }, draggable: true, selectable: true, connectable: true };
-      addNodes(newNode);
-      const updatedNodes = [...nodes, newNode];
-      setTimeout(() => syncNodesAndEdges(updatedNodes, edges), 0);
-      if (onNodeMetadataUpdate) onNodeMetadataUpdate(newNode.id, nodeData.metadata!);
-      debouncedAutoSave();
-
-      if (isInputCategory) {
-        setPendingRoleSelection({
-          nodeId: newNode.id,
-          componentId: componentDef.id,
-          displayName: cleanBaseName,
-          position,
-          dropPosition: { x: event.clientX, y: event.clientY },
-          componentDef,
-          nodeData,
-        });
-        showValidationFeedback(`Please select role for ${cleanBaseName}`, 'info', position);
-      } else {
-        showValidationFeedback(`Added ${label}`, 'success', position);
-      }
-    } catch (error) {
-      console.error('Drop error:', error);
-      showValidationFeedback('Failed to add component', 'error', { x: event.clientX, y: event.clientY });
+    const schemas: any = {};
+    if (componentRole === 'INPUT') {
+      schemas.output = { id: `${cleanBaseName}_output_schema`, name: `${label} Output Schema`, fields, isTemporary: false, isMaterialized: false };
+      if (configuration.type === 'INPUT') configuration.config.schema = schemas.output;
+    } else if (componentRole === 'OUTPUT') {
+      schemas.input = [{ id: `${cleanBaseName}_input_schema`, name: `${label} Input Schema`, fields, isTemporary: false, isMaterialized: false }];
+    } else {
+      schemas.input = [{ id: `${cleanBaseName}_input_schema`, name: `${label} Input Schema`, fields, isTemporary: false, isMaterialized: false }];
+      schemas.output = { id: `${cleanBaseName}_output_schema`, name: `${label} Output Schema`, fields, isTemporary: false, isMaterialized: false };
     }
-  }, [reactFlowInstance, screenToFlowPosition, addNodes, nodes, edges, syncNodesAndEdges, onNodeMetadataUpdate, showValidationFeedback, debouncedAutoSave]);
+
+    const nodeData: CanvasNodeData = {
+      id: `node-${Date.now()}-${cleanBaseName}`,
+      name: label,
+      type: mapComponentKeyToNodeType(componentDef.id, componentRole),
+      nodeType: componentRole === 'INPUT' ? 'input' : componentRole === 'OUTPUT' ? 'output' : 'transform',
+      componentCategory: componentDef.category,
+      position,
+      size: { width: componentDef.defaultDimensions.width * 2, height: componentDef.defaultDimensions.height * 2 },
+      metadata: {
+        configuration,
+        schemas,
+        description: componentDef.description,
+        tags: [],
+        version: '1.0',
+        createdBy: 'canvas',
+        createdAt: new Date().toISOString(),
+        updatedAt: new Date().toISOString(),
+        displayName: componentDef.displayName,
+        cleanType: cleanBaseName,
+        scaleFactor: 0.6,
+        visualScaling: { fontSizeScale: 0.6, iconScale: 0.6, handleScale: 0.6 },
+        repositoryNodeId: data.metadata?.repositoryNodeId,
+        repositoryNodeType: data.metadata?.repositoryNodeType,
+        originalNodeName: data.metadata?.originalNodeName,
+        originalNodeType: data.metadata?.originalNodeType,
+        fullRepositoryMetadata: data.metadata?.repositoryMetadata,
+        extractedColumns: columns,
+        dragMetadata: data.metadata,
+        source: data.source,
+        sourceType: data.metadata?.sourceType,
+        category: componentDef.category,
+        isDataSource: componentDef.category === 'input' || componentDef.category === 'output',
+      },
+      status: NodeStatus.IDLE,
+      draggable: true,
+      technology: componentDef.id,
+      visualProperties: { color: getCategoryColor(componentDef.category), icon: componentDef.icon },
+    };
+
+    // 🔧 NEW: For output components, copy the table name from repository metadata
+    if (componentDef.category === 'output' && data.metadata?.repositoryMetadata?.postgresTableName) {
+      nodeData.metadata!.postgresTableName = data.metadata.repositoryMetadata.postgresTableName;
+    }
+
+    const newNode: Node<CanvasNodeData> = { 
+      id: nodeData.id, 
+      type: 'talendNode', 
+      position, 
+      data: nodeData, 
+      style: { width: nodeData.size.width, height: nodeData.size.height }, 
+      draggable: true, 
+      selectable: true, 
+      connectable: true 
+    };
+    addNodes(newNode);
+    const updatedNodes = [...nodes, newNode];
+    setTimeout(() => syncNodesAndEdges(updatedNodes, edges), 0);
+    if (onNodeMetadataUpdate) onNodeMetadataUpdate(newNode.id, nodeData.metadata!);
+    debouncedAutoSave();
+
+    if (isInputCategory) {
+      setPendingRoleSelection({
+        nodeId: newNode.id,
+        componentId: componentDef.id,
+        displayName: cleanBaseName,
+        position,
+        dropPosition: { x: event.clientX, y: event.clientY },
+        componentDef,
+        nodeData,
+      });
+      showValidationFeedback(`Please select role for ${cleanBaseName}`, 'info', position);
+    } else {
+      showValidationFeedback(`Added ${label}`, 'success', position);
+    }
+  } catch (error) {
+    console.error('Drop error:', error);
+    showValidationFeedback('Failed to add component', 'error', { x: event.clientX, y: event.clientY });
+  }
+}, [reactFlowInstance, screenToFlowPosition, addNodes, nodes, edges, syncNodesAndEdges, onNodeMetadataUpdate, showValidationFeedback, debouncedAutoSave]);
 
   const onDragOver = useCallback((event: React.DragEvent) => {
     event.preventDefault();
@@ -706,97 +722,192 @@ const Canvas = forwardRef<{ forceSave: () => Promise<void> }, ExtendedCanvasProp
     };
   }, [handleCanvasNodeDoubleClick, nodes, edges]);
 
-  // ==================== ROLE SELECTION ====================
-  const handleRoleSelect = useCallback((selectedRole: 'INPUT' | 'OUTPUT') => {
-    if (!pendingRoleSelection) return;
-    const nodeToUpdate = nodes.find(n => n.id === pendingRoleSelection.nodeId);
-    if (!nodeToUpdate) return;
+const handleRoleCancel = useCallback(() => {
+  if (!pendingRoleSelection) return;
+  setNodes(prev => {
+    const updated = prev.filter(node => node.id !== pendingRoleSelection.nodeId);
+    syncNodesAndEdges(updated, edges);
+    return updated;
+  });
+  nameGenerator.decrementCounter(pendingRoleSelection.componentId, 'TRANSFORM');
+  debouncedAutoSave();
+  setPendingRoleSelection(null);
+  showValidationFeedback('Component placement cancelled', 'info', pendingRoleSelection.position);
+}, [pendingRoleSelection, edges, syncNodesAndEdges, debouncedAutoSave, showValidationFeedback]);
 
-    const newLabel = nameGenerator.generate(pendingRoleSelection.componentId, selectedRole);
-    const columns = extractColumnsFromDragData(pendingRoleSelection.nodeData.metadata);
-    const fields = columns.map((col: any, idx) => ({
-      id: col.id || `${pendingRoleSelection.componentId}_${idx}`,
-      name: col.name || `Column_${idx + 1}`,
-      type: col.type || 'STRING',
-      length: col.length,
-      precision: col.precision,
-      scale: col.scale,
-      nullable: col.nullable !== false,
-      isKey: col.isKey || col.primaryKey || false,
-      defaultValue: col.defaultValue,
-      description: col.description,
-      originalName: col.originalName,
-      transformation: col.expression,
-      metadata: { original: col },
-    }));
+const handleRoleSelect = useCallback((selectedRole: 'INPUT' | 'OUTPUT') => {
+  if (!pendingRoleSelection) return;
+  const nodeToUpdate = nodes.find(n => n.id === pendingRoleSelection.nodeId);
+  if (!nodeToUpdate) return;
 
-    const newConfiguration = createInitialComponentConfiguration(pendingRoleSelection.componentId, selectedRole, pendingRoleSelection.nodeData.metadata);
-    const schemas: any = {};
-    if (selectedRole === 'INPUT') {
-      schemas.output = { id: `${pendingRoleSelection.componentId}_output_schema`, name: `${newLabel} Output Schema`, fields, isTemporary: false, isMaterialized: false };
-      if (newConfiguration.type === 'INPUT') (newConfiguration.config as any).schema = schemas.output;
-    } else {
-      schemas.input = [{ id: `${pendingRoleSelection.componentId}_input_schema`, name: `${newLabel} Input Schema`, fields, isTemporary: false, isMaterialized: false }];
-    }
+  // Use actual name from repository metadata
+  const actualName = pendingRoleSelection.nodeData.metadata?.fullRepositoryMetadata?.name ||
+                     pendingRoleSelection.nodeData.metadata?.repositoryMetadata?.name ||
+                     pendingRoleSelection.displayName;
 
-    setNodes(prev => {
-      const updated = prev.map(node => {
-        if (node.id === pendingRoleSelection.nodeId) {
-          const updatedData = {
-            ...pendingRoleSelection.nodeData,
-            name: newLabel,
-            nodeType: selectedRole === 'INPUT' ? 'input' : 'output',
-            componentType: selectedRole,
-            metadata: { ...pendingRoleSelection.nodeData.metadata, configuration: newConfiguration, schemas, updatedAt: new Date().toISOString(), isDataSource: true, userSelectedRole: selectedRole },
-          };
-          if (onNodeMetadataUpdate) onNodeMetadataUpdate(node.id, updatedData.metadata!);
-          return { ...node, data: updatedData };
-        }
-        return node;
-      });
-      syncNodesAndEdges(updated, edges);
-      return updated;
+  // Create configuration with correct role
+  const newConfiguration = createInitialComponentConfiguration(
+    pendingRoleSelection.componentId,
+    selectedRole,
+    pendingRoleSelection.nodeData.metadata
+  );
+
+  // Extract columns for schema
+  const columns = extractColumnsFromDragData(pendingRoleSelection.nodeData.metadata);
+  const fields = columns.map((col: any, idx) => ({
+    id: col.id || `${pendingRoleSelection.componentId}_${idx}`,
+    name: col.name || `Column_${idx + 1}`,
+    type: col.type || 'STRING',
+    length: col.length,
+    precision: col.precision,
+    scale: col.scale,
+    nullable: col.nullable !== false,
+    isKey: col.isKey || col.primaryKey || false,
+    defaultValue: col.defaultValue,
+    description: col.description,
+    originalName: col.originalName,
+    transformation: col.expression,
+    metadata: { original: col },
+  }));
+
+  // Build schemas based on selected role
+  const schemas: any = {};
+  if (selectedRole === 'INPUT') {
+    schemas.output = {
+      id: `${pendingRoleSelection.componentId}_output_schema`,
+      name: `${actualName} Output Schema`,
+      fields,
+      isTemporary: false,
+      isMaterialized: false
+    };
+    if (newConfiguration.type === 'INPUT') (newConfiguration.config as any).schema = schemas.output;
+  } else {
+    schemas.input = [{
+      id: `${pendingRoleSelection.componentId}_input_schema`,
+      name: `${actualName} Input Schema`,
+      fields,
+      isTemporary: false,
+      isMaterialized: false
+    }];
+  }
+
+  // Determine node types
+  const nodeTypeEnum = selectedRole === 'INPUT' ? NodeType.INPUT : NodeType.OUTPUT;
+  const visualNodeType = selectedRole === 'INPUT' ? 'input' : 'output';
+
+  // Update the node
+  setNodes(prev => {
+    const updated = prev.map(node => {
+      if (node.id === pendingRoleSelection.nodeId) {
+        const updatedData = {
+          ...pendingRoleSelection.nodeData,
+          name: actualName,
+          type: nodeTypeEnum,
+          nodeType: visualNodeType,
+          componentType: selectedRole,
+          metadata: {
+            ...pendingRoleSelection.nodeData.metadata,
+            configuration: newConfiguration,
+            schemas,
+            updatedAt: new Date().toISOString(),
+            isDataSource: true,
+            userSelectedRole: selectedRole
+          }
+        };
+        if (onNodeMetadataUpdate) onNodeMetadataUpdate(node.id, updatedData.metadata!);
+        return { ...node, data: updatedData };
+      }
+      return node;
     });
-    debouncedAutoSave();
-    setPendingRoleSelection(null);
-    showValidationFeedback(`Role set to ${selectedRole} for ${pendingRoleSelection.displayName}`, 'success', pendingRoleSelection.position);
-  }, [pendingRoleSelection, nodes, edges, onNodeMetadataUpdate, syncNodesAndEdges, debouncedAutoSave, showValidationFeedback]);
+    syncNodesAndEdges(updated, edges);
+    return updated;
+  });
 
-  const handleRoleCancel = useCallback(() => {
-    if (!pendingRoleSelection) return;
-    setNodes(prev => {
-      const updated = prev.filter(node => node.id !== pendingRoleSelection.nodeId);
-      syncNodesAndEdges(updated, edges);
-      return updated;
-    });
-    nameGenerator.decrementCounter(pendingRoleSelection.componentId, 'TRANSFORM');
-    debouncedAutoSave();
-    setPendingRoleSelection(null);
-    showValidationFeedback('Component placement cancelled', 'info', pendingRoleSelection.position);
-  }, [pendingRoleSelection, edges, syncNodesAndEdges, debouncedAutoSave, showValidationFeedback]);
+  debouncedAutoSave();
+  setPendingRoleSelection(null);
+  showValidationFeedback(`Role set to ${selectedRole} for ${actualName}`, 'success', pendingRoleSelection.position);
+}, [pendingRoleSelection, nodes, edges, onNodeMetadataUpdate, syncNodesAndEdges, debouncedAutoSave, showValidationFeedback]);
 
   // ==================== MAP EDITOR SAVE ====================
-  const handleMapEditorSave = useCallback((config: any) => {
-    const { mapEditorState } = state;
-    if (!mapEditorState.isOpen || !mapEditorState.nodeMetadata) return;
-    const nodeId = mapEditorState.nodeMetadata.id;
-    const updatedConfig = { type: 'MAP', config };
-    setNodes(prev => {
-      const updated = prev.map(node => {
-        if (node.id === nodeId) {
-          const updatedMetadata = { ...node.data.metadata, configuration: updatedConfig, compilerMetadata: { ...node.data.metadata?.compilerMetadata, lastModified: new Date().toISOString() } };
-          if (onNodeMetadataUpdate) onNodeMetadataUpdate(nodeId, updatedMetadata);
-          return { ...node, data: { ...node.data, metadata: updatedMetadata } };
+const handleMapEditorSave = useCallback((config: any) => {
+  const { mapEditorState } = state;
+  if (!mapEditorState.isOpen || !mapEditorState.nodeMetadata) return;
+
+  const nodeId = mapEditorState.nodeMetadata.id;
+
+  // Find connected output node(s) and get target schema
+  const outgoingEdges = edges.filter(edge => edge.source === nodeId);
+  const outputNodes = outgoingEdges
+    .map(edge => nodes.find(n => n.id === edge.target))
+    .filter((n): n is Node<CanvasNodeData> =>
+      n !== undefined && n.data?.nodeType === 'output'
+    );
+
+  // Build column name -> PostgreSQL data type map
+  const targetTypeMap = new Map<string, string>();
+  for (const outNode of outputNodes) {
+    const inputSchemas = outNode.data.metadata?.schemas?.input;
+    if (inputSchemas && inputSchemas.length > 0) {
+      const fields = inputSchemas[0].fields;
+      for (const field of fields) {
+        const pgType = mapToPostgresType(field.type, field.length, field.precision, field.scale);
+        targetTypeMap.set(field.name, pgType);
+      }
+    }
+  }
+
+  setNodes(prev => {
+    const updated = prev.map(node => {
+      if (node.id === nodeId) {
+        const tMapData = node.data as CanvasNodeData;
+        const currentOutputSchema = tMapData.metadata?.schemas?.output;
+        let updatedOutputSchema = currentOutputSchema;
+
+        if (currentOutputSchema && targetTypeMap.size > 0) {
+          const updatedFields = currentOutputSchema.fields.map(field => {
+            const expectedType = targetTypeMap.get(field.name);
+            if (expectedType && expectedType !== 'TEXT') {
+              return { ...field, type: expectedType };
+            }
+            return field;
+          });
+          updatedOutputSchema = { ...currentOutputSchema, fields: updatedFields };
         }
-        return node;
-      });
-      syncNodesAndEdges(updated, edges);
-      return updated;
+
+        // Build the new metadata with explicit ComponentConfiguration cast
+        const updatedMetadata: UnifiedNodeMetadata = {
+          ...(tMapData.metadata || {}),
+          configuration: { type: 'MAP', config } as ComponentConfiguration,
+          schemas: {
+            ...(tMapData.metadata?.schemas || {}),
+            output: updatedOutputSchema,
+          },
+          compilerMetadata: {
+            ...(tMapData.metadata?.compilerMetadata || {}),
+            lastModified: new Date().toISOString(),
+          },
+        };
+
+        if (onNodeMetadataUpdate) onNodeMetadataUpdate(nodeId, updatedMetadata);
+        return { ...node, data: { ...tMapData, metadata: updatedMetadata } };
+      }
+      return node;
     });
-    debouncedAutoSave();
-    showValidationFeedback(`Saved ${config.transformations.length} transformations`, 'success', { x: 100, y: 100 });
-    setState(prev => ({ ...prev, mapEditorState: { isOpen: false, data: null, nodeMetadata: undefined } }));
-  }, [state.mapEditorState, onNodeMetadataUpdate, syncNodesAndEdges, edges, debouncedAutoSave, showValidationFeedback]);
+    syncNodesAndEdges(updated, edges);
+    return updated;
+  });
+
+  debouncedAutoSave();
+  showValidationFeedback(
+    `Saved ${config.transformations.length} transformations with proper data types`,
+    'success',
+    { x: 100, y: 100 }
+  );
+  setState(prev => ({
+    ...prev,
+    mapEditorState: { isOpen: false, data: null, nodeMetadata: undefined },
+  }));
+}, [state.mapEditorState, onNodeMetadataUpdate, syncNodesAndEdges, edges, nodes, debouncedAutoSave, showValidationFeedback]);
 
   const closeTMapEditor = useCallback(() => {
     setState(prev => ({ ...prev, mapEditorState: { isOpen: false, data: null, nodeMetadata: undefined } }));

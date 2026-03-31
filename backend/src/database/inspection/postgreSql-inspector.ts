@@ -312,96 +312,96 @@ class PostgreSQLConnection {
     };
   }
 
-  /**
-   * Executes SQL query using a client from the pool
-   */
-  async query(sql: string, params: any[] = []): Promise<any> {
-    this.validateQueryParameters(sql, params);
+async query(sql: string, params?: any[]): Promise<any> {
+  const safeParams = params ?? [];
+  this.validateQueryParameters(sql, safeParams);
 
-    if (!this.isConnected || !this.pool) {
-      throw new PostgreSQLConnectionError('Database not connected');
+  if (!this.isConnected || !this.pool) {
+    throw new PostgreSQLConnectionError('Database not connected');
+  }
+
+  const client = await this.pool.connect();
+  const errorHandler = (err: Error) => {
+    Logger.error(`Client connection error during query: ${err.message}`);
+    client.release(err);
+  };
+  client.once('error', errorHandler);
+
+  try {
+    Logger.debug('executing query: %s with %d parameters',
+      sql.substring(0, 100) + (sql.length > 100 ? '...' : ''),
+      safeParams.length);
+
+    const startTime = Date.now();
+    const result = await client.query(sql, safeParams);
+    const duration = Date.now() - startTime;
+
+    Logger.debug('query completed in %d ms, %d rows returned',
+      duration, result.rows.length);
+
+    return result;
+  } catch (error) {
+    if (this.isConnectionError(error)) {
+      this.isConnected = false;
+      Logger.warn('connection lost during query');
     }
 
-    const client = await this.pool.connect();
-    const errorHandler = (err: Error) => {
-      Logger.error(`Client connection error during query: ${err.message}`);
-      // Release the client with error (pool will discard it)
-      client.release(err);
-    };
-    client.once('error', errorHandler);
+    const queryError = new PostgreSQLQueryError(
+      `Query execution failed: ${getErrorMessage(error)}`,
+      sql,
+      safeParams,
+      error
+    );
 
-    try {
-      Logger.debug('executing query: %s with %d parameters',
-        sql.substring(0, 100) + (sql.length > 100 ? '...' : ''),
-        params.length);
+    Logger.error('query failed: %s', getErrorMessage(error));
+    Logger.debug('failed query: %s', sql);
+    Logger.debug('parameters: %o', safeParams);
 
-      const startTime = Date.now();
-      const result = await client.query(sql, params);
-      const duration = Date.now() - startTime;
-
-      Logger.debug('query completed in %d ms, %d rows returned',
-        duration, result.rows.length);
-
-      return result;
-    } catch (error) {
-      // If the error indicates a lost connection, mark as disconnected
-      if (this.isConnectionError(error)) {
-        this.isConnected = false;
-        Logger.warn('connection lost during query');
-      }
-
-      const queryError = new PostgreSQLQueryError(
-        `Query execution failed: ${getErrorMessage(error)}`,
-        sql,
-        params,
-        error
-      );
-
-      Logger.error('query failed: %s', getErrorMessage(error));
-      Logger.debug('failed query: %s', sql);
-      Logger.debug('parameters: %o', params);
-
-      throw queryError;
-    } finally {
-      client.off('error', errorHandler);
-      // Only release if not already released by errorHandler
-      if (!(client as any).releaseCalled) {
-        client.release();
-      }
+    throw queryError;
+  } finally {
+    client.off('error', errorHandler);
+    if (!(client as any).releaseCalled) {
+      client.release();
     }
   }
+}
 
   /**
    * Validate query parameters to prevent SQL injection and syntax errors
    */
-  private validateQueryParameters(sql: string, params: any[]): void {
-    if (!sql || typeof sql !== 'string') {
-      throw new PostgreSQLQueryError('SQL query must be a non-empty string', sql, params);
-    }
-
-    params.forEach((param, index) => {
-      if (typeof param === 'string') {
-        const suspiciousPatterns = [
-          /(\bDROP\b|\bDELETE\b|\bINSERT\b|\bUPDATE\b|\bALTER\b|\bCREATE\b|\bEXEC\b)/i,
-          /(\-\-|\/\*|\*\/|;)/,
-          /(\bUNION\b.*\bSELECT\b)/i
-        ];
-
-        for (const pattern of suspiciousPatterns) {
-          if (pattern.test(param)) {
-            Logger.warn('suspicious parameter detected at position %d: %s', index, param);
-          }
-        }
-      }
-    });
-
-    const placeholderCount = (sql.match(/\$/g) || []).length;
-    if (placeholderCount !== params.length) {
-      Logger.warn('parameter count mismatch: %d placeholders, %d parameters',
-        placeholderCount, params.length);
-    }
+/**
+ * Validate query parameters to prevent SQL injection and syntax errors
+ */
+private validateQueryParameters(sql: string, params?: any[]): void {
+  if (!sql || typeof sql !== 'string') {
+    throw new PostgreSQLQueryError('SQL query must be a non-empty string', sql, params);
   }
 
+  // Treat undefined params as empty array
+  const safeParams = params ?? [];
+
+  safeParams.forEach((param, index) => {
+    if (typeof param === 'string') {
+      const suspiciousPatterns = [
+        /(\bDROP\b|\bDELETE\b|\bINSERT\b|\bUPDATE\b|\bALTER\b|\bCREATE\b|\bEXEC\b)/i,
+        /(\-\-|\/\*|\*\/|;)/,
+        /(\bUNION\b.*\bSELECT\b)/i
+      ];
+
+      for (const pattern of suspiciousPatterns) {
+        if (pattern.test(param)) {
+          Logger.warn('suspicious parameter detected at position %d: %s', index, param);
+        }
+      }
+    }
+  });
+
+  const placeholderCount = (sql.match(/\$/g) || []).length;
+  if (placeholderCount !== safeParams.length) {
+    Logger.warn('parameter count mismatch: %d placeholders, %d parameters',
+      placeholderCount, safeParams.length);
+  }
+}
   /**
    * Determine if error is a connection-level error
    */

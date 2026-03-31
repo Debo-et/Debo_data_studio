@@ -191,6 +191,7 @@ export interface ExcelMetadataFormData {
   readExcel2007: boolean;
   selectedSheet: string;
   hasHeaders: boolean;
+  postgresTableName?: string; 
   schema: Array<{
     nullable: boolean; name: string; type: string; length?: number 
   }>;
@@ -229,6 +230,7 @@ export interface XMLMetadataFormData {
   filePath: string;
   rootElement: string;
   namespace: string;
+  rowXPath: string; 
   schemaType: 'inferred' | 'custom';
   elements: XMLElement[];
   attributes: Array<{
@@ -1240,5 +1242,57 @@ export interface DebugPanelProps {
   activeDesignId?: string | null;
 }
 
+
+export interface FTPConnectionFormData {
+  // General properties
+  name: string;
+  purpose: string;
+  description: string;
+
+  // Connection details
+  protocol: 'ftp' | 'sftp';
+  host: string;
+  port: number;
+  passiveMode?: boolean;        // only for FTP
+  timeout?: number;             // seconds
+
+  // Authentication
+  authType: 'password' | 'privateKey';
+  username: string;
+  password?: string;            // for password auth
+  privateKey?: string;          // for private key auth
+  privateKeyPassphrase?: string;
+
+  // Additional flags (e.g., implicit TLS, etc.)
+  implicitTLS?: boolean;        // for FTP over TLS
+}
+
+export interface FTPConnectionWizardProps {
+  isOpen: boolean;
+  onClose: () => void;
+  onSave: (data: FTPConnectionFormData) => Promise<void>;
+}
+
+
+export interface LDAPConnectionFormData {
+  name: string;
+  purpose?: string;
+  description?: string;
+  host: string;
+  port: number;
+  baseDN: string;
+  bindDN: string;
+  bindPassword: string;
+  encryption: 'none' | 'ssl' | 'starttls';
+  timeout: number;
+  connectionName?: string;
+  connectionType?: string; // e.g. "LDAP"
+}
+
+export interface LDAPConnectionWizardProps {
+  isOpen: boolean;
+  onClose: () => void;
+  onSave: (data: LDAPConnectionFormData) => void;
+}
 // Note: JobDesignState interface is already defined at the top of this file
 // after JobConfig interface

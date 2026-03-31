@@ -26,6 +26,12 @@ import {
   BatchDisconnectRequest
 } from './database-api.types';
 
+// Import foreign table utilities
+import {
+  generateForeignServerSQL,
+  createForeignTableInPostgres
+} from '../api/postgres-foreign-table';
+
 // ===========================================================================
 // Database API Service - WITH FOREIGN TABLE FUNCTIONALITY
 // ===========================================================================
@@ -48,7 +54,7 @@ export class DatabaseApiService {
     
     this.api = axios.create({
       baseURL: this.baseUrl,
-      timeout: 10000, // Shorter timeout for quicker feedback
+      timeout: 10000,
       headers: {
         'Content-Type': 'application/json',
         'Accept': 'application/json',
@@ -298,9 +304,7 @@ export class DatabaseApiService {
   // Query Execution
   // ===========================================================================
 
-  // frontend/src/services/database-api.service.ts (excerpt)
-
-async executeQuery(
+  async executeQuery(
   connectionId: string,
   sql: string,
   options?: ClientQueryExecutionOptions
@@ -308,12 +312,11 @@ async executeQuery(
   try {
     console.log(`⚡ Executing query for connection ${connectionId}...`);
     
-    // ✅ Flatten the request body: send sql + params at top level
     const requestBody: any = { sql };
-    if (options?.params) {
-      requestBody.params = options.params;
-    }
-    // Include other options if needed (maxRows, timeout, etc.)
+    // ✅ Always include params, default to []
+    requestBody.params = options?.params || [];
+    
+    // Include other options
     if (options?.maxRows) requestBody.maxRows = options.maxRows;
     if (options?.timeout) requestBody.timeout = options.timeout;
 
@@ -346,34 +349,90 @@ async executeQuery(
     }
   }
 
-
   async executeRawQuery(
-  connectionId: string,
-  sql: string,
-  params: any[] = []
-): Promise<any> {
-  try {
-    console.log(`⚡ Executing raw query for ${connectionId}...`);
-    const request = { sql, params };
-    const response = await this.api.post(`/api/database/${connectionId}/raw-query`, request);
-    console.log(`✅ Raw query executed`);
-    return response.data;
-  } catch (error: any) {
-    console.error('❌ Raw query execution failed:', error);
-    return {
-      result: null,
-      success: false,
-      error: this.getErrorMessage(error),
-    };
+    connectionId: string,
+    sql: string,
+    params: any[] = []
+  ): Promise<any> {
+    try {
+      console.log(`⚡ Executing raw query for ${connectionId}...`);
+      const request = { sql, params };
+      const response = await this.api.post(`/api/database/${connectionId}/raw-query`, request);
+      console.log(`✅ Raw query executed`);
+      return response.data;
+    } catch (error: any) {
+      console.error('❌ Raw query execution failed:', error);
+      return {
+        result: null,
+        success: false,
+        error: this.getErrorMessage(error),
+      };
+    }
   }
-}
 
   // ===========================================================================
-  // FOREIGN TABLE OPERATIONS - NEW
+  // FOREIGN TABLE OPERATIONS - UPDATED
   // ===========================================================================
 
   /**
+   * Create a foreign server in PostgreSQL
+   */
+  // frontend/src/services/database-api.service.ts
+
+async createForeignServer(
+  connectionId: string,
+  serverName: string,
+  dbType: DatabaseType,
+  config: ClientDatabaseConfig
+): Promise<{ success: boolean; error?: string; serverName?: string }> {
+  try {
+    // 1. Create server (without user/password)
+    const serverSql = generateForeignServerSQL(serverName, dbType, {
+      host: config.host,
+      port: config.port,
+      dbname: config.dbname,
+      // user/password omitted
+    });
+    console.log(`📝 Creating foreign server: ${serverName}`);
+    const serverResult = await this.executeQuery(connectionId, serverSql);
+    if (!serverResult.success) {
+      // If server already exists, we can continue; otherwise fail
+      if (!serverResult.error || !serverResult.error.includes('already exists')) {
+        return { success: false, error: serverResult.error };
+      }
+    }
+
+    // 2. For PostgreSQL, create user mapping with credentials
+    const isPostgres = dbType === 'postgresql' || dbType === 'postgres';
+    if (isPostgres && config.user && config.password) {
+      const userMappingSql = `CREATE USER MAPPING FOR CURRENT_USER
+        SERVER ${serverName}
+        OPTIONS (user '${config.user}', password '${config.password}');`;
+      const mappingResult = await this.executeQuery(connectionId, userMappingSql);
+      if (!mappingResult.success) {
+        // If mapping already exists, ignore; otherwise warn
+        if (!mappingResult.error || !mappingResult.error.includes('already exists')) {
+          console.warn(`User mapping creation failed: ${mappingResult.error}`);
+        }
+      }
+    }
+
+    return { success: true, serverName };
+  } catch (error: any) {
+    console.error('❌ Failed to create foreign server:', error);
+    return { success: false, error: error.message };
+  }
+}
+
+  /**
    * Create a foreign table in PostgreSQL
+   * @param connectionId The PostgreSQL connection ID
+   * @param tableName Name of the foreign table to create
+   * @param columns Column definitions
+   * @param fileType Type of the source (e.g., 'postgresql', 'mysql', 'delimited', etc.)
+   * @param filePath Path to the file (empty for database sources)
+   * @param options Additional options (e.g., delimiter, header, etc.)
+   * @param serverName Optional server name; if provided, the foreign table will be created on that server
    */
   async createForeignTable(
     connectionId: string,
@@ -389,7 +448,8 @@ async executeQuery(
     }>,
     fileType: string,
     filePath: string,
-    options?: Record<string, string>
+    options?: Record<string, string>,
+    serverName?: string
   ): Promise<{
     success: boolean;
     error?: string;
@@ -399,16 +459,18 @@ async executeQuery(
   }> {
     try {
       console.log(`📝 Creating foreign table ${tableName} for ${fileType} file...`);
-      const response = await this.api.post('/api/database/create-foreign-table', {
+      const result = await createForeignTableInPostgres(
+        this,
         connectionId,
         tableName,
         columns,
         fileType,
         filePath,
-        options: options || {}
-      });
-      console.log(`✅ Foreign table creation response:`, response.data);
-      return response.data;
+        options || {},
+        serverName
+      );
+      console.log(`✅ Foreign table creation response:`, result);
+      return result;
     } catch (error: any) {
       console.error('❌ Failed to create foreign table:', error);
       return {
@@ -418,34 +480,56 @@ async executeQuery(
     }
   }
 
-  async saveDatabaseMetadata(metadata: any): Promise<{ success: boolean; metadataEntryId?: string; error?: string }> {
-  try {
-    const response = await this.api.post('/api/database/metadata', metadata);
-    return response.data;
-  } catch (error: any) {
-    console.error('Failed to save database metadata:', error);
-    return {
-      success: false,
-      error: this.getErrorMessage(error),
-    };
+  /**
+   * NEW: Create a foreign table via backend endpoint.
+   * This uses the backend's dedicated route that handles SQL generation and execution
+   * directly with the local PostgreSQL pool, avoiding adapter issues.
+   */
+  async createForeignTableViaBackend(
+    connectionId: string,
+    tableName: string,
+    columns: Array<{
+      name: string;
+      type: string;
+      length?: number;
+      precision?: number;
+      scale?: number;
+      nullable?: boolean;
+      defaultValue?: string;
+    }>,
+    fileType: string,
+    filePath: string,
+    options?: Record<string, string>,
+    serverName?: string
+  ): Promise<{
+    success: boolean;
+    error?: string;
+    tableName?: string;
+    sql?: string;
+    warnings?: string[];
+  }> {
+    try {
+      const payload = {
+        connectionId,
+        tableName,
+        columns,
+        fileType,
+        filePath,
+        options: options || {},
+        serverName
+      };
+      console.log(`📝 Creating foreign table via backend: ${tableName}`);
+      const response = await this.api.post('/api/database/create-foreign-table', payload);
+      console.log(`✅ Foreign table creation response:`, response.data);
+      return response.data;
+    } catch (error: any) {
+      console.error('❌ Failed to create foreign table via backend:', error);
+      return {
+        success: false,
+        error: this.getErrorMessage(error)
+      };
+    }
   }
-}
-
-async getDatabaseMetadataEntries(): Promise<{
-  success: boolean;
-  entries?: any[];
-  error?: string;
-}> {
-  try {
-    const response = await this.api.get('/api/database/metadata');
-    return response.data;
-  } catch (error: any) {
-    return {
-      success: false,
-      error: this.getErrorMessage(error),
-    };
-  }
-}
 
   /**
    * List all foreign tables in the database
@@ -806,41 +890,71 @@ async getDatabaseMetadataEntries(): Promise<{
   }
 
   async insertDataSourceMetadata(
-  connectionId: string,
-  metadata: {
-    name: string;
-    type: string;
-    filePath: string;
-    foreignTableName: string;
-    options?: Record<string, any>;
-  }
-): Promise<{ success: boolean; error?: string; id?: string }> {
-  const sql = `
-    INSERT INTO data_source_metadata
-      (name, type, file_path, foreign_table_name, connection_id, options, created_at, updated_at)
-    VALUES
-      ($1, $2, $3, $4, $5, $6::jsonb, NOW(), NOW())
-    RETURNING id;
-  `;
-  const params = [
-    metadata.name,
-    metadata.type,
-    metadata.filePath,
-    metadata.foreignTableName,
-    connectionId,
-    JSON.stringify(metadata.options || {})
-  ];
-  try {
-    const result = await this.executeQuery(connectionId, sql, { params });
-    if (result.success && result.result?.rows?.length > 0) {
-      return { success: true, id: result.result.rows[0].id };
+    connectionId: string,
+    metadata: {
+      name: string;
+      type: string;
+      filePath: string;
+      foreignTableName: string;
+      options?: Record<string, any>;
     }
-    return { success: false, error: result.error || 'No ID returned' };
-  } catch (error: any) {
-    console.error('❌ Failed to insert data source metadata:', error);
-    return { success: false, error: error.message };
+  ): Promise<{ success: boolean; error?: string; id?: string }> {
+    const sql = `
+      INSERT INTO data_source_metadata
+        (name, type, file_path, foreign_table_name, connection_id, options, created_at, updated_at)
+      VALUES
+        ($1, $2, $3, $4, $5, $6::jsonb, NOW(), NOW())
+      RETURNING id;
+    `;
+    const params = [
+      metadata.name,
+      metadata.type,
+      metadata.filePath,
+      metadata.foreignTableName,
+      connectionId,
+      JSON.stringify(metadata.options || {})
+    ];
+    try {
+      const result = await this.executeQuery(connectionId, sql, { params });
+      if (result.success && result.result?.rows?.length > 0) {
+        return { success: true, id: result.result.rows[0].id };
+      }
+      return { success: false, error: result.error || 'No ID returned' };
+    } catch (error: any) {
+      console.error('❌ Failed to insert data source metadata:', error);
+      return { success: false, error: error.message };
+    }
   }
-}
+
+  async saveDatabaseMetadata(metadata: any): Promise<{ success: boolean; metadataEntryId?: string; error?: string }> {
+    try {
+      const response = await this.api.post('/api/database/metadata', metadata);
+      return response.data;
+    } catch (error: any) {
+      console.error('Failed to save database metadata:', error);
+      return {
+        success: false,
+        error: this.getErrorMessage(error),
+      };
+    }
+  }
+
+  async getDatabaseMetadataEntries(): Promise<{
+    success: boolean;
+    entries?: any[];
+    error?: string;
+  }> {
+    try {
+      const response = await this.api.get('/api/database/metadata');
+      return response.data;
+    } catch (error: any) {
+      return {
+        success: false,
+        error: this.getErrorMessage(error),
+      };
+    }
+  }
+
   // ===========================================================================
   // Diagnostic Methods
   // ===========================================================================
@@ -923,7 +1037,6 @@ async getDatabaseMetadataEntries(): Promise<{
         }
       } catch (error) {
         // Continue testing other users
-       // suggestions.push(`❌ User "${user}" failed: ${error.message || 'Connection failed'}`);
       }
     }
     
@@ -1302,6 +1415,26 @@ export function useDatabaseOperations(options?: UseDatabaseOperationsOptions) {
   // FOREIGN TABLE OPERATIONS
   // ===========================================================================
 
+  const createForeignServer = useCallback(async (
+    connectionId: string,
+    serverName: string,
+    dbType: DatabaseType,
+    config: ClientDatabaseConfig
+  ) => {
+    setLoading(true);
+    setError(null);
+    try {
+      const result = await apiService.createForeignServer(connectionId, serverName, dbType, config);
+      return result;
+    } catch (err: any) {
+      const errorMsg = err instanceof Error ? err.message : 'Failed to create foreign server';
+      setError(errorMsg);
+      return { success: false, error: errorMsg };
+    } finally {
+      setLoading(false);
+    }
+  }, [apiService]);
+
   const createForeignTable = useCallback(async (
     connectionId: string,
     tableName: string,
@@ -1316,11 +1449,11 @@ export function useDatabaseOperations(options?: UseDatabaseOperationsOptions) {
     }>,
     fileType: string,
     filePath: string,
-    options?: Record<string, string>
+    options?: Record<string, string>,
+    serverName?: string
   ) => {
     setLoading(true);
     setError(null);
-    
     try {
       console.log(`🔄 Creating foreign table ${tableName}...`);
       const result = await apiService.createForeignTable(
@@ -1329,17 +1462,49 @@ export function useDatabaseOperations(options?: UseDatabaseOperationsOptions) {
         columns,
         fileType,
         filePath,
-        options
+        options,
+        serverName
       );
-      
-      if (result.success) {
-        // Refresh foreign tables list
-        await refreshForeignTables();
-        console.log(`✅ Foreign table created: ${tableName}`);
-      } else {
-        setError(result.error || 'Failed to create foreign table');
-      }
-      
+      return result;
+    } catch (err: any) {
+      const errorMsg = err instanceof Error ? err.message : 'Foreign table creation failed';
+      setError(errorMsg);
+      return { success: false, error: errorMsg };
+    } finally {
+      setLoading(false);
+    }
+  }, [apiService]);
+
+  const createForeignTableViaBackend = useCallback(async (
+    connectionId: string,
+    tableName: string,
+    columns: Array<{
+      name: string;
+      type: string;
+      length?: number;
+      precision?: number;
+      scale?: number;
+      nullable?: boolean;
+      defaultValue?: string;
+    }>,
+    fileType: string,
+    filePath: string,
+    options?: Record<string, string>,
+    serverName?: string
+  ) => {
+    setLoading(true);
+    setError(null);
+    try {
+      console.log(`🔄 Creating foreign table via backend: ${tableName}`);
+      const result = await apiService.createForeignTableViaBackend(
+        connectionId,
+        tableName,
+        columns,
+        fileType,
+        filePath,
+        options,
+        serverName
+      );
       return result;
     } catch (err: any) {
       const errorMsg = err instanceof Error ? err.message : 'Foreign table creation failed';
@@ -1357,18 +1522,15 @@ export function useDatabaseOperations(options?: UseDatabaseOperationsOptions) {
   }> => {
     setLoading(true);
     setError(null);
-    
     try {
       console.log(`📋 Listing foreign tables...`);
       const result = await apiService.listForeignTables();
-      
       if (result.success && result.tables) {
         setForeignTables(result.tables);
         console.log(`✅ Found ${result.tables.length} foreign tables`);
       } else {
         setError(result.error || 'Failed to list foreign tables');
       }
-      
       return result;
     } catch (err: any) {
       const errorMsg = err instanceof Error ? err.message : 'Failed to list foreign tables';
@@ -1386,19 +1548,15 @@ export function useDatabaseOperations(options?: UseDatabaseOperationsOptions) {
   const dropForeignTable = useCallback(async (tableName: string) => {
     setLoading(true);
     setError(null);
-    
     try {
       console.log(`🗑️ Dropping foreign table ${tableName}...`);
       const result = await apiService.dropForeignTable(tableName);
-      
       if (result.success) {
-        // Refresh foreign tables list
         await refreshForeignTables();
         console.log(`✅ Foreign table dropped: ${tableName}`);
       } else {
         setError(result.error || 'Failed to drop foreign table');
       }
-      
       return result;
     } catch (err: any) {
       const errorMsg = err instanceof Error ? err.message : 'Failed to drop foreign table';
@@ -1416,7 +1574,6 @@ export function useDatabaseOperations(options?: UseDatabaseOperationsOptions) {
   ) => {
     setLoading(true);
     setError(null);
-    
     try {
       console.log(`🔍 Testing foreign table ${tableName}...`);
       const result = await apiService.testForeignTable(connectionId, tableName, limit);
@@ -1436,7 +1593,6 @@ export function useDatabaseOperations(options?: UseDatabaseOperationsOptions) {
   ) => {
     setLoading(true);
     setError(null);
-    
     try {
       console.log(`🔍 Checking FDW availability for ${fileType}...`);
       const result = await apiService.checkFDWAvailability(connectionId, fileType);
@@ -1449,8 +1605,6 @@ export function useDatabaseOperations(options?: UseDatabaseOperationsOptions) {
       setLoading(false);
     }
   }, [apiService]);
-
-  
 
   // ===========================================================================
   // CONNECTION OPERATIONS
@@ -1660,7 +1814,6 @@ export function useDatabaseOperations(options?: UseDatabaseOperationsOptions) {
   ) => {
     setLoading(true);
     setError(null);
-    
     try {
       console.log(`📊 Getting foreign table columns for ${tableName}...`);
       const result = await apiService.getForeignTableColumns(connectionId, tableName);
@@ -1691,7 +1844,9 @@ export function useDatabaseOperations(options?: UseDatabaseOperationsOptions) {
     refreshConnections,
     
     // Foreign Table Operations
+    createForeignServer,
     createForeignTable,
+    createForeignTableViaBackend,   // NEW
     listForeignTables,
     dropForeignTable,
     testForeignTable,
@@ -1729,7 +1884,6 @@ export function useDatabaseOperations(options?: UseDatabaseOperationsOptions) {
   };
 }
 
-
 // ===========================================================================
 // Export Default Instance
 // ===========================================================================
@@ -1753,7 +1907,6 @@ export type {
   ClientQueryExecutionResult as QueryExecutionResult,
   ClientDatabaseInfoResult as DatabaseInfoResult,
   ClientDisconnectResult as DisconnectResult,
-  
 };
 
 export default databaseApi;

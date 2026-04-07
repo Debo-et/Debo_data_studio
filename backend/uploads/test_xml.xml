@@ -1,0 +1,29 @@
+<orders>
+  <order>
+    <id>ORD-001</id>
+    <status>shipped</status>
+    <items>
+      <item><name>Laptop</name><price>1200</price></item>
+    </items>
+  </order>
+  <order>
+    <id>ORD-002</id>
+    <status>pending</status>
+    <items>
+      <item><name>Mouse</name><price>25</price></item>
+      <item><name>Keyboard</name><price>75</price></item>
+    </items>
+  </order>
+  <order>
+    <id>ORD-003</id>
+    <status>cancelled</status>
+    <items/>
+  </order>
+  <order>
+    <id>ORD-004</id>
+    <status>delivered</status>
+    <items>
+      <item><name>Monitor</name><price>299</price></item>
+    </items>
+  </order>
+</orders>

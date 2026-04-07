@@ -1367,7 +1367,7 @@ const handleOpenSalesforceWizard = useCallback(() => {
 
     // 9. Create the foreign table using the existing 'fdw_delimited' server
     console.log('🛠️ [Excel] Creating foreign table with name:', metadata.name);
-    const result = await apiService.createForeignTable(
+    const result = await apiService.createForeignTableViaBackend(
       connectionId,
       metadata.name,            // table name
       columns,
@@ -1488,7 +1488,7 @@ const handleOpenSalesforceWizard = useCallback(() => {
         format: 'csv',
       };
 
-      const result = await apiService.createForeignTable(
+      const result = await apiService.createForeignTableViaBackend(
         connectionId,
         metadata.name,
         columns,
@@ -1578,7 +1578,7 @@ const handleSaveXMLMetadata = useCallback(async (metadata: any) => {
       format: 'csv',
     };
 
-    const result = await apiService.createForeignTable(
+    const result = await apiService.createForeignTableViaBackend(
       connectionId,
       metadata.name,
       columns,
@@ -1670,7 +1670,7 @@ const handleSavePositionalMetadata = useCallback(async (metadata: any) => {
       format: 'csv',
     };
 
-    const result = await apiService.createForeignTable(
+    const result = await apiService.createForeignTableViaBackend(
       connectionId,
       metadata.name,
       columns,
@@ -1748,7 +1748,7 @@ const handleSavePositionalMetadata = useCallback(async (metadata: any) => {
 
       const options = { format: metadata.dataFormat || 'csv' };
 
-      const result = await apiService.createForeignTable(
+      const result = await apiService.createForeignTableViaBackend(
         connectionId,
         metadata.name,
         columns,
@@ -1816,7 +1816,7 @@ const handleSavePositionalMetadata = useCallback(async (metadata: any) => {
 
     const options = { format };
 
-    const result = await apiService.createForeignTable(
+    const result = await apiService.createForeignTableViaBackend(
       connectionId,
       metadata.name,
       columns,
@@ -1889,7 +1889,7 @@ const handleSavePositionalMetadata = useCallback(async (metadata: any) => {
 
     const options = { pattern: metadata.pattern, flags: metadata.flags };
 
-    const result = await apiService.createForeignTable(
+    const result = await apiService.createForeignTableViaBackend(
       connectionId,
       metadata.name,
       columns,
@@ -1957,7 +1957,7 @@ const handleSavePositionalMetadata = useCallback(async (metadata: any) => {
 
     const options = {};
 
-    const result = await apiService.createForeignTable(
+    const result = await apiService.createForeignTableViaBackend(
       connectionId,
       metadata.name,
       columns,
@@ -2477,7 +2477,7 @@ useEffect(() => {
         return;
       }
 
-      console.log(`📚 Loaded ${result.entries.length} database metadata entries`);
+      //console.log(`📚 Loaded ${result.entries.length} database metadata entries`);
 
       // Build nodes for each entry
       const newFolderNodes: RepositoryNode[] = [];
@@ -2640,7 +2640,7 @@ useEffect(() => {
         return;
       }
 
-      console.log(`📚 Loaded ${result.entries.length} database metadata entries`);
+      //console.log(`📚 Loaded ${result.entries.length} database metadata entries`);
 
       // Build nodes for each entry
       const newFolderNodes: RepositoryNode[] = [];
@@ -2789,7 +2789,7 @@ useEffect(() => {
         return;
       }
 
-      console.log(`[Metadata Load] Received ${result.entries.length} entries`);
+     // console.log(`[Metadata Load] Received ${result.entries.length} entries`);
       if (result.entries.length > 0) {
         console.log('[Metadata Load] Sample entry:', {
           id: result.entries[0].id,

@@ -699,6 +699,21 @@ export abstract class BaseSQLGenerator {
     return /^[a-zA-Z_][a-zA-Z0-9_]*$/.test(identifier);
   }
 
+  /**
+   * Returns an empty SQL fragment. Useful for concrete generators that need
+   * to satisfy the abstract methods without contributing SQL.
+   */
+  protected emptyFragment(): GeneratedSQLFragment {
+    return {
+      sql: '',
+      dependencies: [],
+      parameters: new Map(),
+      errors: [],
+      warnings: [],
+      metadata: { generatedAt: new Date().toISOString(), fragmentType: 'empty', lineCount: 0 }
+    };
+  }
+
   protected detectPostgreSQLFeatures(version: string): PostgreSQLFeatureSupport {
     const versionNum = parseFloat(version);
     
@@ -809,17 +824,6 @@ export class SelectSQLGenerator extends BaseSQLGenerator {
   private extractTableName(node: UnifiedCanvasNode): string {
     // TODO: Replace with extraction from unified configuration (e.g., input node table name).
     return node.name.toLowerCase().replace(/\s+/g, '_');
-  }
-
-  private emptyFragment(): GeneratedSQLFragment {
-    return {
-      sql: '',
-      dependencies: [],
-      parameters: new Map(),
-      errors: [],
-      warnings: [],
-      metadata: { generatedAt: new Date().toISOString(), fragmentType: 'empty', lineCount: 0 }
-    };
   }
 }
 

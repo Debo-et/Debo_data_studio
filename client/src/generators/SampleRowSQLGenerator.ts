@@ -9,7 +9,7 @@ interface SampleConfig {
 }
 
 export class SampleRowSQLGenerator extends BaseSQLGenerator {
-  protected generateSelectStatement(context: SQLGenerationContext): GeneratedSQLFragment {
+  public generateSelectStatement(context: SQLGenerationContext): GeneratedSQLFragment {
     const { node } = context;
     const warnings: string[] = [];
     const errors: SQLGenerationError[] = [];

@@ -35,7 +35,7 @@ export class DataMaskingSQLGenerator extends BaseSQLGenerator {
     return this.emptyFragment();
   }
 
-  protected generateSelectStatement(context: SQLGenerationContext): GeneratedSQLFragment {
+  public generateSelectStatement(context: SQLGenerationContext): GeneratedSQLFragment {
     const { node } = context;
     
     // Safely extract masking rules

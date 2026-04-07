@@ -15,7 +15,7 @@ function isConversionConfig(config: any): config is { conversions: ConvertTypeCo
 }
 
 export class ConvertTypeSQLGenerator extends BaseSQLGenerator {
-  protected generateSelectStatement(context: SQLGenerationContext): GeneratedSQLFragment {
+  public generateSelectStatement(context: SQLGenerationContext): GeneratedSQLFragment {
     const { node } = context;
     
     // Safely extract conversions using the type guard

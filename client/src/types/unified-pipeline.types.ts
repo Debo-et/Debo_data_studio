@@ -73,6 +73,8 @@ export enum NodeType {
   UNKNOWN = 'unknown',
   SELECT = 'SELECT',
   JSON = 'JSON',
+  CACHE = 'CACHE',
+  SURVIVORSHIP_RULE = 'SURVIVORSHIP_RULE',
   JSONB = 'JSONB'
 }
 
@@ -688,6 +690,7 @@ export interface ExtractJSONFieldsConfiguration {
   version: string;
   sourceColumn: string;               // The input column containing JSON
   jsonPath?: string;                   // Optional base JSONPath
+  jsonType?: string; 
   outputColumns: Array<{
     id: string;
     name: string;                        // Output column name

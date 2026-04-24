@@ -3,12 +3,11 @@ import { BaseSQLGenerator, SQLGenerationContext, GeneratedSQLFragment } from './
 import { UnifiedCanvasNode } from '../types/unified-pipeline.types';
 
 interface AddCRCConfig {
-  columns?: string[];               // columns to include in CRC; if empty, use all
+  columns?: string[];
   algorithm: 'crc32' | 'md5' | 'hashtext';
-  outputColumn: string;              // name of the new CRC column
+  outputColumn: string;
 }
 
-// Type guard to check if an object conforms to AddCRCConfig
 function isAddCRCConfig(obj: any): obj is AddCRCConfig {
   return obj && typeof obj === 'object'
     && typeof obj.algorithm === 'string'
@@ -21,7 +20,6 @@ export class AddCRCSQLGenerator extends BaseSQLGenerator {
   protected generateSelectStatement(context: SQLGenerationContext): GeneratedSQLFragment {
     const { node } = context;
 
-    // Safely extract and validate the configuration
     const rawConfig = node.metadata?.configuration?.config;
     const config: AddCRCConfig | undefined = isAddCRCConfig(rawConfig) ? rawConfig : undefined;
 
@@ -37,7 +35,6 @@ export class AddCRCSQLGenerator extends BaseSQLGenerator {
     let crcExpr: string;
     switch (config.algorithm) {
       case 'crc32':
-        // hashtext is a built-in PostgreSQL function; for crc32 you may need pgcrypto
         crcExpr = `hashtext(${columnsToHash.map(c => `COALESCE(${c}::text, '')`).join(' || ')})`;
         break;
       case 'md5':
@@ -92,17 +89,6 @@ export class AddCRCSQLGenerator extends BaseSQLGenerator {
       errors: [],
       warnings: ['No CRC config, using fallback'],
       metadata: { generatedAt: new Date().toISOString(), fragmentType: 'crc_fallback', lineCount: 1 }
-    };
-  }
-
-  private emptyFragment(): GeneratedSQLFragment {
-    return {
-      sql: '',
-      dependencies: [],
-      parameters: new Map(),
-      errors: [],
-      warnings: [],
-      metadata: { generatedAt: new Date().toISOString(), fragmentType: 'empty', lineCount: 0 }
     };
   }
 }

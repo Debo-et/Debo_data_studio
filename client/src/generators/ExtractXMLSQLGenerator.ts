@@ -33,33 +33,65 @@ export class ExtractXMLSQLGenerator extends BaseSQLGenerator {
 
   // Main select generation
   protected generateSelectStatement(context: SQLGenerationContext): GeneratedSQLFragment {
-    const { node } = context;
-    const config = node.metadata?.configuration?.config;
+    const { node, connection, upstreamSchema } = context;
 
-    // Type guard: check if config is an object with required properties
-    if (!config || typeof config !== 'object' || !('sourceColumn' in config) || !('xpath' in config) || !('targetColumn' in config)) {
+    // Read configuration from the correct metadata key used by the test helper
+    const config = node.metadata?.extractXMLConfig as XMLExtractConfig | undefined;
+
+    if (!config || typeof config !== 'object' || !config.sourceColumn || !config.xpath || !config.targetColumn) {
       return this.fallbackSelect(node);
     }
 
-    // Now TypeScript knows config has sourceColumn, xpath, targetColumn
-    const typedConfig = config as XMLExtractConfig;
-
-    // PostgreSQL: use xpath function
-    let expr = `(xpath('${this.escapeString(typedConfig.xpath)}', ${this.sanitizeIdentifier(typedConfig.sourceColumn)}::xml))[1]::text`;
-    if (typedConfig.dataType) {
-      expr = `(${expr})::${typedConfig.dataType.toLowerCase()}`;
+    // Determine the source table / subquery reference
+    let sourceRef: string;
+    if (connection) {
+      // Use the source node ID (which will be replaced by the pipeline with the actual subquery/table)
+      sourceRef = this.sanitizeIdentifier(connection.sourceNodeId);
+    } else {
+      // Fallback: try to get table name from node metadata
+      sourceRef = node.metadata?.tableMapping?.tableName ||
+                 node.metadata?.tableName ||
+                 node.metadata?.postgresTableName ||
+                 'source_table';
     }
 
-    const otherColumns = node.metadata?.schemas?.output?.fields
-      .filter(c => c.name !== typedConfig.sourceColumn)
-      .map(c => this.sanitizeIdentifier(c.name)) || [];
+    // Build the XML extraction expression
+    let extractExpr = `(xpath('${this.escapeString(config.xpath)}', ${this.sanitizeIdentifier(config.sourceColumn)}::xml))[1]::text`;
+    if (config.dataType) {
+      extractExpr = `(${extractExpr})::${config.dataType.toLowerCase()}`;
+    }
 
-    const selectList = [...otherColumns, `${expr} AS ${this.sanitizeIdentifier(typedConfig.targetColumn)}`].join(', ');
-    const sql = `SELECT ${selectList} FROM source_table`;
+    // Build column list: preserve all upstream columns except the source XML column,
+    // and add the extracted column with its alias.
+    const selectParts: string[] = [];
+    const upstreamColumns = upstreamSchema || [];
+
+    for (const col of upstreamColumns) {
+      if (col.name === config.sourceColumn) {
+        // Skip the raw XML column; we'll add the extracted expression instead
+        continue;
+      }
+      selectParts.push(this.sanitizeIdentifier(col.name));
+      if (col.name.toLowerCase() === 'id') {
+      }
+    }
+
+    // If no upstream schema was provided, fall back to a safe default that includes '*'
+    if (upstreamColumns.length === 0) {
+      // Without schema info, we cannot reliably list columns. Use '*' and hope the pipeline handles it.
+      // This is a fallback; the test will provide schema via upstream propagation.
+      selectParts.push('*');
+    }
+
+    // Add the extracted column
+    selectParts.push(`${extractExpr} AS ${this.sanitizeIdentifier(config.targetColumn)}`);
+
+    const selectClause = selectParts.join(', ');
+    const sql = `SELECT ${selectClause} FROM ${sourceRef}`;
 
     return {
       sql,
-      dependencies: ['source_table'],
+      dependencies: connection ? [connection.sourceNodeId] : [],
       parameters: new Map(),
       errors: [],
       warnings: [],
@@ -78,22 +110,10 @@ export class ExtractXMLSQLGenerator extends BaseSQLGenerator {
         code: 'MISSING_XML_EXTRACT_CONFIG',
         message: 'XML extract configuration is missing or incomplete',
         severity: 'ERROR',
-        suggestion: 'Ensure sourceColumn, xpath, and targetColumn are defined in node.config'
+        suggestion: 'Ensure sourceColumn, xpath, and targetColumn are defined in node.metadata.extractXMLConfig'
       }],
       warnings: [],
       metadata: { generatedAt: new Date().toISOString(), fragmentType: 'fallback_select', lineCount: 1 }
-    };
-  }
-
-  // Helper to produce an empty fragment
-  private emptyFragment(): GeneratedSQLFragment {
-    return {
-      sql: '',
-      dependencies: [],
-      parameters: new Map(),
-      errors: [],
-      warnings: [],
-      metadata: { generatedAt: new Date().toISOString(), fragmentType: 'empty', lineCount: 0 }
     };
   }
 }

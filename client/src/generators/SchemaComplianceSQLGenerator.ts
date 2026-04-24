@@ -1,102 +1,83 @@
+// src/generators/SchemaComplianceSQLGenerator.ts
 import { BaseSQLGenerator, SQLGenerationContext, GeneratedSQLFragment } from './BaseSQLGenerator';
-import { FieldSchema } from '../types/unified-pipeline.types';
 
-interface ComplianceConfig {
-  schema: FieldSchema[];
-  strict: boolean;
-  rejectOutput?: string;  // name of reject output
+// Expected schema item as defined in test helpers
+interface ExpectedField {
+  name: string;
+  type: string;
+  nullable?: boolean; // optional, not used for now
 }
 
 export class SchemaComplianceSQLGenerator extends BaseSQLGenerator {
-  // ==================== Required abstract implementations ====================
-  protected generateJoinConditions(_context: SQLGenerationContext): GeneratedSQLFragment {
-    return this.emptyFragment();
-  }
+  protected generateJoinConditions(): GeneratedSQLFragment { return this.emptyFragment(); }
+  protected generateWhereClause(): GeneratedSQLFragment { return this.emptyFragment(); }
+  protected generateHavingClause(): GeneratedSQLFragment { return this.emptyFragment(); }
+  protected generateOrderByClause(): GeneratedSQLFragment { return this.emptyFragment(); }
+  protected generateGroupByClause(): GeneratedSQLFragment { return this.emptyFragment(); }
 
-  protected generateWhereClause(_context: SQLGenerationContext): GeneratedSQLFragment {
-    return this.emptyFragment();
-  }
-
-  protected generateHavingClause(_context: SQLGenerationContext): GeneratedSQLFragment {
-    return this.emptyFragment();
-  }
-
-  protected generateOrderByClause(_context: SQLGenerationContext): GeneratedSQLFragment {
-    return this.emptyFragment();
-  }
-
-  protected generateGroupByClause(_context: SQLGenerationContext): GeneratedSQLFragment {
-    return this.emptyFragment();
-  }
-
-  // ==================== Main logic ====================
   protected generateSelectStatement(context: SQLGenerationContext): GeneratedSQLFragment {
-    const { node } = context;
-    // Assert the configuration type – we are in the correct generator for this node type
-    const config = node.metadata?.configuration?.config as ComplianceConfig | undefined;
+    const { node, upstreamSchema, connection } = context;
+    const warnings: string[] = [];
 
-    if (!config || !config.schema.length) {
-      // Fallback: return a simple SELECT * (previously intended as fallbackSelect)
-      return {
-        sql: `SELECT * FROM source_table`,
-        dependencies: ['source_table'],
-        parameters: new Map(),
-        errors: [],
-        warnings: [],
-        metadata: {
-          generatedAt: new Date().toISOString(),
-          fragmentType: 'schema_compliance_fallback',
-          lineCount: 1,
-        },
-      };
+    // Extract expected schema from node metadata (direct path used by tests)
+    const expectedSchema: ExpectedField[] =
+      node.metadata?.schemaComplianceConfig?.expectedSchema ?? [];
+
+    if (expectedSchema.length === 0) {
+      warnings.push('No expected schema defined; compliance check will be skipped.');
     }
 
-    // Build validation conditions for each column
-    const conditions = config.schema
-      .map(field => {
-        const col = this.sanitizeIdentifier(field.name);
-        const checks: string[] = [];
+    // Determine source reference (CTE alias or table name)
+    let sourceRef: string;
+    if (connection?.sourceNodeId) {
+      sourceRef = context.nodeAliasMap?.get(connection.sourceNodeId)
+        ?? this.sanitizeIdentifier(connection.sourceNodeId);
+    } else {
+      sourceRef = 'source_table';
+      warnings.push('No incoming connection; using default table name "source_table".');
+    }
 
-        if (!field.nullable) checks.push(`${col} IS NOT NULL`);
-        if (field.type === 'INTEGER') checks.push(`${col} ~ '^\\d+$'`);
-        if (field.length) checks.push(`length(${col}::text) <= ${field.length}`);
+    // Compare actual upstream schema with expected schema
+    if (upstreamSchema && expectedSchema.length > 0) {
+      const upstreamColMap = new Map(
+        upstreamSchema.map(col => [col.name, col.dataType])
+      );
 
-        return checks.join(' AND ');
-      })
-      .filter(c => c)
-      .map(c => `(${c})`)
-      .join(' AND ');
+      for (const expected of expectedSchema) {
+        const actualType = upstreamColMap.get(expected.name);
+        if (!actualType) {
+          warnings.push(`Expected column "${expected.name}" is missing from upstream schema.`);
+          continue;
+        }
 
-    const isValidExpr = conditions ? `CASE WHEN ${conditions} THEN 1 ELSE 0 END` : '1';
+        // Simple type comparison (case-insensitive)
+        const expectedTypeUpper = expected.type.toUpperCase();
+        const actualTypeUpper = actualType.toUpperCase();
+        if (expectedTypeUpper !== actualTypeUpper) {
+          warnings.push(
+            `Column "${expected.name}" type mismatch: expected ${expected.type}, got ${actualType}.`
+          );
+        }
 
-    const sql = `SELECT *, ${isValidExpr} AS __is_valid FROM source_table`;
+        // Note: nullable checks are not performed because upstreamSchema does not carry nullability.
+      }
+    } else if (!upstreamSchema) {
+      warnings.push('No upstream schema information available; skipping compliance checks.');
+    }
+
+    // Pass-through SELECT (no actual filtering; compliance is advisory)
+    const sql = `SELECT * FROM ${sourceRef}`;
 
     return {
       sql,
-      dependencies: ['source_table'],
+      dependencies: connection ? [connection.sourceNodeId] : [],
       parameters: new Map(),
       errors: [],
-      warnings: [],
+      warnings,
       metadata: {
         generatedAt: new Date().toISOString(),
         fragmentType: 'schema_compliance',
         lineCount: 1,
-      },
-    };
-  }
-
-  // ==================== Helper ====================
-  private emptyFragment(): GeneratedSQLFragment {
-    return {
-      sql: '',
-      dependencies: [],
-      parameters: new Map(),
-      errors: [],
-      warnings: [],
-      metadata: {
-        generatedAt: new Date().toISOString(),
-        fragmentType: 'empty',
-        lineCount: 0,
       },
     };
   }

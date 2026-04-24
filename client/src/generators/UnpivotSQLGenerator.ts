@@ -1,25 +1,51 @@
 // src/generators/UnpivotSQLGenerator.ts
-import {
-  BaseSQLGenerator,
-  SQLGenerationContext,
-  GeneratedSQLFragment
-} from './BaseSQLGenerator';
-import {
-  UnifiedCanvasNode,
-  getComponentConfig
-} from '../types/unified-pipeline.types';
+import { BaseSQLGenerator, SQLGenerationContext, GeneratedSQLFragment } from './BaseSQLGenerator';
+import { UnifiedCanvasNode } from '../types/unified-pipeline.types';
 
-// Expected configuration shape for an unpivot operation.
-// (Store this under a component configuration of type 'OTHER'.)
 interface UnpivotConfig {
-  columnsToUnpivot: string[];  // columns that become rows
-  keyColumnName: string;       // name for the new column that stores original column names
-  valueColumnName: string;     // name for the new column that stores values
-  excludeColumns?: string[];   // columns to keep as-is
+  identifierColumns: string[];      // columns that stay as row identifiers
+  valueColumns: string[];           // columns to be converted into rows
+  variableColumnName: string;       // name of the new column that holds the original column names
+  valueColumnName: string;          // name of the new column that holds the values
 }
 
 export class UnpivotSQLGenerator extends BaseSQLGenerator {
-  // --- Required abstract method implementations (all return empty fragments) ---
+  protected generateSelectStatement(context: SQLGenerationContext): GeneratedSQLFragment {
+    const { node } = context;
+    const config = this.extractUnpivotConfig(node);
+
+    if (!config) {
+      return this.fallbackSelect(node);
+    }
+
+    const { identifierColumns, valueColumns, variableColumnName, valueColumnName } = config;
+
+    // Use CROSS JOIN LATERAL with VALUES to unpivot
+    const idCols = identifierColumns.map(c => this.sanitizeIdentifier(c)).join(', ');
+
+    // Build the VALUES list for unpivoted pairs: (column_name, column_value)
+    const valuePairs = valueColumns
+      .map(col => `('${this.escapeString(col)}', ${this.sanitizeIdentifier(col)}::text)`)
+      .join(', ');
+
+    const lateralClause = `LATERAL (VALUES ${valuePairs}) AS unpivot(${this.sanitizeIdentifier(variableColumnName)}, ${this.sanitizeIdentifier(valueColumnName)})`;
+
+    const sql = `SELECT ${idCols}, unpivot.* FROM source_table, ${lateralClause}`;
+
+    return {
+      sql,
+      dependencies: ['source_table'],
+      parameters: new Map(),
+      errors: [],
+      warnings: [],
+      metadata: {
+        generatedAt: new Date().toISOString(),
+        fragmentType: 'unpivot',
+        lineCount: sql.split('\n').length,
+      },
+    };
+  }
+
   protected generateJoinConditions(_context: SQLGenerationContext): GeneratedSQLFragment {
     return this.emptyFragment();
   }
@@ -40,106 +66,42 @@ export class UnpivotSQLGenerator extends BaseSQLGenerator {
     return this.emptyFragment();
   }
 
-  // --- Main SELECT generation ---
-  protected generateSelectStatement(context: SQLGenerationContext): GeneratedSQLFragment {
-    const { node } = context;
-    const config = this.extractUnpivotConfig(node);
-
-    // If no valid configuration, fall back to a simple SELECT *
-    if (!config || !config.columnsToUnpivot.length) {
-      return this.fallbackSelect(node);
+  private extractUnpivotConfig(node: UnifiedCanvasNode): UnpivotConfig | null {
+    const config = node.metadata?.configuration?.config;
+    if (!config || typeof config !== 'object') {
+      return null;
     }
 
-    const exclude = config.excludeColumns || [];
-    const fixedColumns = exclude.map(col => this.sanitizeIdentifier(col)).join(', ');
-
-    // Build UNION ALL queries for each column to unpivot
-    const unionQueries = config.columnsToUnpivot.map(col => {
-      const selectParts = [];
-      if (fixedColumns) {
-        selectParts.push(fixedColumns);
-      }
-      selectParts.push(
-        `${this.sanitizeValue(col)} AS ${this.sanitizeIdentifier(config.keyColumnName)}`,
-        `${this.sanitizeIdentifier(col)} AS ${this.sanitizeIdentifier(config.valueColumnName)}`
-      );
-      return `SELECT ${selectParts.join(', ')} FROM source_table`;
-    }).join('\nUNION ALL\n');
-
-    const sql = unionQueries;
-
-    return {
-      sql,
-      dependencies: ['source_table'],
-      parameters: new Map(),
-      errors: [],
-      warnings: [],
-      metadata: {
-        generatedAt: new Date().toISOString(),
-        fragmentType: 'unpivot',
-        lineCount: unionQueries.split('\n').length
-      }
-    };
-  }
-
-  // --- Helper: safe extraction of UnpivotConfig from node metadata ---
-  private extractUnpivotConfig(node: UnifiedCanvasNode): UnpivotConfig | undefined {
-    const config = node.metadata?.configuration;
-    if (!config) return undefined;
-
-    // If the component type is 'OTHER', we assume its config holds our UnpivotConfig.
-    // (If you later add a dedicated 'UNPIVOT' type to ComponentConfiguration,
-    // you can add a type guard here.)
-    if (config.type === 'OTHER') {
-      return config.config as UnpivotConfig;
+    const candidate = config as any;
+    if (
+      Array.isArray(candidate.identifierColumns) &&
+      Array.isArray(candidate.valueColumns) &&
+      typeof candidate.variableColumnName === 'string' &&
+      typeof candidate.valueColumnName === 'string'
+    ) {
+      return {
+        identifierColumns: candidate.identifierColumns,
+        valueColumns: candidate.valueColumns,
+        variableColumnName: candidate.variableColumnName,
+        valueColumnName: candidate.valueColumnName,
+      };
     }
-
-    return undefined;
+    return null;
   }
 
-  // --- Helper: fallback SELECT when no configuration is present ---
   private fallbackSelect(node: UnifiedCanvasNode): GeneratedSQLFragment {
-    const tableName = this.extractTableName(node);
-    const sql = `SELECT * FROM ${this.sanitizeIdentifier(tableName)}`;
-
+    const tableName = node.name.toLowerCase().replace(/\s+/g, '_');
     return {
-      sql,
+      sql: `SELECT * FROM ${this.sanitizeIdentifier(tableName)}`,
       dependencies: [tableName],
       parameters: new Map(),
-      errors: [],
+      errors: [{
+        code: 'MISSING_UNPIVOT_CONFIG',
+        message: 'Unpivot configuration not found or invalid, using fallback SELECT *',
+        severity: 'ERROR'
+      }],
       warnings: [],
-      metadata: {
-        generatedAt: new Date().toISOString(),
-        fragmentType: 'fallback_select',
-        lineCount: 1
-      }
-    };
-  }
-
-  // --- Helper: extract a reasonable table name from the node ---
-  private extractTableName(node: UnifiedCanvasNode): string {
-    // Try to get from input configuration if available
-    const inputConfig = getComponentConfig(node, 'INPUT');
-    if (inputConfig && inputConfig.sourceDetails.tableName) {
-      return inputConfig.sourceDetails.tableName;
-    }
-    // Fall back to node name sanitized
-    return node.name.toLowerCase().replace(/\s+/g, '_');
-  }
-
-  // --- Helper: produce an empty fragment (reduces duplication) ---
-  private emptyFragment(): GeneratedSQLFragment {
-    return {
-      sql: '',
-      dependencies: [],
-      parameters: new Map(),
-      errors: [],
-      warnings: [],
-      metadata: {
-        generatedAt: new Date().toISOString(),
-        fragmentType: 'empty',
-        lineCount: 0
-      }
+      metadata: { generatedAt: new Date().toISOString(), fragmentType: 'fallback_select', lineCount: 1 }
     };
   }
 }

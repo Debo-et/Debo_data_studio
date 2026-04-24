@@ -5,7 +5,7 @@ import { databaseService } from '../database/services/database.service';
 import cors from 'cors';
 import corsOptions from '../config/cors';
 import { createForeignTableInPostgres, dropForeignTable } from '../database/services/foreign-table.service';
-import { getAllMetadataEntries, saveDatabaseMetadata } from '../database/services/metadata.service';
+import { getAllMetadataEntries, saveDatabaseMetadata, deleteDatabaseMetadata } from '../database/services/metadata.service';
 
 const router = Router();
 
@@ -293,6 +293,20 @@ router.delete('/foreign-tables/:tableName', cors(corsOptions), async (req: Reque
       success: false, 
       error: error instanceof Error ? error.message : String(error) 
     });
+  }
+});
+
+router.delete('/metadata/:id', cors(corsOptions), async (req: Request, res: Response): Promise<void> => {
+  try {
+    const { id } = req.params;
+    if (!id) {
+      res.status(400).json({ success: false, error: 'Missing metadata ID' });
+      return;
+    }
+    const result = await deleteDatabaseMetadata(id);
+    res.json(result);
+  } catch (error) {
+    res.status(500).json({ success: false, error: error instanceof Error ? error.message : String(error) });
   }
 });
 

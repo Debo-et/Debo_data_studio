@@ -1,5 +1,10 @@
 // src/generators/SplitRowSQLGenerator.ts
-import { BaseSQLGenerator, SQLGenerationContext, GeneratedSQLFragment, SQLGenerationError } from './BaseSQLGenerator';
+import {
+  BaseSQLGenerator,
+  SQLGenerationContext,
+  GeneratedSQLFragment,
+  SQLGenerationError,
+} from './BaseSQLGenerator';
 import { UnifiedCanvasNode } from '../types/unified-pipeline.types';
 
 interface SplitRowConfig {
@@ -11,106 +16,151 @@ interface SplitRowConfig {
 export class SplitRowSQLGenerator extends BaseSQLGenerator {
   // ==================== Abstract Method Implementations ====================
   protected generateSelectStatement(context: SQLGenerationContext): GeneratedSQLFragment {
-    const { node } = context;
-    const config = node.metadata?.configuration?.config as SplitRowConfig | undefined;
+    const { node, connection, upstreamSchema } = context;
+    const config = this.getConfig(node);
 
     // Validate configuration
     if (!config?.sourceColumn || !config?.delimiter || !config?.targetColumn) {
-      return this.fallbackSelect(node, 'Missing required split row configuration (sourceColumn, delimiter, targetColumn)');
+      return this.fallbackSelect(
+        node,
+        connection,
+        upstreamSchema,
+        'Missing required split row configuration (sourceColumn, delimiter, targetColumn)'
+      );
     }
 
-    const source = this.sanitizeIdentifier(config.sourceColumn);
-    const target = this.sanitizeIdentifier(config.targetColumn);
+    const sourceCol = config.sourceColumn;
+    const targetCol = config.targetColumn;
     
-    // Get all other columns from the output schema (if available)
-    const otherColumns = node.metadata?.schemas?.output?.fields
-      ?.filter(c => c.name !== config.sourceColumn)
-      .map(c => this.sanitizeIdentifier(c.name)) || [];
+    // Escape regex special characters (.*+?^${}()|[]\) and then only escape single quotes.
+    // Do NOT use escapeString() here as it would double‑escape backslashes.
+    const rawDelim = config.delimiter;
+    const escapedForRegex = rawDelim.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+    const delimiter = escapedForRegex.replace(/'/g, "''");
 
-    // Build the SELECT list: all other columns + the split values
-    const selectList = otherColumns.length > 0 
-      ? `${otherColumns.join(', ')}, ` 
-      : '';
+    // Determine source reference
+    const sourceRef = connection
+      ? this.sanitizeIdentifier(connection.sourceNodeId)
+      : 'source_table';
+    const errors: SQLGenerationError[] = [];
+    if (!connection) {
+      errors.push({
+        code: 'MISSING_CONNECTION',
+        message: 'SplitRow node requires an incoming connection',
+        severity: 'ERROR',
+      });
+      return this.errorFragment('split_row_select', errors, []);
+    }
 
-    // Use regexp_split_to_table to explode the delimited values into rows
-    const sql = `SELECT ${selectList}regexp_split_to_table(${source}, '${this.escapeString(config.delimiter)}') AS ${target} FROM source_table`;
+    // Build SELECT list: preserve all upstream columns except the one being split
+    const selectParts: string[] = [];
+    if (upstreamSchema && upstreamSchema.length > 0) {
+      for (const col of upstreamSchema) {
+        const colName = col.name;
+        if (colName === sourceCol) {
+          selectParts.push(
+            `regexp_split_to_table(${this.sanitizeIdentifier(colName)}, '${delimiter}') AS ${this.sanitizeIdentifier(targetCol)}`
+          );
+        } else {
+          selectParts.push(this.sanitizeIdentifier(colName));
+        }
+      }
+    } else {
+      selectParts.push(
+        `regexp_split_to_table(${this.sanitizeIdentifier(sourceCol)}, '${delimiter}') AS ${this.sanitizeIdentifier(targetCol)}`
+      );
+    }
+
+    const selectClause = selectParts.join(', ');
+    const sql = `SELECT ${selectClause} FROM ${sourceRef}`;
 
     return {
       sql,
-      dependencies: ['source_table'],
+      dependencies: [sourceRef],
       parameters: new Map(),
-      errors: [],
+      errors,
       warnings: [],
       metadata: {
         generatedAt: new Date().toISOString(),
         fragmentType: 'split_row_select',
         lineCount: sql.split('\n').length,
+        sourceColumn: sourceCol,
+        targetColumn: targetCol,
+        delimiter: config.delimiter,
       },
     };
   }
 
   protected generateJoinConditions(_context: SQLGenerationContext): GeneratedSQLFragment {
-    // Split row transformation does not introduce joins
     return this.emptyFragment();
   }
-
   protected generateWhereClause(_context: SQLGenerationContext): GeneratedSQLFragment {
-    // No filtering applied by this node
     return this.emptyFragment();
   }
-
   protected generateHavingClause(_context: SQLGenerationContext): GeneratedSQLFragment {
-    // No HAVING clause applicable
     return this.emptyFragment();
   }
-
   protected generateOrderByClause(_context: SQLGenerationContext): GeneratedSQLFragment {
-    // Ordering is not part of split row logic
     return this.emptyFragment();
   }
-
   protected generateGroupByClause(_context: SQLGenerationContext): GeneratedSQLFragment {
-    // No grouping introduced
     return this.emptyFragment();
   }
 
   // ==================== Helper Methods ====================
+
   /**
-   * Creates an empty SQL fragment (used for clauses that are not applicable).
+   * Retrieve split-row configuration from node metadata, supporting both
+   * unified format (configuration.config) and legacy test format (splitRowConfig).
    */
-  private emptyFragment(): GeneratedSQLFragment {
-    return {
-      sql: '',
-      dependencies: [],
-      parameters: new Map(),
-      errors: [],
-      warnings: [],
-      metadata: {
-        generatedAt: new Date().toISOString(),
-        fragmentType: 'empty',
-        lineCount: 0,
-      },
-    };
+  private getConfig(node: UnifiedCanvasNode): SplitRowConfig | undefined {
+    // Priority 1: unified configuration
+    const unifiedConfig = node.metadata?.configuration?.config as SplitRowConfig | undefined;
+    if (unifiedConfig?.sourceColumn && unifiedConfig?.delimiter && unifiedConfig?.targetColumn) {
+      return unifiedConfig;
+    }
+
+    // Priority 2: legacy metadata.splitRowConfig (used by test helpers)
+    const legacyConfig = node.metadata?.splitRowConfig as any;
+    if (legacyConfig) {
+      return {
+        sourceColumn: legacyConfig.splitColumn,
+        delimiter: legacyConfig.delimiter,
+        targetColumn: Array.isArray(legacyConfig.outputColumns)
+          ? legacyConfig.outputColumns[0]
+          : legacyConfig.targetColumn,
+      };
+    }
+
+    return undefined;
   }
 
   /**
    * Fallback select statement when configuration is invalid.
-   * Generates a comment with the error and a minimal valid SELECT.
    */
-  private fallbackSelect(_node: UnifiedCanvasNode, reason: string): GeneratedSQLFragment {
+  private fallbackSelect(
+    _node: UnifiedCanvasNode,
+    connection: SQLGenerationContext['connection'],
+    upstreamSchema: SQLGenerationContext['upstreamSchema'],
+    reason: string
+  ): GeneratedSQLFragment {
     const error: SQLGenerationError = {
       code: 'INVALID_SPLIT_ROW_CONFIG',
       message: reason,
       severity: 'ERROR',
-      suggestion: 'Ensure sourceColumn, delimiter, and targetColumn are defined in node.metadata.configuration.config',
+      suggestion:
+        'Ensure sourceColumn, delimiter, and targetColumn are defined in node.metadata.configuration.config',
     };
 
-    // Provide a minimal valid SQL (comment + SELECT *) to keep pipeline executable
-    const sql = `-- ERROR: ${reason}\nSELECT * FROM source_table;`;
+    const sourceRef = connection
+      ? this.sanitizeIdentifier(connection.sourceNodeId)
+      : 'source_table';
+    const selectParts = upstreamSchema?.map(col => this.sanitizeIdentifier(col.name)) ?? ['*'];
+    const sql = `-- ERROR: ${reason}\nSELECT ${selectParts.join(', ')} FROM ${sourceRef};`;
 
     return {
       sql,
-      dependencies: ['source_table'],
+      dependencies: [sourceRef],
       parameters: new Map(),
       errors: [error],
       warnings: [],
@@ -118,6 +168,25 @@ export class SplitRowSQLGenerator extends BaseSQLGenerator {
         generatedAt: new Date().toISOString(),
         fragmentType: 'split_row_fallback',
         lineCount: sql.split('\n').length,
+      },
+    };
+  }
+
+  private errorFragment(
+    fragmentType: string,
+    errors: SQLGenerationError[],
+    warnings: string[]
+  ): GeneratedSQLFragment {
+    return {
+      sql: '',
+      dependencies: [],
+      parameters: new Map(),
+      errors,
+      warnings,
+      metadata: {
+        generatedAt: new Date().toISOString(),
+        fragmentType,
+        lineCount: 0,
       },
     };
   }

@@ -201,6 +201,7 @@ const DelimitedFileMetadataWizard: React.FC<DelimitedFileMetadataWizardProps> = 
     type: string; 
     length?: number;
     sampleValues: string[];
+    nullable: boolean;
   }> => {
     return headers.map((header, index) => {
       // Analyze column data to infer type (skip header row if hasHeaders is true)
@@ -218,7 +219,8 @@ const DelimitedFileMetadataWizard: React.FC<DelimitedFileMetadataWizardProps> = 
         name: header,
         type: inferredType,
         length: inferDefaultLength(inferredType, columnData),
-        sampleValues
+        sampleValues,
+        nullable: false,
       };
     });
   };

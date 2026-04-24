@@ -377,52 +377,50 @@ export class DatabaseApiService {
   /**
    * Create a foreign server in PostgreSQL
    */
-  // frontend/src/services/database-api.service.ts
-
-async createForeignServer(
-  connectionId: string,
-  serverName: string,
-  dbType: DatabaseType,
-  config: ClientDatabaseConfig
-): Promise<{ success: boolean; error?: string; serverName?: string }> {
-  try {
-    // 1. Create server (without user/password)
-    const serverSql = generateForeignServerSQL(serverName, dbType, {
-      host: config.host,
-      port: config.port,
-      dbname: config.dbname,
-      // user/password omitted
-    });
-    console.log(`📝 Creating foreign server: ${serverName}`);
-    const serverResult = await this.executeQuery(connectionId, serverSql);
-    if (!serverResult.success) {
-      // If server already exists, we can continue; otherwise fail
-      if (!serverResult.error || !serverResult.error.includes('already exists')) {
-        return { success: false, error: serverResult.error };
-      }
-    }
-
-    // 2. For PostgreSQL, create user mapping with credentials
-    const isPostgres = dbType === 'postgresql' || dbType === 'postgres';
-    if (isPostgres && config.user && config.password) {
-      const userMappingSql = `CREATE USER MAPPING FOR CURRENT_USER
-        SERVER ${serverName}
-        OPTIONS (user '${config.user}', password '${config.password}');`;
-      const mappingResult = await this.executeQuery(connectionId, userMappingSql);
-      if (!mappingResult.success) {
-        // If mapping already exists, ignore; otherwise warn
-        if (!mappingResult.error || !mappingResult.error.includes('already exists')) {
-          console.warn(`User mapping creation failed: ${mappingResult.error}`);
+  async createForeignServer(
+    connectionId: string,
+    serverName: string,
+    dbType: DatabaseType,
+    config: ClientDatabaseConfig
+  ): Promise<{ success: boolean; error?: string; serverName?: string }> {
+    try {
+      // 1. Create server (without user/password)
+      const serverSql = generateForeignServerSQL(serverName, dbType, {
+        host: config.host,
+        port: config.port,
+        dbname: config.dbname,
+        // user/password omitted
+      });
+      console.log(`📝 Creating foreign server: ${serverName}`);
+      const serverResult = await this.executeQuery(connectionId, serverSql);
+      if (!serverResult.success) {
+        // If server already exists, we can continue; otherwise fail
+        if (!serverResult.error || !serverResult.error.includes('already exists')) {
+          return { success: false, error: serverResult.error };
         }
       }
-    }
 
-    return { success: true, serverName };
-  } catch (error: any) {
-    console.error('❌ Failed to create foreign server:', error);
-    return { success: false, error: error.message };
+      // 2. For PostgreSQL, create user mapping with credentials
+      const isPostgres = dbType === 'postgresql' || dbType === 'postgres';
+      if (isPostgres && config.user && config.password) {
+        const userMappingSql = `CREATE USER MAPPING FOR CURRENT_USER
+          SERVER ${serverName}
+          OPTIONS (user '${config.user}', password '${config.password}');`;
+        const mappingResult = await this.executeQuery(connectionId, userMappingSql);
+        if (!mappingResult.success) {
+          // If mapping already exists, ignore; otherwise warn
+          if (!mappingResult.error || !mappingResult.error.includes('already exists')) {
+            console.warn(`User mapping creation failed: ${mappingResult.error}`);
+          }
+        }
+      }
+
+      return { success: true, serverName };
+    } catch (error: any) {
+      console.error('❌ Failed to create foreign server:', error);
+      return { success: false, error: error.message };
+    }
   }
-}
 
   /**
    * Create a foreign table in PostgreSQL
@@ -577,6 +575,109 @@ async createForeignServer(
       };
     }
   }
+
+  // ===========================================================================
+  // NEW: CASCADING DELETE METHODS
+  // ===========================================================================
+
+  /**
+   * Drops a foreign table and its associated metadata record.
+   * Returns the foreign server name for possible further cleanup.
+   */
+  async dropForeignTableCascade(
+    connectionId: string,
+    tableName: string
+  ): Promise<{ success: boolean; error?: string; serverName?: string }> {
+    try {
+      console.log(`🗑️ Cascading delete for foreign table: ${tableName}`);
+
+      // First, retrieve the foreign server name
+      const serverRes = await this.executeQuery(
+        connectionId,
+        `SELECT srvname 
+         FROM pg_foreign_table ft
+         JOIN pg_foreign_server fs ON ft.ftserver = fs.oid
+         JOIN pg_class c ON ft.ftrelid = c.oid
+         WHERE c.relname = $1`,
+        { params: [tableName] }
+      );
+      const serverName = serverRes.success && serverRes.rows?.[0]?.srvname || undefined;
+
+      // Drop foreign table with CASCADE
+      const dropSql = `DROP FOREIGN TABLE IF EXISTS ${this.sanitizeIdentifier(tableName)} CASCADE`;
+      const dropResult = await this.executeQuery(connectionId, dropSql);
+      if (!dropResult.success) {
+        throw new Error(dropResult.error || 'Failed to drop foreign table');
+      }
+
+      // Delete metadata record
+      const deleteMetaSql = `DELETE FROM data_source_metadata WHERE foreign_table_name = $1`;
+      const metaResult = await this.executeQuery(connectionId, deleteMetaSql, { params: [tableName] });
+      if (!metaResult.success) {
+        console.warn(`Could not delete metadata for ${tableName}:`, metaResult.error);
+      }
+
+      console.log(`✅ Cascading delete completed for ${tableName}, server: ${serverName || 'none'}`);
+      return { success: true, serverName };
+    } catch (error: any) {
+      console.error('❌ dropForeignTableCascade failed:', error);
+      return { success: false, error: error.message };
+    }
+  }
+
+  /**
+   * Drops a foreign server and its user mappings, but only if no foreign tables remain.
+   */
+  async dropForeignServerIfUnused(
+    connectionId: string,
+    serverName: string
+  ): Promise<{ success: boolean; error?: string }> {
+    try {
+      console.log(`🔍 Checking if foreign server "${serverName}" can be dropped...`);
+
+      // Check for remaining foreign tables on this server
+      const checkSql = `
+        SELECT COUNT(*) as count
+        FROM pg_foreign_table ft
+        JOIN pg_foreign_server fs ON ft.ftserver = fs.oid
+        WHERE fs.srvname = $1
+      `;
+      const checkResult = await this.executeQuery(connectionId, checkSql, { params: [serverName] });
+      if (!checkResult.success) {
+        throw new Error(checkResult.error || 'Failed to check server usage');
+      }
+
+      const tableCount = parseInt(checkResult.rows?.[0]?.count || '0', 10);
+      if (tableCount > 0) {
+        console.log(`ℹ️ Server "${serverName}" still has ${tableCount} foreign table(s), skipping drop.`);
+        return { success: true };
+      }
+
+      // Drop user mapping first
+      const dropMappingSql = `DROP USER MAPPING IF EXISTS FOR CURRENT_USER SERVER ${this.sanitizeIdentifier(serverName)}`;
+      const mappingResult = await this.executeQuery(connectionId, dropMappingSql);
+      if (!mappingResult.success) {
+        console.warn(`Could not drop user mapping for server ${serverName}:`, mappingResult.error);
+      }
+
+      // Drop the server with CASCADE
+      const dropServerSql = `DROP SERVER IF EXISTS ${this.sanitizeIdentifier(serverName)} CASCADE`;
+      const serverResult = await this.executeQuery(connectionId, dropServerSql);
+      if (!serverResult.success) {
+        throw new Error(serverResult.error || 'Failed to drop foreign server');
+      }
+
+      console.log(`✅ Foreign server "${serverName}" dropped (unused).`);
+      return { success: true };
+    } catch (error: any) {
+      console.error('❌ dropForeignServerIfUnused failed:', error);
+      return { success: false, error: error.message };
+    }
+  }
+
+  // ===========================================================================
+  // END CASCADING DELETE METHODS
+  // ===========================================================================
 
   /**
    * Test a foreign table query
@@ -876,6 +977,21 @@ async createForeignServer(
       }));
     }
   }
+/**
+ * Delete a database metadata entry by its ID.
+ * This removes the saved connection configuration from the backend.
+ */
+async deleteDatabaseMetadata(metadataId: string): Promise<{ success: boolean; error?: string }> {
+  try {
+    console.log(`🗑️ Deleting database metadata entry ${metadataId}...`);
+    const response = await this.api.delete(`/api/database/metadata/${metadataId}`);
+    console.log(`✅ Metadata entry deleted:`, response.data);
+    return response.data;
+  } catch (error: any) {
+    console.error('❌ Failed to delete database metadata:', error);
+    return { success: false, error: this.getErrorMessage(error) };
+  }
+}
 
   async clearAllConnections(): Promise<ClientDisconnectResult> {
     try {
@@ -1607,6 +1723,50 @@ export function useDatabaseOperations(options?: UseDatabaseOperationsOptions) {
   }, [apiService]);
 
   // ===========================================================================
+  // NEW: CASCADING DELETE HOOKS
+  // ===========================================================================
+
+  const dropForeignTableCascade = useCallback(async (
+    connectionId: string,
+    tableName: string
+  ) => {
+    setLoading(true);
+    setError(null);
+    try {
+      const result = await apiService.dropForeignTableCascade(connectionId, tableName);
+      if (result.success) {
+        await refreshForeignTables();
+      }
+      return result;
+    } catch (err: any) {
+      const errorMsg = err instanceof Error ? err.message : 'Cascading delete failed';
+      setError(errorMsg);
+      return { success: false, error: errorMsg };
+    } finally {
+      setLoading(false);
+    }
+  }, [apiService, refreshForeignTables]);
+
+  const dropForeignServerIfUnused = useCallback(async (
+    connectionId: string,
+    serverName: string
+  ) => {
+    setLoading(true);
+    setError(null);
+    try {
+      const result = await apiService.dropForeignServerIfUnused(connectionId, serverName);
+      return result;
+    } catch (err: any) {
+      const errorMsg = err instanceof Error ? err.message : 'Failed to drop foreign server';
+      setError(errorMsg);
+      return { success: false, error: errorMsg };
+    } finally {
+      setLoading(false);
+    }
+  }, [apiService]);
+
+  
+  // ===========================================================================
   // CONNECTION OPERATIONS
   // ===========================================================================
 
@@ -1846,13 +2006,17 @@ export function useDatabaseOperations(options?: UseDatabaseOperationsOptions) {
     // Foreign Table Operations
     createForeignServer,
     createForeignTable,
-    createForeignTableViaBackend,   // NEW
+    createForeignTableViaBackend,
     listForeignTables,
     dropForeignTable,
     testForeignTable,
     checkFDWAvailability,
     refreshForeignTables,
     getForeignTableColumns,
+    
+    // NEW Cascading Delete Operations
+    dropForeignTableCascade,
+    dropForeignServerIfUnused,
     
     // Schema Operations
     getTables,
@@ -1883,6 +2047,7 @@ export function useDatabaseOperations(options?: UseDatabaseOperationsOptions) {
     apiService,
   };
 }
+
 
 // ===========================================================================
 // Export Default Instance

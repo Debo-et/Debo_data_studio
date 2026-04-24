@@ -6,7 +6,6 @@ import {
 } from './BaseSQLGenerator';
 import { UnifiedCanvasNode, NodeType } from '../types/unified-pipeline.types';
 
-// Type for a single standardization rule
 interface StandardizationRule {
   column: string;
   operation: 'trim' | 'upper' | 'lower' | 'initcap' | 'phone' | 'email' | 'zip' | 'custom';
@@ -15,9 +14,6 @@ interface StandardizationRule {
 }
 
 export class StandardizeRowSQLGenerator extends BaseSQLGenerator {
-  // ------------------------------------------------------------------------
-  // Required implementations of abstract methods
-  // ------------------------------------------------------------------------
   protected generateJoinConditions(_context: SQLGenerationContext): GeneratedSQLFragment {
     return this.emptyFragment();
   }
@@ -38,12 +34,9 @@ export class StandardizeRowSQLGenerator extends BaseSQLGenerator {
     return this.emptyFragment();
   }
 
-  // ------------------------------------------------------------------------
-  // Core SELECT generation
-  // ------------------------------------------------------------------------
   protected generateSelectStatement(context: SQLGenerationContext): GeneratedSQLFragment {
     const { node } = context;
-    const rules = this.extractRules(node); // Always an array
+    const rules = this.extractRules(node);
 
     if (rules.length === 0) {
       return this.fallbackSelect(node);
@@ -51,7 +44,6 @@ export class StandardizeRowSQLGenerator extends BaseSQLGenerator {
 
     const allColumns = node.metadata?.schemas?.output?.fields || [];
     if (allColumns.length === 0) {
-      // No schema info – fallback to passthrough
       return this.fallbackSelect(node);
     }
 
@@ -76,14 +68,12 @@ export class StandardizeRowSQLGenerator extends BaseSQLGenerator {
           expr = `INITCAP(${expr})`;
           break;
         case 'phone':
-          // Remove all non-digit characters
           expr = `REGEXP_REPLACE(${expr}, '\\D', '', 'g')`;
           break;
         case 'email':
           expr = `LOWER(TRIM(${expr}))`;
           break;
         case 'zip':
-          // Keep only first five digits
           expr = `SUBSTRING(REGEXP_REPLACE(${expr}, '\\D', '', 'g') FROM 1 FOR 5)`;
           break;
         case 'custom':
@@ -113,14 +103,6 @@ export class StandardizeRowSQLGenerator extends BaseSQLGenerator {
     };
   }
 
-  // ------------------------------------------------------------------------
-  // Helper methods
-  // ------------------------------------------------------------------------
-
-  /**
-   * Safely extract standardization rules from the node's configuration.
-   * Always returns an array (empty if none found).
-   */
   private extractRules(node: UnifiedCanvasNode): StandardizationRule[] {
     if (node.type !== NodeType.STANDARDIZE_ROW) {
       return [];
@@ -136,7 +118,6 @@ export class StandardizeRowSQLGenerator extends BaseSQLGenerator {
       return [];
     }
 
-    // Optional: validate each rule's shape
     return maybeRules.filter(
       (rule): rule is StandardizationRule =>
         rule &&
@@ -147,9 +128,6 @@ export class StandardizeRowSQLGenerator extends BaseSQLGenerator {
     );
   }
 
-  /**
-   * Generate a simple SELECT * FROM source_table as a fallback.
-   */
   private fallbackSelect(node: UnifiedCanvasNode): GeneratedSQLFragment {
     const tableName = node.name.toLowerCase().replace(/\s+/g, '_') + '_source';
     const sql = `SELECT * FROM ${this.sanitizeIdentifier(tableName)}`;
@@ -163,24 +141,6 @@ export class StandardizeRowSQLGenerator extends BaseSQLGenerator {
         generatedAt: new Date().toISOString(),
         fragmentType: 'fallback_select',
         lineCount: 1,
-      },
-    };
-  }
-
-  /**
-   * Return an empty fragment for unused clauses.
-   */
-  private emptyFragment(): GeneratedSQLFragment {
-    return {
-      sql: '',
-      dependencies: [],
-      parameters: new Map(),
-      errors: [],
-      warnings: [],
-      metadata: {
-        generatedAt: new Date().toISOString(),
-        fragmentType: 'empty',
-        lineCount: 0,
       },
     };
   }

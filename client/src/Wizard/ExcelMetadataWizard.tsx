@@ -138,6 +138,7 @@ const ExcelMetadataWizard: React.FC<ExcelMetadataWizardProps> = ({
 
   // Generate schema from detected headers and data
   const generateSchemaFromData = (headers: string[], data: any[][]): Array<{ 
+    nullable: boolean;
     name: string; 
     type: string; 
     length?: number 
@@ -151,7 +152,8 @@ const ExcelMetadataWizard: React.FC<ExcelMetadataWizardProps> = ({
       return {
         name: header,
         type: inferredType,
-        length: inferDefaultLength(inferredType, columnData)
+        length: inferDefaultLength(inferredType, columnData),
+        nullable: true // Default to nullable
       };
     });
   };
@@ -293,7 +295,7 @@ const ExcelMetadataWizard: React.FC<ExcelMetadataWizardProps> = ({
     setFormData(prev => ({ ...prev, ...updates }));
   };
 
-  // Update schema field
+  // Update schema field (preserves nullable property)
   const updateSchema = (index: number, field: string, value: string | number) => {
     const newSchema = [...formData.schema];
     newSchema[index] = { ...newSchema[index], [field]: value };

@@ -80,7 +80,6 @@ export interface ConnectionRule {
 
 export interface NodeRegistryState {
   [x: string]: any;
-  [x: string]: any;
   nodeTypes: EntityState<NodeTypeDefinition, NodeType>;
   connectionRules: ConnectionRule[];
   sqlTemplates: Record<string, string>;

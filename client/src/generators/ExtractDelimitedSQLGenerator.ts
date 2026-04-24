@@ -1,49 +1,89 @@
 // src/generators/ExtractDelimitedSQLGenerator.ts
 import { BaseSQLGenerator, SQLGenerationContext, GeneratedSQLFragment } from './BaseSQLGenerator';
-import { UnifiedCanvasNode } from '../types/unified-pipeline.types';
+import { UnifiedCanvasNode, UnifiedCanvasConnection } from '../types/unified-pipeline.types';
+import { globalLogger } from '../utils/Logger';
 
-interface ExtractConfig {
+interface ExtractDelimitedConfig {
   sourceColumn: string;
   delimiter: string;
-  targetColumns: string[];
+  outputColumns: Array<{ name: string; position: number; type: string }>;
   quoteChar?: string;
 }
 
 export class ExtractDelimitedSQLGenerator extends BaseSQLGenerator {
-  // ==================== IMPLEMENT ALL ABSTRACT METHODS ====================
+  constructor(options?: any) {
+    super(options);
+    globalLogger.debug(`[ExtractDelimitedSQLGenerator] Constructor called with options:`, options);
+  }
+
   protected generateSelectStatement(context: SQLGenerationContext): GeneratedSQLFragment {
-    const { node } = context;
-    // Safely extract and cast the configuration
-    const rawConfig = node.metadata?.configuration?.config;
-    const config = rawConfig as ExtractConfig | undefined;
-
-    if (!config || !config.sourceColumn || !config.delimiter || !config.targetColumns.length) {
-      return this.fallbackSelect(node);
-    }
-
-    // PostgreSQL: split_part or regexp_split_to_array
-    // For simplicity, use split_part repeated for each target column
-    const expressions = config.targetColumns.map((col, idx) => {
-      const pos = idx + 1;
-      return `split_part(${this.sanitizeIdentifier(config.sourceColumn)}, '${this.escapeString(config.delimiter)}', ${pos}) AS ${this.sanitizeIdentifier(col)}`;
+    const { node, connection, upstreamSchema } = context;
+    globalLogger.debug(`[ExtractDelimitedSQLGenerator] generateSelectStatement called for node ${node.id} (${node.name})`, {
+      hasConfig: !!node.metadata?.extractDelimitedConfig,
+      hasConnection: !!connection,
+      upstreamSchemaLength: upstreamSchema?.length,
     });
 
-    // Also include original columns except the source column? Usually we keep all.
-    const allColumns = node.metadata?.schemas?.output?.fields || [];
-    const otherColumns = allColumns
-      .filter(c => c.name !== config.sourceColumn)
-      .map(c => this.sanitizeIdentifier(c.name));
+    const config = node.metadata?.extractDelimitedConfig as ExtractDelimitedConfig | undefined;
+
+    if (!config || !config.sourceColumn || !config.delimiter || !config.outputColumns?.length) {
+      globalLogger.warn(`[ExtractDelimitedSQLGenerator] Missing or incomplete extract configuration for node ${node.id}, using fallback`);
+      return this.fallbackSelect(node, connection);
+    }
+
+    const errors: any[] = [];
+    const warnings: string[] = [];
+
+    // Extract target column names from the outputColumns array
+    const targetColumnNames = config.outputColumns.map(col => col.name);
+
+    // Build SPLIT_PART expressions for each target column
+    const expressions = targetColumnNames.map((col, idx) => {
+      const pos = idx + 1;
+      const escapedDelim = this.escapeString(config.delimiter);
+      return `split_part(${this.sanitizeIdentifier(config.sourceColumn)}, '${escapedDelim}', ${pos}) AS ${this.sanitizeIdentifier(col)}`;
+    });
+
+    // Preserve all upstream columns except the source column being split
+    const otherColumns: string[] = [];
+    if (upstreamSchema && upstreamSchema.length > 0) {
+      otherColumns.push(
+        ...upstreamSchema
+          .filter(col => col.name !== config.sourceColumn)
+          .map(col => this.sanitizeIdentifier(col.name))
+      );
+      globalLogger.debug(`[ExtractDelimitedSQLGenerator] Added ${otherColumns.length} other columns from upstream schema`);
+    } else if (node.metadata?.schemas?.output?.fields) {
+      otherColumns.push(
+        ...node.metadata.schemas.output.fields
+          .filter((f: any) => f.name !== config.sourceColumn)
+          .map((f: any) => this.sanitizeIdentifier(f.name))
+      );
+      warnings.push('Using output schema fields because upstream schema not available');
+      globalLogger.warn(`[ExtractDelimitedSQLGenerator] Using output schema fields as fallback`);
+    }
 
     const selectList = [...otherColumns, ...expressions].join(', ');
-    const sql = `SELECT ${selectList} FROM source_table`;
+
+    // Determine source table reference from the incoming connection
+    const sourceTable = connection
+      ? this.sanitizeIdentifier(connection.sourceNodeId)
+      : 'source'; // should not happen in a valid pipeline
+
+    const sql = `SELECT ${selectList} FROM ${sourceTable}`;
+    globalLogger.debug(`[ExtractDelimitedSQLGenerator] Generated SQL: ${sql.substring(0, 200)}...`);
 
     return {
       sql,
-      dependencies: ['source_table'],
+      dependencies: connection ? [connection.sourceNodeId] : [],
       parameters: new Map(),
-      errors: [],
-      warnings: [],
-      metadata: { generatedAt: new Date().toISOString(), fragmentType: 'extract_delimited', lineCount: 1 }
+      errors,
+      warnings,
+      metadata: {
+        generatedAt: new Date().toISOString(),
+        fragmentType: 'extract_delimited',
+        lineCount: sql.split('\n').length,
+      },
     };
   }
 
@@ -67,28 +107,25 @@ export class ExtractDelimitedSQLGenerator extends BaseSQLGenerator {
     return this.emptyFragment();
   }
 
-  // ==================== PRIVATE HELPERS ====================
-  private fallbackSelect(node: UnifiedCanvasNode): GeneratedSQLFragment {
-    // A minimal SELECT that at least returns the source table
-    const tableName = node.name.toLowerCase().replace(/\s+/g, '_');
-    return {
-      sql: `SELECT * FROM ${this.sanitizeIdentifier(tableName)}`,
-      dependencies: [tableName],
-      parameters: new Map(),
-      errors: [],
-      warnings: [],
-      metadata: { generatedAt: new Date().toISOString(), fragmentType: 'fallback_select', lineCount: 1 }
-    };
-  }
+  private fallbackSelect(node: UnifiedCanvasNode, connection?: UnifiedCanvasConnection): GeneratedSQLFragment {
+    const sourceTable = connection
+      ? this.sanitizeIdentifier(connection.sourceNodeId)
+      : this.sanitizeIdentifier(node.name.toLowerCase().replace(/\s+/g, '_'));
 
-  private emptyFragment(): GeneratedSQLFragment {
+    const sql = `SELECT * FROM ${sourceTable}`;
+    globalLogger.debug(`[ExtractDelimitedSQLGenerator] Fallback SQL: ${sql}`);
+
     return {
-      sql: '',
-      dependencies: [],
+      sql,
+      dependencies: connection ? [connection.sourceNodeId] : [],
       parameters: new Map(),
       errors: [],
-      warnings: [],
-      metadata: { generatedAt: new Date().toISOString(), fragmentType: 'empty', lineCount: 0 }
+      warnings: ['Using fallback SELECT * because extract configuration is missing or incomplete'],
+      metadata: {
+        generatedAt: new Date().toISOString(),
+        fragmentType: 'fallback_extract',
+        lineCount: 1,
+      },
     };
   }
 }

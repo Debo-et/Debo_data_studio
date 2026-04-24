@@ -1,93 +1,111 @@
 // src/generators/LookupSQLGenerator.ts
-import { BaseSQLGenerator, SQLGenerationContext, GeneratedSQLFragment } from './BaseSQLGenerator';
-import { UnifiedCanvasNode, isLookupConfig, LookupComponentConfiguration } from '../types/unified-pipeline.types';
+import { BaseSQLGenerator, SQLGenerationContext, GeneratedSQLFragment, SQLGenerationError } from './BaseSQLGenerator';
+import { NodeType } from '../types/unified-pipeline.types';
+import { globalLogger } from '../utils/Logger';
+
+interface LookupConfig {
+  lookupTable: string;
+  keyMapping: Array<{ sourceColumn: string; targetColumn: string }>;
+  outputColumns: string[];
+}
 
 export class LookupSQLGenerator extends BaseSQLGenerator {
-  protected generateSelectStatement(context: SQLGenerationContext): GeneratedSQLFragment {
-    const { node } = context;
-    const config = this.getLookupConfig(node);
-    if (!config) return this.fallbackSelect(node);
+  // Required abstract method stubs (unused in lookup)
+  protected generateSelectStatement(): GeneratedSQLFragment { return this.emptyFragment(); }
+  protected generateJoinConditions(): GeneratedSQLFragment { return this.emptyFragment(); }
+  protected generateWhereClause(): GeneratedSQLFragment { return this.emptyFragment(); }
+  protected generateHavingClause(): GeneratedSQLFragment { return this.emptyFragment(); }
+  protected generateOrderByClause(): GeneratedSQLFragment { return this.emptyFragment(); }
+  protected generateGroupByClause(): GeneratedSQLFragment { return this.emptyFragment(); }
 
-    // Build SELECT clause with lookup fields
-    const selectColumns = [
-      ...config.lookupKeyFields.map(f => this.sanitizeIdentifier(f)),
-      ...config.lookupReturnFields.map(f => this.sanitizeIdentifier(f))
-    ].join(', ');
+  generateSQL(context: SQLGenerationContext): GeneratedSQLFragment {
+    const { node, connection, upstreamSchema } = context;
+    const errors: SQLGenerationError[] = [];
+    const warnings: string[] = [];
 
-    const fromTable = this.sanitizeIdentifier(config.lookupTable);
-    return {
-      sql: `SELECT ${selectColumns} FROM ${fromTable}`,
-      dependencies: [config.lookupTable],
-      parameters: new Map(),
-      errors: [],
-      warnings: [],
-      metadata: { generatedAt: new Date().toISOString(), fragmentType: 'lookup_select', lineCount: 1 }
-    };
-  }
+    // Validate node type
+    if (node.type !== NodeType.LOOKUP) {
+      errors.push({
+        code: 'INVALID_NODE_TYPE',
+        message: `LookupSQLGenerator expects node type LOOKUP, got ${node.type}`,
+        severity: 'ERROR',
+      });
+      return this.errorFragment('lookup_select', errors, warnings);
+    }
 
-  protected generateJoinConditions(context: SQLGenerationContext): GeneratedSQLFragment {
-    const { node, connection } = context;
-    const config = this.getLookupConfig(node);
-    if (!config || !connection) return this.emptyFragment();
+    // Extract configuration
+    const config = node.metadata?.lookupConfig as LookupConfig | undefined;
+    if (!config) {
+      errors.push({
+        code: 'MISSING_CONFIG',
+        message: 'Lookup node missing lookupConfig metadata',
+        severity: 'ERROR',
+        suggestion: 'Provide lookupTable, keyMapping, and outputColumns in node.metadata.lookupConfig',
+      });
+      return this.errorFragment('lookup_select', errors, warnings);
+    }
 
-    // Build JOIN condition based on key fields
-    const joinConditions = config.lookupKeyFields.map(keyField => {
-      // Assume source column is the same as keyField, but could be mapped differently
-      return `${connection.sourceNodeId}.${this.sanitizeIdentifier(keyField)} = ${config.lookupTable}.${this.sanitizeIdentifier(keyField)}`;
+    const { lookupTable, keyMapping, outputColumns } = config;
+    if (!lookupTable || !keyMapping?.length || !outputColumns?.length) {
+      errors.push({
+        code: 'INVALID_CONFIG',
+        message: 'lookupTable, keyMapping, and outputColumns are required',
+        severity: 'ERROR',
+      });
+      return this.errorFragment('lookup_select', errors, warnings);
+    }
+
+    // Determine source reference – the pipeline will later replace the node ID with the appropriate CTE alias.
+    const sourceRef = connection ? this.sanitizeIdentifier(connection.sourceNodeId) : 'source';
+    const lookupRef = this.sanitizeIdentifier(lookupTable);
+
+    // Build SELECT list: all source columns + requested lookup output columns
+    const sourceColumns = upstreamSchema?.map(col => col.name) ?? ['*'];
+    const selectParts: string[] = [];
+
+    // Add source columns with qualification to avoid ambiguity
+    sourceColumns.forEach(col => {
+      selectParts.push(`${sourceRef}.${this.sanitizeIdentifier(col)}`);
+    });
+
+    // Add lookup columns, also qualified
+    outputColumns.forEach(col => {
+      selectParts.push(`${lookupRef}.${this.sanitizeIdentifier(col)}`);
+    });
+
+    // Build ON conditions from keyMapping
+    const onConditions = keyMapping.map(mapping => {
+      const leftCol = this.sanitizeIdentifier(mapping.sourceColumn);
+      const rightCol = this.sanitizeIdentifier(mapping.targetColumn);
+      return `${sourceRef}.${leftCol} = ${lookupRef}.${rightCol}`;
     }).join(' AND ');
 
-    const joinType = config.sqlGeneration.joinType === 'LEFT' ? 'LEFT JOIN' : 'JOIN';
+    const sql = `SELECT ${selectParts.join(', ')}\nFROM ${sourceRef}\nLEFT JOIN ${lookupRef} ON ${onConditions}`;
+
+    globalLogger.debug(`[LookupSQLGenerator] Generated SQL: ${sql}`);
+
     return {
-      sql: `${joinType} ${this.sanitizeIdentifier(config.lookupTable)} ON ${joinConditions}`,
-      dependencies: [config.lookupTable],
+      sql,
+      dependencies: [sourceRef, lookupTable],
       parameters: new Map(),
-      errors: [],
-      warnings: [],
-      metadata: { generatedAt: new Date().toISOString(), fragmentType: 'lookup_join', lineCount: 1 }
+      errors,
+      warnings,
+      metadata: {
+        generatedAt: new Date().toISOString(),
+        fragmentType: 'lookup_select',
+        lineCount: sql.split('\n').length,
+      },
     };
   }
 
-  protected generateWhereClause(_context: SQLGenerationContext): GeneratedSQLFragment {
-    return this.emptyFragment();
-  }
-
-  protected generateHavingClause(_context: SQLGenerationContext): GeneratedSQLFragment {
-    return this.emptyFragment();
-  }
-
-  protected generateOrderByClause(_context: SQLGenerationContext): GeneratedSQLFragment {
-    return this.emptyFragment();
-  }
-
-  protected generateGroupByClause(_context: SQLGenerationContext): GeneratedSQLFragment {
-    return this.emptyFragment();
-  }
-
-  private getLookupConfig(node: UnifiedCanvasNode): LookupComponentConfiguration | undefined {
-    if (!node.metadata?.configuration) return undefined;
-    const conf = node.metadata.configuration;
-    return isLookupConfig(conf) ? conf.config : undefined;
-  }
-
-  private fallbackSelect(node: UnifiedCanvasNode): GeneratedSQLFragment {
-    return {
-      sql: `SELECT * FROM ${this.sanitizeIdentifier(node.name)}`,
-      dependencies: [node.name],
-      parameters: new Map(),
-      errors: [],
-      warnings: ['No lookup configuration, using fallback'],
-      metadata: { generatedAt: new Date().toISOString(), fragmentType: 'lookup_fallback', lineCount: 1 }
-    };
-  }
-
-  private emptyFragment(): GeneratedSQLFragment {
+  private errorFragment(fragmentType: string, errors: SQLGenerationError[], warnings: string[]): GeneratedSQLFragment {
     return {
       sql: '',
       dependencies: [],
       parameters: new Map(),
-      errors: [],
-      warnings: [],
-      metadata: { generatedAt: new Date().toISOString(), fragmentType: 'empty', lineCount: 0 }
+      errors,
+      warnings,
+      metadata: { generatedAt: new Date().toISOString(), fragmentType, lineCount: 0 },
     };
   }
 }

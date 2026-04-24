@@ -1,9 +1,11 @@
+// appSlice.ts
 import { createSlice, createAsyncThunk, PayloadAction } from '@reduxjs/toolkit';
 import { api, NodeType, Workflow, RunWorkflowResponse } from '../../api/client';
 import { webSocketService, WebSocketMessage } from '../../api/socket';
 import { addLog } from './logsSlice';
 import { startExecution, setNodeStatus, setWorkflowStatus, initializeNodeStatuses } from './executionSlice';
 import { RootState } from '../index';
+import { selectAllConnections } from './connectionsSlice'; // ✅ Import selector
 
 export const fetchNodeTypes = createAsyncThunk(
   'api/fetchNodeTypes',
@@ -27,13 +29,16 @@ export const runWorkflow = createAsyncThunk(
       const nodeIds = nodes.map(node => node.id);
       dispatch(initializeNodeStatuses(nodeIds));
 
+      // ✅ Use selector to get connections array
+      const edges = selectAllConnections(state.connections);
+
       const workflow: Workflow = {
         name: `Execution-${Date.now()}`,
         nodes: nodes,
-        edges: state.connections.edges,
+        edges: edges,                     // ✅ fixed
         metadata: {
           nodeCount: nodes.length,
-          connectionCount: state.connections.edges.length,
+          connectionCount: edges.length,  // ✅ now works
           timestamp: Date.now(),
         },
       };
@@ -91,10 +96,13 @@ export const saveWorkflow = createAsyncThunk(
     try {
       const state = getState() as RootState;
       
+      // ✅ Use selector here as well
+      const edges = selectAllConnections(state.connections);
+
       const workflow: Workflow = {
         name: workflowData.name,
         nodes: state.nodes.nodes,
-        edges: state.connections.edges,
+        edges: edges,                     // ✅ fixed
       };
 
       dispatch(addLog({
@@ -212,7 +220,7 @@ interface ApiState {
     save: string | null;
   };
   isWebSocketConnected: boolean;
-  executionId: string | null; // Add this missing property
+  executionId: string | null;
   localWorkflows: Array<{ id: string; workflow: any }>;
 }
 
@@ -230,7 +238,7 @@ const initialState: ApiState = {
     save: null,
   },
   isWebSocketConnected: false,
-  executionId: null, // Initialize executionId
+  executionId: null,
   localWorkflows: [],
 };
 
@@ -264,7 +272,6 @@ const apiSlice = createSlice({
       state.isWebSocketConnected = action.payload;
     },
 
-    // Add the missing actions that Console.tsx is trying to use
     setWebSocketConnected: (state, action: PayloadAction<boolean>) => {
       state.isWebSocketConnected = action.payload;
     },
@@ -327,8 +334,9 @@ export const {
   connectWebSocket, 
   disconnectWebSocket, 
   setWebSocketStatus, 
-  setWebSocketConnected, // Export the new action
-  setExecutionId, // Export the new action
+  setWebSocketConnected,
+  setExecutionId,
   clearErrors 
 } = apiSlice.actions;
+
 export default apiSlice.reducer;

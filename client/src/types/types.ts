@@ -239,6 +239,7 @@ export interface XMLMetadataFormData {
     element: string;
   }>;
   structure: any[];
+  schema?: Array<{ name: string; type: string }>; 
 }
 
 export interface XMLMetadataWizardProps {

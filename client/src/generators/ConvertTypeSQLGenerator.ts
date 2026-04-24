@@ -1,115 +1,191 @@
 // src/generators/ConvertTypeSQLGenerator.ts
-import { BaseSQLGenerator, SQLGenerationContext, GeneratedSQLFragment } from './BaseSQLGenerator';
-import { UnifiedCanvasNode, PostgreSQLDataType } from '../types/unified-pipeline.types';
+import {
+  BaseSQLGenerator,
+  SQLGenerationContext,
+  GeneratedSQLFragment,
+} from './BaseSQLGenerator';
+import { PostgreSQLDataType } from '../types/unified-pipeline.types';
 
-interface ConvertTypeConfig {
-  column: string;
+interface ConversionItem {
+  column: string; // source column name
   targetType: PostgreSQLDataType;
-  format?: string;           // e.g., for date conversions
+  alias?: string;
+  format?: string; // e.g., for date conversions
   fallbackExpression?: string;
 }
 
-// Type guard to check if a config object is a conversion configuration
-function isConversionConfig(config: any): config is { conversions: ConvertTypeConfig[] } {
+// Type guard for the original configuration structure
+function isConversionConfig(
+  config: any
+): config is { conversions: ConversionItem[] } {
   return config && Array.isArray(config.conversions);
 }
 
 export class ConvertTypeSQLGenerator extends BaseSQLGenerator {
-  public generateSelectStatement(context: SQLGenerationContext): GeneratedSQLFragment {
-    const { node } = context;
-    
-    // Safely extract conversions using the type guard
-    let configs: ConvertTypeConfig[] = [];
-    const rawConfig = node.metadata?.configuration?.config;
-    if (isConversionConfig(rawConfig)) {
-      configs = rawConfig.conversions;
+  /**
+   * Generates a SELECT statement that projects only the converted columns.
+   * Conversion rules are taken from:
+   *   - node.metadata.convertConfig.conversions   (test helper style)
+   *   - node.metadata.configuration.config.conversions (original style)
+   */
+  public generateSelectStatement(
+    context: SQLGenerationContext
+  ): GeneratedSQLFragment {
+    const { node, connection } = context;
+
+    // --------------------------------------------------------------------
+    // 1. Extract conversions from all possible metadata locations
+    // --------------------------------------------------------------------
+    let conversions: ConversionItem[] = [];
+
+    // Test helper style: node.metadata.convertConfig.conversions
+    const convertConfig = node.metadata?.convertConfig as any;
+    if (convertConfig?.conversions && Array.isArray(convertConfig.conversions)) {
+      conversions = convertConfig.conversions.map((c: any) => ({
+        column: c.sourceColumn,
+        targetType: c.targetType,
+        alias: c.targetAlias || c.sourceColumn,
+        format: c.format,
+        fallbackExpression: c.fallbackExpression,
+      }));
+    }
+    // Original style: node.metadata.configuration.config.conversions
+    else if (isConversionConfig(node.metadata?.configuration?.config)) {
+      const config = node.metadata.configuration.config;
+      conversions = config.conversions.map((c: any) => ({
+        column: c.column,
+        targetType: c.targetType,
+        alias: c.alias || c.column,
+        format: c.format,
+        fallbackExpression: c.fallbackExpression,
+      }));
     }
 
-    if (configs.length === 0) {
-      return this.fallbackSelect(node);
+    // --------------------------------------------------------------------
+    // 2. Determine the source reference (from incoming connection)
+    // --------------------------------------------------------------------
+    const sourceRef = connection
+      ? this.sanitizeIdentifier(connection.sourceNodeId)
+      : 'source'; // fallback, should not happen in valid pipeline
+
+    // --------------------------------------------------------------------
+    // 3. Fallback if no conversions are defined
+    // --------------------------------------------------------------------
+    if (conversions.length === 0) {
+      return {
+        sql: `SELECT * FROM ${sourceRef}`,
+        dependencies: [sourceRef],
+        parameters: new Map(),
+        errors: [],
+        warnings: [
+          'No conversion rules defined, passing through all columns unchanged',
+        ],
+        metadata: {
+          generatedAt: new Date().toISOString(),
+          fragmentType: 'convert_fallback',
+          lineCount: 1,
+        },
+      };
     }
 
-    const allColumns = node.metadata?.schemas?.output?.fields || [];
-    const selectExpressions = allColumns.map(col => {
-      const config = configs.find(c => c.column === col.name);
-      if (!config) return this.sanitizeIdentifier(col.name);
+    // --------------------------------------------------------------------
+    // 4. Build SELECT expressions **only** for the converted columns
+    // --------------------------------------------------------------------
+    const selectExpressions = conversions.map((conv) => {
+      // Start with the sanitized source column
+      let expr = this.sanitizeIdentifier(conv.column);
 
-      // Build conversion expression
-      let expr = this.sanitizeIdentifier(config.column);
-      if (config.format) {
-        // Use TO_DATE, TO_TIMESTAMP, etc.
-        switch (config.targetType) {
+      // Apply format‑specific conversion (e.g., TO_DATE)
+      if (conv.format) {
+        switch (conv.targetType) {
           case PostgreSQLDataType.DATE:
-            expr = `TO_DATE(${expr}, '${this.escapeString(config.format)}')`;
+            expr = `TO_DATE(${expr}, '${this.escapeString(conv.format)}')`;
             break;
           case PostgreSQLDataType.TIMESTAMP:
-            expr = `TO_TIMESTAMP(${expr}, '${this.escapeString(config.format)}')`;
+          case PostgreSQLDataType.TIMESTAMPTZ:
+            expr = `TO_TIMESTAMP(${expr}, '${this.escapeString(conv.format)}')`;
             break;
           default:
-            expr = `CAST(${expr} AS ${config.targetType})`;
+            expr = `CAST(${expr} AS ${conv.targetType})`;
         }
       } else {
-        expr = `CAST(${expr} AS ${config.targetType})`;
+        // Standard CAST
+        expr = `CAST(${expr} AS ${conv.targetType})`;
       }
 
-      // Apply fallback if needed
-      if (config.fallbackExpression) {
-        expr = `COALESCE(${expr}, ${config.fallbackExpression})`;
+      // Apply fallback expression (COALESCE)
+      if (conv.fallbackExpression) {
+        expr = `COALESCE(${expr}, ${conv.fallbackExpression})`;
       }
 
-      return `${expr} AS ${this.sanitizeIdentifier(config.column)}`;
+      const alias = conv.alias || conv.column;
+      return `${expr} AS ${this.sanitizeIdentifier(alias)}`;
     });
 
-    const sql = `SELECT ${selectExpressions.join(', ')} FROM source_table`;
+    const sql = `SELECT ${selectExpressions.join(', ')} FROM ${sourceRef}`;
+
     return {
       sql,
-      dependencies: ['source_table'],
+      dependencies: [sourceRef],
       parameters: new Map(),
       errors: [],
       warnings: [],
-      metadata: { generatedAt: new Date().toISOString(), fragmentType: 'convert_type', lineCount: 1 }
+      metadata: {
+        generatedAt: new Date().toISOString(),
+        fragmentType: 'convert_type',
+        lineCount: 1,
+      },
     };
   }
 
-  protected generateJoinConditions(_context: SQLGenerationContext): GeneratedSQLFragment {
+  // ----------------------------------------------------------------------
+  // Required abstract method implementations (unused for Convert)
+  // ----------------------------------------------------------------------
+  protected generateJoinConditions(
+    _context: SQLGenerationContext
+  ): GeneratedSQLFragment {
     return this.emptyFragment();
   }
 
-  protected generateWhereClause(_context: SQLGenerationContext): GeneratedSQLFragment {
+  protected generateWhereClause(
+    _context: SQLGenerationContext
+  ): GeneratedSQLFragment {
     return this.emptyFragment();
   }
 
-  protected generateHavingClause(_context: SQLGenerationContext): GeneratedSQLFragment {
+  protected generateHavingClause(
+    _context: SQLGenerationContext
+  ): GeneratedSQLFragment {
     return this.emptyFragment();
   }
 
-  protected generateOrderByClause(_context: SQLGenerationContext): GeneratedSQLFragment {
+  protected generateOrderByClause(
+    _context: SQLGenerationContext
+  ): GeneratedSQLFragment {
     return this.emptyFragment();
   }
 
-  protected generateGroupByClause(_context: SQLGenerationContext): GeneratedSQLFragment {
+  protected generateGroupByClause(
+    _context: SQLGenerationContext
+  ): GeneratedSQLFragment {
     return this.emptyFragment();
   }
 
-  private fallbackSelect(node: UnifiedCanvasNode): GeneratedSQLFragment {
-    return {
-      sql: `SELECT * FROM ${this.sanitizeIdentifier(node.name)}`,
-      dependencies: [node.name],
-      parameters: new Map(),
-      errors: [],
-      warnings: ['No conversion rules, using fallback'],
-      metadata: { generatedAt: new Date().toISOString(), fragmentType: 'convert_fallback', lineCount: 1 }
-    };
-  }
-
-  private emptyFragment(): GeneratedSQLFragment {
+  // ----------------------------------------------------------------------
+  // Helper for empty fragments (delegates to base class protected method)
+  // ----------------------------------------------------------------------
+  protected emptyFragment(): GeneratedSQLFragment {
     return {
       sql: '',
       dependencies: [],
       parameters: new Map(),
       errors: [],
       warnings: [],
-      metadata: { generatedAt: new Date().toISOString(), fragmentType: 'empty', lineCount: 0 }
+      metadata: {
+        generatedAt: new Date().toISOString(),
+        fragmentType: 'empty',
+        lineCount: 0,
+      },
     };
   }
 }

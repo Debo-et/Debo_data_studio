@@ -21,11 +21,10 @@
     "allowSyntheticDefaultImports": true,
     "experimentalDecorators": true,
     "emitDecoratorMetadata": true,
-    "baseUrl": ".",
     "paths": {
-      "@/*": ["src/*"],
-      "@database/*": ["src/database/*"],
-      "@database/types/*": ["src/database/types/*"]
+      "@/*": ["./src/*"],
+      "@database/*": ["./src/database/*"],
+      "@database/types/*": ["./src/database/types/*"]
     }
   },
   "include": [
@@ -34,9 +33,9 @@
     "src/**/*.d.ts"
   ],
   "exclude": [
-    "node_modules", 
-    "dist", 
-    "**/*.test.ts", 
+    "node_modules",
+    "dist",
+    "**/*.test.ts",
     "**/*.spec.ts"
   ]
 }

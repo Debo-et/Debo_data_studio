@@ -74,7 +74,9 @@ export enum NodeType {
   UNKNOWN = 'unknown',
   SELECT = "SELECT",
   JSON = "JSON",
-  JSONB = "JSONB"
+  JSONB = "JSONB",
+  CONDITIONAL_SPLIT = "CONDITIONAL_SPLIT",
+  UNPIVOT = "UNPIVOT"
 }
 
 /**
@@ -389,15 +391,13 @@ export interface FilterConfig {
  * Aggregation configuration
  */
 export interface AggregationConfig {
-  /** Group by columns */
   groupBy: string[];
-  /** Aggregate functions */
   aggregates: Array<{
     column: string;
     function: 'SUM' | 'AVG' | 'COUNT' | 'MIN' | 'MAX' | 'STDDEV' | 'VARIANCE';
     alias: string;
+    distinct?: boolean; // ← add this
   }>;
-  /** Having clause */
   having?: string;
 }
 
@@ -565,7 +565,7 @@ type: NodeType | string;  // Allow both NodeType and string
   /** Component type for UI */
   componentType?: 'processing' | 'standardized' | 'palette-component' | 'sidebar-item';
   /** Component category for organization */
-  componentCategory?: 'input' | 'output' | 'process';
+  componentCategory?: 'input' | 'output' | 'process'| 'transform'; 
   
   /** Position on canvas */
   position: NodePosition;

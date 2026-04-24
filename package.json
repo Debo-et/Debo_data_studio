@@ -1,40 +1,73 @@
 {
-  "name": "enterprise-database-app",
+  "name": "debo-data-studio",
   "version": "1.0.0",
-  "private": true,
-  "workspaces": [
-    "client",
-    "backend"
-  ],
+  "description": "Debo Data Studio - Visual data pipeline designer",
+  "author": "Your Name <you@example.com>",
+  "main": "dist-electron/main.js",
   "scripts": {
-    "start": "concurrently \"npm run start:backend\" \"npm run start:client\"",
-    "start:backend": "cd backend && npm run dev",
-    "start:client": "cd client && npm start",
-    "build": "npm run build:backend && npm run build:client",
-    "build:backend": "cd backend && npm run build",
+    "dev": "concurrently \"npm run dev:client\" \"npm run electron:watch\" \"npm run electron:dev\"",
+    "dev:client": "cd client && npm run dev",
+    "electron:watch": "npm exec -- tsc -p electron/tsconfig.json --watch",
+    "electron:dev": "wait-on http://localhost:3001 && wait-on dist-electron/main.js && cross-env NODE_ENV=development electron .",
+    "build": "npm run build:client && npm run build:electron && npm run build:backend",
     "build:client": "cd client && npm run build",
-    "dev": "npm run dev:backend & npm run dev:client",
-    "dev:backend": "cd backend && npm run dev",
-    "dev:client": "cd client && npm start",
+    "build:electron": "tsc -p electron/tsconfig.json",
+    "build:backend": "cd backend && npm run build",
+    "prepack": "npm run build",
+    "dist": "npm run build && electron-builder",
+    "dist:win": "npm run build && electron-builder --win",
+    "dist:mac": "npm run build && electron-builder --mac",
     "dev:full": "node dev.js",
-    "install:all": "npm install && cd client && npm install && cd ../backend && npm install",
-    "clean": "npm run clean:backend && npm run clean:client",
-    "clean:backend": "cd backend && npm run clean",
-    "clean:client": "cd client && npm run clean",
-    "lint": "npm run lint:backend && npm run lint:client",
-    "lint:backend": "cd backend && npm run lint",
-    "lint:client": "cd client && npm run lint"
+
+  "clean": "npm run clean:client && npm run clean:electron && npm run clean:backend",
+  "clean:client": "cd client && npm run clean",
+  "clean:electron": "rm -rf dist-electron",
+  "clean:backend": "cd backend && rm -rf dist node_modules/.vite",
+    "dist:linux": "npm run build && electron-builder --linux"
+  },
+  "build": {
+    "appId": "com.yourcompany.debodatastudio",
+    "productName": "Debo Data Studio",
+    "directories": {
+      "output": "release"
+    },
+    "files": [
+      "dist-electron/**/*",
+      "client/dist/**/*",
+      "backend/dist/**/*",
+      "node_modules/**/*",
+      "!**/*.ts",
+      "!**/*.map",
+      "!**/test{,/**}",
+      "!**/.git"
+    ],
+    "asarUnpack": [
+      "backend/dist/**/*"
+    ],
+    "win": {
+      "target": "nsis",
+      "icon": "build/icon.ico"
+    },
+    "mac": {
+      "target": "dmg",
+      "icon": "build/icon.icns"
+    },
+    "linux": {
+      "target": "AppImage",
+      "icon": "build/icon.png"
+    },
+    "nsis": {
+      "oneClick": false,
+      "allowToChangeInstallationDirectory": true
+    }
   },
   "devDependencies": {
-    "@testing-library/jest-dom": "^6.9.1",
-    "@testing-library/react": "^16.3.2",
-    "@testing-library/user-event": "^14.6.1",
-    "@types/jest": "^30.0.0",
-    "concurrently": "^8.2.1",
-    "jest": "^30.3.0"
-  },
-  "engines": {
-    "node": ">=18.0.0",
-    "npm": ">=9.0.0"
+    "@types/node": "^25.6.0",
+    "concurrently": "^9.2.1",
+    "cross-env": "^10.1.0",
+    "electron": "^41.2.1",
+    "electron-builder": "^26.8.1",
+    "typescript": "^6.0.3",
+    "wait-on": "^9.0.5"
   }
 }

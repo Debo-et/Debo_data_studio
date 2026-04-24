@@ -7,18 +7,21 @@ import { UnifiedCanvasNode, isSortConfig, SortComponentConfiguration } from '../
  * Handles ORDER BY clauses with NULLS FIRST/LAST and LIMIT/OFFSET
  */
 export class SortSQLGenerator extends BaseSQLGenerator {
-  protected generateSelectStatement(_context: SQLGenerationContext): GeneratedSQLFragment {
-
-    // The SELECT clause remains unchanged; we only add ORDER BY later
-    return {
-      sql: 'SELECT *',
-      dependencies: [],
-      parameters: new Map(),
-      errors: [],
-      warnings: [],
-      metadata: { generatedAt: new Date().toISOString(), fragmentType: 'sort_select', lineCount: 1 }
-    };
+protected generateSelectStatement(context: SQLGenerationContext): GeneratedSQLFragment {
+  const { connection } = context;
+  let sourceRef = 'source_table';
+  if (connection && connection.sourceNodeId) {
+    sourceRef = this.sanitizeIdentifier(connection.sourceNodeId);
   }
+  return {
+    sql: `SELECT * FROM ${sourceRef}`,
+    dependencies: connection ? [connection.sourceNodeId] : [],
+    parameters: new Map(),
+    errors: [],
+    warnings: [],
+    metadata: { generatedAt: new Date().toISOString(), fragmentType: 'sort_select', lineCount: 1 }
+  };
+}
 
   protected generateJoinConditions(_context: SQLGenerationContext): GeneratedSQLFragment {
     return this.emptyFragment();
@@ -76,23 +79,28 @@ export class SortSQLGenerator extends BaseSQLGenerator {
   }
 
   /**
-   * Override the main generateSQL to ensure ORDER BY is included.
-   * The base class already assembles all fragments, so we just rely on that.
+   * Extracts SortComponentConfiguration from node metadata.
    */
-  private getSortConfig(node: UnifiedCanvasNode): SortComponentConfiguration | undefined {
-    if (!node.metadata?.configuration) return undefined;
-    const conf = node.metadata.configuration;
-    return isSortConfig(conf) ? conf.config : undefined;
+private getSortConfig(node: UnifiedCanvasNode): SortComponentConfiguration | undefined {
+  // Legacy direct metadata (used by test helpers)
+  if (node.metadata?.sortConfig) {
+    return {
+      sortFields: (node.metadata.sortConfig.columns || []).map((col: any) => ({
+        field: col.column,
+        direction: col.direction,
+        nullsFirst: col.nullsFirst,
+      })),
+      sqlGeneration: {
+        limitOffset: node.metadata.sortConfig.limit
+          ? { limit: node.metadata.sortConfig.limit, offset: node.metadata.sortConfig.offset }
+          : undefined,
+      },
+    } as SortComponentConfiguration;
   }
 
-  private emptyFragment(): GeneratedSQLFragment {
-    return {
-      sql: '',
-      dependencies: [],
-      parameters: new Map(),
-      errors: [],
-      warnings: [],
-      metadata: { generatedAt: new Date().toISOString(), fragmentType: 'empty', lineCount: 0 }
-    };
-  }
+  // Unified component configuration
+  if (!node.metadata?.configuration) return undefined;
+  const conf = node.metadata.configuration;
+  return isSortConfig(conf) ? conf.config : undefined;
+}
 }

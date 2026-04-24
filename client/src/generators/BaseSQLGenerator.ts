@@ -1,28 +1,43 @@
 // src/generators/BaseSQLGenerator.ts
+
 import {
   UnifiedCanvasNode,
   UnifiedCanvasConnection,
   PostgreSQLDataType,
   NodeType,
-  PostgresColumn} from '../types/unified-pipeline.types';
+  PostgresColumn,
+} from '../types/unified-pipeline.types';
 import { ConnectionValidationResult } from '../utils/connection-validator';
+import { globalLogger } from '../utils/Logger';
 
 // ==================== TYPES & INTERFACES ====================
 
+// src/generators/BaseSQLGenerator.ts (excerpt)
+
 export interface SQLGenerationContext {
-  node: UnifiedCanvasNode;                     // now using unified node
-  connection?: UnifiedCanvasConnection;         // unified connection (may still be CanvasConnection in some places)
+  node: UnifiedCanvasNode;
+  connection?: UnifiedCanvasConnection;
   validationResult?: ConnectionValidationResult;
   indentLevel: number;
   parameters: Map<string, any>;
+  cteAliasMap?: Map<string, string>;
+  upstreamSchema?: Array<{ name: string; dataType: PostgreSQLDataType }>;
   options: SQLGenerationOptions;
+  incomingNodeIds?: string[];
+  nodeAliasMap?: Map<string, string>;
+  /**
+   * For nodes with multiple outgoing branches (e.g., CONDITIONAL_SPLIT),
+   * this field indicates which output port is active for the current
+   * pipeline path being generated.
+   */
+  activeOutputPort?: string;
 }
 
 export interface SQLGenerationOptions {
   includeComments: boolean;
   formatSQL: boolean;
   targetDialect: 'POSTGRESQL' | 'MYSQL' | 'SQLSERVER' | 'ORACLE';
-  postgresVersion: string; // e.g., '14.0', '15.0'
+  postgresVersion: string;
   useCTEs: boolean;
   optimizeForReadability: boolean;
   includeExecutionPlan: boolean;
@@ -111,6 +126,7 @@ export abstract class BaseSQLGenerator {
   constructor(options: Partial<SQLGenerationOptions> = {}) {
     this.postgresVersion = options.postgresVersion || '14.0';
     this.featureSupport = this.detectPostgreSQLFeatures(this.postgresVersion);
+    globalLogger.debug(`[BaseSQLGenerator] Initialized with PostgreSQL ${this.postgresVersion}`);
   }
 
   // ==================== ABSTRACT TEMPLATE METHODS ====================
@@ -123,6 +139,13 @@ export abstract class BaseSQLGenerator {
 
   // ==================== CORE GENERATION METHODS ====================
   public generateSQL(context: SQLGenerationContext): GeneratedSQLFragment {
+    const startTime = Date.now();
+    globalLogger.debug(`[BaseSQLGenerator] generateSQL start for node ${context.node.id} (${context.node.type})`, {
+      nodeName: context.node.name,
+      upstreamSchemaLength: context.upstreamSchema?.length,
+      indentLevel: context.indentLevel,
+    });
+
     const errors: SQLGenerationError[] = [];
     const warnings: string[] = [];
     const parameters = new Map<string, any>();
@@ -170,7 +193,7 @@ export abstract class BaseSQLGenerator {
       const syntaxErrors = this.validateSQLSyntax(sql);
       errors.push(...syntaxErrors);
 
-      return {
+      const result: GeneratedSQLFragment = {
         sql,
         dependencies: [...new Set(dependencies)],
         parameters,
@@ -183,7 +206,17 @@ export abstract class BaseSQLGenerator {
         }
       };
 
+      globalLogger.debug(`[BaseSQLGenerator] generateSQL completed in ${Date.now() - startTime}ms`, {
+        nodeId: context.node.id,
+        sqlLength: sql.length,
+        errorsCount: errors.length,
+        warningsCount: warnings.length,
+      });
+
+      return result;
+
     } catch (error) {
+      globalLogger.error(`[BaseSQLGenerator] generateSQL failed for node ${context.node.id}`, error);
       errors.push({
         code: 'GENERATION_FAILED',
         message: error instanceof Error ? error.message : 'SQL generation failed',
@@ -210,6 +243,7 @@ export abstract class BaseSQLGenerator {
     ctes: CTEChain[],
     options: { materialized?: boolean; recursive?: boolean } = {}
   ): GeneratedSQLFragment {
+    globalLogger.debug(`[BaseSQLGenerator] Generating CTE chain with ${ctes.length} CTEs`, options);
     const errors: SQLGenerationError[] = [];
     const warnings: string[] = [];
 
@@ -258,6 +292,7 @@ export abstract class BaseSQLGenerator {
       withData?: boolean;
     } = {}
   ): GeneratedSQLFragment {
+    globalLogger.debug(`[BaseSQLGenerator] Generating temp table ${tableName}`, { columnsCount: columns.length, options });
     const errors: SQLGenerationError[] = [];
     const warnings: string[] = [];
 
@@ -313,6 +348,68 @@ export abstract class BaseSQLGenerator {
   }
 
   // ==================== POSTGRESQL-SPECIFIC UTILITIES ====================
+  
+  /**
+   * Generate a CAST expression for PostgreSQL.
+   * @param expression The source expression to cast.
+   * @param targetType The target PostgreSQL data type.
+   */
+  public castExpression(expression: string, targetType: PostgreSQLDataType): string {
+    const result = `CAST(${expression} AS ${targetType})`;
+    globalLogger.debug(`[BaseSQLGenerator] castExpression: ${expression} -> ${targetType} => ${result}`);
+    return result;
+  }
+
+  /**
+   * Generate JSON extraction expression using PostgreSQL JSON operators.
+   * @param column The JSON/JSONB column name.
+   * @param path The JSON path (e.g., '$.name').
+   * @param asText If true, use ->> to return text; otherwise use -> to return JSON.
+   */
+  public jsonExtract(column: string, path: string, asText: boolean = true): string {
+    const sanitizedColumn = this.sanitizeIdentifier(column);
+    const escapedPath = this.escapeString(path);
+    const operator = asText ? '->>' : '->';
+    const result = `${sanitizedColumn}${operator}'${escapedPath}'`;
+    globalLogger.debug(`[BaseSQLGenerator] jsonExtract: ${column}, ${path}, asText=${asText} => ${result}`);
+    return result;
+  }
+
+  /**
+   * Generate XML extraction expression using xpath().
+   * @param column The XML/TEXT column name.
+   * @param xpath The XPath expression.
+   */
+  public xmlExtract(column: string, xpath: string): string {
+    const sanitizedColumn = this.sanitizeIdentifier(column);
+    const escapedXPath = this.escapeString(xpath);
+    const result = `(xpath('${escapedXPath}', ${sanitizedColumn}::xml))[1]::text`;
+    globalLogger.debug(`[BaseSQLGenerator] xmlExtract: ${column}, ${xpath} => ${result}`);
+    return result;
+  }
+
+  /**
+   * Generate regex extraction expression using regexp_match().
+   * @param column The source column.
+   * @param pattern The regex pattern.
+   * @param groupIndex The capturing group index (1-based).
+   */
+  public regexExtract(column: string, pattern: string, groupIndex: number = 1): string {
+    const sanitizedColumn = this.sanitizeIdentifier(column);
+    const escapedPattern = this.escapeString(pattern);
+    const result = `(regexp_match(${sanitizedColumn}, '${escapedPattern}'))[${groupIndex}]`;
+    globalLogger.debug(`[BaseSQLGenerator] regexExtract: ${column}, pattern=${pattern}, group=${groupIndex} => ${result}`);
+    return result;
+  }
+
+  /**
+   * Escape a string for safe use in SQL (doubles single quotes).
+   */
+  public escapeString(str: string): string {
+    if (str === null || str === undefined) return '';
+    return str.replace(/'/g, "''").replace(/\\/g, '\\\\');
+  }
+
   public castToType(value: string, targetType: PostgreSQLDataType): string {
     if (!value.trim()) {
       return `NULL::${targetType}`;
@@ -327,6 +424,7 @@ export abstract class BaseSQLGenerator {
       case PostgreSQLDataType.UUID:
         const uuidRegex = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
         if (!uuidRegex.test(value.replace(/'/g, ''))) {
+          globalLogger.warn(`[BaseSQLGenerator] Invalid UUID format: ${value}`);
           throw new Error(`Invalid UUID format: ${value}`);
         }
         return `'${value.replace(/'/g, '')}'::uuid`;
@@ -348,11 +446,14 @@ export abstract class BaseSQLGenerator {
     const orderByClause = options.orderBy ? ` ORDER BY ${options.orderBy}` : '';
     const filterClause = options.filter ? ` FILTER (WHERE ${options.filter})` : '';
     
+    let result: string;
     if (options.delimiter) {
-      return `string_agg(${distinctClause}${column}::text, '${this.escapeString(options.delimiter)}'${orderByClause})${filterClause}`;
+      result = `string_agg(${distinctClause}${column}::text, '${this.escapeString(options.delimiter)}'${orderByClause})${filterClause}`;
+    } else {
+      result = `array_agg(${distinctClause}${column}${orderByClause})${filterClause}`;
     }
-    
-    return `array_agg(${distinctClause}${column}${orderByClause})${filterClause}`;
+    globalLogger.debug(`[BaseSQLGenerator] generateArrayAggregation: ${column} => ${result}`);
+    return result;
   }
 
   public generateJSONAggregation(
@@ -366,17 +467,20 @@ export abstract class BaseSQLGenerator {
     const jsonType = options.jsonb ? 'jsonb' : 'json';
     const nullHandling = options.includeNulls ? '' : ' WHERE column_name IS NOT NULL';
     
+    let result: string;
     if (options.aggregateAsObject) {
       const pairs = columns.map(col => {
         const key = col.alias || col.name;
         const value = col.name;
         return `'${this.escapeString(key)}', ${value}`;
       });
-      return `jsonb_build_object(${pairs.join(', ')})::${jsonType}`;
+      result = `jsonb_build_object(${pairs.join(', ')})::${jsonType}`;
+    } else {
+      const columnList = columns.map(col => col.name).join(', ');
+      result = `${jsonType}_agg(${columnList}${nullHandling})`;
     }
-    
-    const columnList = columns.map(col => col.name).join(', ');
-    return `${jsonType}_agg(${columnList}${nullHandling})`;
+    globalLogger.debug(`[BaseSQLGenerator] generateJSONAggregation => ${result}`);
+    return result;
   }
 
   public generateWindowFunction(
@@ -430,14 +534,18 @@ export abstract class BaseSQLGenerator {
       windowParts.push(frameClause);
     }
     
+    let result: string;
     if (windowParts.length === 0) {
-      return `${funcCall} OVER ()`;
+      result = `${funcCall} OVER ()`;
+    } else {
+      result = `${funcCall} OVER (${windowParts.join(' ')})`;
     }
-    
-    return `${funcCall} OVER (${windowParts.join(' ')})`;
+    globalLogger.debug(`[BaseSQLGenerator] generateWindowFunction: ${functionName} => ${result}`);
+    return result;
   }
 
   public optimizeCTE(cteChain: CTEChain[]): CTEChain[] {
+    globalLogger.debug(`[BaseSQLGenerator] Optimizing CTE chain with ${cteChain.length} CTEs`);
     return cteChain.map(cte => {
       let optimizedQuery = cte.query;
       if (this.countCTEUsage(cte.name, cteChain) > 1) {
@@ -464,7 +572,9 @@ export abstract class BaseSQLGenerator {
       identifier.toLowerCase() !== identifier;
     
     if (needsQuoting) {
-      return `"${identifier.replace(/"/g, '""')}"`;
+      const quoted = `"${identifier.replace(/"/g, '""')}"`;
+      globalLogger.debug(`[BaseSQLGenerator] sanitizeIdentifier: ${identifier} -> ${quoted} (needs quoting)`);
+      return quoted;
     }
     
     return identifier;
@@ -556,6 +666,9 @@ export abstract class BaseSQLGenerator {
       }
     });
     
+    if (errors.length > 0) {
+      globalLogger.warn(`[BaseSQLGenerator] validateSQLSyntax found ${errors.length} issues`);
+    }
     return errors;
   }
 
@@ -567,33 +680,18 @@ export abstract class BaseSQLGenerator {
     const { node, options } = context;
     
     if (node.type === NodeType.JSON && !this.featureSupport.supports.jsonPathQueries) {
-      warnings.push('JSON path queries require PostgreSQL 12+');
+      const warning = 'JSON path queries require PostgreSQL 12+';
+      warnings.push(warning);
+      globalLogger.warn(`[BaseSQLGenerator] ${warning} for node ${node.id}`);
     }
     
     if (options.postgresVersion < '12.0') {
       if (node.metadata?.postgresConfig?.isolationLevel === 'SERIALIZABLE') {
-        warnings.push('SERIALIZABLE isolation level improvements require PostgreSQL 9.1+');
+        const warning = 'SERIALIZABLE isolation level improvements require PostgreSQL 9.1+';
+        warnings.push(warning);
+        globalLogger.warn(`[BaseSQLGenerator] ${warning} for node ${node.id}`);
       }
     }
-
-    // TODO: Migrate this check to use the unified configuration model.
-    // The old `tableMapping` is no longer a top-level property; it is now inside
-    // the configuration union (e.g., for input nodes). This section needs to be
-    // updated when concrete generators are fully migrated.
-    /*
-    const hasGeneratedColumns = node.metadata?.tableMapping?.columns?.some(
-      col => col.defaultValue?.includes('GENERATED')
-    );
-    
-    if (hasGeneratedColumns && !this.featureSupport.supports.generatedColumns) {
-      errors.push({
-        code: 'UNSUPPORTED_FEATURE',
-        message: 'Generated columns require PostgreSQL 12+',
-        severity: 'ERROR',
-        suggestion: 'Use computed columns in application layer'
-      });
-    }
-    */
   }
 
   // ==================== HELPER METHODS ====================
@@ -614,10 +712,6 @@ export abstract class BaseSQLGenerator {
     if (having) parts.push(having);
     if (orderBy) parts.push(orderBy);
     
-    // LIMIT and OFFSET are now expected to be included in the orderBy fragment
-    // or handled by the concrete generator. The old direct access to
-    // node.metadata.sortConfig is removed.
-    
     return parts.join('\n') + ';';
   }
 
@@ -636,6 +730,9 @@ export abstract class BaseSQLGenerator {
       /array_to_string\(array_agg\((\w+)\), ','\)/gi,
       'string_agg($1, \',\')'
     );
+    if (optimized !== sql) {
+      globalLogger.debug(`[BaseSQLGenerator] optimizeForPostgreSQL applied optimizations`);
+    }
     return optimized;
   }
 
@@ -686,10 +783,6 @@ export abstract class BaseSQLGenerator {
     return comments.join('\n') + sql;
   }
 
-  protected escapeString(str: string): string {
-    return str.replace(/'/g, "''").replace(/\\/g, '\\\\');
-  }
-
   protected indent(text: string, spaces: number): string {
     const indent = ' '.repeat(spaces);
     return text.split('\n').map(line => indent + line).join('\n');
@@ -700,8 +793,7 @@ export abstract class BaseSQLGenerator {
   }
 
   /**
-   * Returns an empty SQL fragment. Useful for concrete generators that need
-   * to satisfy the abstract methods without contributing SQL.
+   * Returns an empty SQL fragment.
    */
   protected emptyFragment(): GeneratedSQLFragment {
     return {
@@ -816,18 +908,10 @@ export class SelectSQLGenerator extends BaseSQLGenerator {
   }
   
   private extractColumns(_node: UnifiedCanvasNode): Array<{ name: string; alias?: string }> {
-    // TODO: Replace with extraction from unified configuration.
-    // For now, return empty array (or attempt to read from legacy fields).
     return [];
   }
   
   private extractTableName(node: UnifiedCanvasNode): string {
-    // TODO: Replace with extraction from unified configuration (e.g., input node table name).
     return node.name.toLowerCase().replace(/\s+/g, '_');
   }
 }
-
-// ==================== FACTORY REMOVED ====================
-// The SQLGeneratorFactory has been moved to its own file:
-// src/generators/SQLGeneratorFactory.ts
-// This resolves the circular dependency caused by importing concrete generators here.

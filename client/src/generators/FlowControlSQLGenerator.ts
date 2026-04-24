@@ -1,5 +1,9 @@
 // src/generators/FlowControlSQLGenerator.ts
-import { BaseSQLGenerator, SQLGenerationContext, GeneratedSQLFragment } from './BaseSQLGenerator';
+import {
+  BaseSQLGenerator,
+  SQLGenerationContext,
+  GeneratedSQLFragment,
+} from './BaseSQLGenerator';
 
 export class FlowToIterateSQLGenerator extends BaseSQLGenerator {
   protected generateSelectStatement(_context: SQLGenerationContext): GeneratedSQLFragment {
@@ -33,18 +37,11 @@ export class FlowToIterateSQLGenerator extends BaseSQLGenerator {
       parameters: new Map(),
       errors: [],
       warnings: [],
-      metadata: { generatedAt: new Date().toISOString(), fragmentType: 'flow_stub', lineCount: 1 }
-    };
-  }
-
-  private emptyFragment(): GeneratedSQLFragment {
-    return {
-      sql: '',
-      dependencies: [],
-      parameters: new Map(),
-      errors: [],
-      warnings: [],
-      metadata: { generatedAt: new Date().toISOString(), fragmentType: 'empty', lineCount: 0 }
+      metadata: {
+        generatedAt: new Date().toISOString(),
+        fragmentType: 'flow_stub',
+        lineCount: 1,
+      },
     };
   }
 }
@@ -81,18 +78,11 @@ export class IterateToFlowSQLGenerator extends BaseSQLGenerator {
       parameters: new Map(),
       errors: [],
       warnings: [],
-      metadata: { generatedAt: new Date().toISOString(), fragmentType: 'flow_stub', lineCount: 1 }
-    };
-  }
-
-  private emptyFragment(): GeneratedSQLFragment {
-    return {
-      sql: '',
-      dependencies: [],
-      parameters: new Map(),
-      errors: [],
-      warnings: [],
-      metadata: { generatedAt: new Date().toISOString(), fragmentType: 'empty', lineCount: 0 }
+      metadata: {
+        generatedAt: new Date().toISOString(),
+        fragmentType: 'flow_stub',
+        lineCount: 1,
+      },
     };
   }
 }
@@ -129,25 +119,54 @@ export class ReplicateSQLGenerator extends BaseSQLGenerator {
       parameters: new Map(),
       errors: [],
       warnings: [],
-      metadata: { generatedAt: new Date().toISOString(), fragmentType: 'flow_stub', lineCount: 1 }
-    };
-  }
-
-  private emptyFragment(): GeneratedSQLFragment {
-    return {
-      sql: '',
-      dependencies: [],
-      parameters: new Map(),
-      errors: [],
-      warnings: [],
-      metadata: { generatedAt: new Date().toISOString(), fragmentType: 'empty', lineCount: 0 }
+      metadata: {
+        generatedAt: new Date().toISOString(),
+        fragmentType: 'flow_stub',
+        lineCount: 1,
+      },
     };
   }
 }
 
+/**
+ * UniteSQLGenerator – generates UNION, UNION ALL, INTERSECT, EXCEPT queries.
+ * Uses the incoming node aliases provided in the generation context.
+ */
 export class UniteSQLGenerator extends BaseSQLGenerator {
-  protected generateSelectStatement(_context: SQLGenerationContext): GeneratedSQLFragment {
-    return this.flowStub('UNITE');
+  protected generateSelectStatement(context: SQLGenerationContext): GeneratedSQLFragment {
+    const { node, incomingNodeIds, nodeAliasMap, indentLevel } = context;
+    const config = node.metadata?.uniteConfig || {};
+    const setOperation = config.setOperation || 'UNION';
+    const unionAll = config.unionAll !== false; // default true
+
+    const indent = '  '.repeat(indentLevel);
+    const branchQueries: string[] = [];
+
+    if (!incomingNodeIds || incomingNodeIds.length === 0) {
+      // No branches – return empty fragment (should not happen in valid pipeline)
+      return this.emptyFragment();
+    }
+
+    for (const srcId of incomingNodeIds) {
+      const alias = nodeAliasMap?.get(srcId) ?? srcId;
+      branchQueries.push(`${indent}SELECT * FROM ${this.sanitizeIdentifier(alias)}`);
+    }
+
+    const operator = setOperation === 'UNION' && unionAll ? 'UNION ALL' : setOperation;
+    const sql = branchQueries.join(`\n${indent}${operator}\n`);
+
+    return {
+      sql,
+      dependencies: incomingNodeIds,
+      parameters: new Map(),
+      errors: [],
+      warnings: [],
+      metadata: {
+        generatedAt: new Date().toISOString(),
+        fragmentType: 'unite',
+        lineCount: sql.split('\n').length,
+      },
+    };
   }
 
   protected generateJoinConditions(_context: SQLGenerationContext): GeneratedSQLFragment {
@@ -168,28 +187,6 @@ export class UniteSQLGenerator extends BaseSQLGenerator {
 
   protected generateGroupByClause(_context: SQLGenerationContext): GeneratedSQLFragment {
     return this.emptyFragment();
-  }
-
-  private flowStub(nodeType: string): GeneratedSQLFragment {
-    return {
-      sql: `-- ${nodeType} node: flow control, no SQL generated`,
-      dependencies: [],
-      parameters: new Map(),
-      errors: [],
-      warnings: [],
-      metadata: { generatedAt: new Date().toISOString(), fragmentType: 'flow_stub', lineCount: 1 }
-    };
-  }
-
-  private emptyFragment(): GeneratedSQLFragment {
-    return {
-      sql: '',
-      dependencies: [],
-      parameters: new Map(),
-      errors: [],
-      warnings: [],
-      metadata: { generatedAt: new Date().toISOString(), fragmentType: 'empty', lineCount: 0 }
-    };
   }
 }
 
@@ -225,18 +222,11 @@ export class FlowMergeSQLGenerator extends BaseSQLGenerator {
       parameters: new Map(),
       errors: [],
       warnings: [],
-      metadata: { generatedAt: new Date().toISOString(), fragmentType: 'flow_stub', lineCount: 1 }
-    };
-  }
-
-  private emptyFragment(): GeneratedSQLFragment {
-    return {
-      sql: '',
-      dependencies: [],
-      parameters: new Map(),
-      errors: [],
-      warnings: [],
-      metadata: { generatedAt: new Date().toISOString(), fragmentType: 'empty', lineCount: 0 }
+      metadata: {
+        generatedAt: new Date().toISOString(),
+        fragmentType: 'flow_stub',
+        lineCount: 1,
+      },
     };
   }
 }
@@ -273,18 +263,11 @@ export class FlowMeterSQLGenerator extends BaseSQLGenerator {
       parameters: new Map(),
       errors: [],
       warnings: [],
-      metadata: { generatedAt: new Date().toISOString(), fragmentType: 'flow_stub', lineCount: 1 }
-    };
-  }
-
-  private emptyFragment(): GeneratedSQLFragment {
-    return {
-      sql: '',
-      dependencies: [],
-      parameters: new Map(),
-      errors: [],
-      warnings: [],
-      metadata: { generatedAt: new Date().toISOString(), fragmentType: 'empty', lineCount: 0 }
+      metadata: {
+        generatedAt: new Date().toISOString(),
+        fragmentType: 'flow_stub',
+        lineCount: 1,
+      },
     };
   }
 }
@@ -321,18 +304,11 @@ export class FlowMeterCatcherSQLGenerator extends BaseSQLGenerator {
       parameters: new Map(),
       errors: [],
       warnings: [],
-      metadata: { generatedAt: new Date().toISOString(), fragmentType: 'flow_stub', lineCount: 1 }
-    };
-  }
-
-  private emptyFragment(): GeneratedSQLFragment {
-    return {
-      sql: '',
-      dependencies: [],
-      parameters: new Map(),
-      errors: [],
-      warnings: [],
-      metadata: { generatedAt: new Date().toISOString(), fragmentType: 'empty', lineCount: 0 }
+      metadata: {
+        generatedAt: new Date().toISOString(),
+        fragmentType: 'flow_stub',
+        lineCount: 1,
+      },
     };
   }
 }

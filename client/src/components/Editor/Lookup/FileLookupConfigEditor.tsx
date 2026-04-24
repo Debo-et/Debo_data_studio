@@ -3,7 +3,8 @@ import React, { useState, useEffect, useRef, useCallback } from 'react';
 import {
   Upload, Table, Select, InputNumber, Switch, Button,
   Card, Row, Col, Divider, Typography, Progress, Tag,
-  Form, Alert, Space, Radio} from 'antd';
+  Form, Alert, Space, Radio
+} from 'antd';
 import {
   UploadOutlined, LinkOutlined, CheckOutlined,
   CloseOutlined, PlayCircleOutlined,
@@ -13,7 +14,6 @@ import {
 import { 
   LookupConfig, FileInfo, SchemaField, ConnectionLine, TestResult 
 } from './types';
-import './FileLookupConfigEditor.css';
 
 const { Title, Text } = Typography;
 const { Option } = Select;
@@ -86,7 +86,7 @@ const FileLookupConfigEditor: React.FC = () => {
     setConfig(prev => ({
       ...prev,
       filePath: `uploads/${file.name}`,
-      fileType: fileType // This is now correctly typed
+      fileType: fileType
     }));
   };
 
@@ -104,7 +104,7 @@ const FileLookupConfigEditor: React.FC = () => {
       case 'parquet':
         return 'parquet';
       default:
-        return 'csv'; // Default to csv
+        return 'csv';
     }
   };
 
@@ -207,459 +207,611 @@ const FileLookupConfigEditor: React.FC = () => {
   };
 
   return (
-    <div className="file-lookup-editor">
-      <Title level={2}>📁 File Lookup Configuration</Title>
-      
-      <Row gutter={[24, 24]}>
-        {/* File Selection Section */}
-        <Col span={24}>
-          <Card 
-            title={
-              <Space>
-                <UploadOutlined />
-                File Selection & Preview
-              </Space>
-            }
-            extra={
-              fileInfo && (
-                <Tag icon={renderFileIcon(fileInfo.type)}>
-                  {fileInfo.type.toUpperCase()}
-                </Tag>
-              )
-            }
-          >
-            <Row gutter={16}>
-              <Col span={8}>
-                <Upload
-                  accept=".csv,.json,.xlsx,.xls,.parquet"
-                  beforeUpload={(file) => {
-                    handleFileUpload(file);
-                    return false;
-                  }}
-                  showUploadList={false}
-                >
-                  <Button icon={<UploadOutlined />} block size="large">
-                    Select Lookup File
-                  </Button>
-                </Upload>
-                
-                {fileInfo && (
-                  <div className="file-info">
-                    <Divider />
-                    <Text strong>File Info:</Text>
-                    <div className="file-stats">
-                      <div>Name: {fileInfo.name}</div>
-                      <div>Size: {(fileInfo.size / 1024).toFixed(2)} KB</div>
-                      <div>Rows: {fileInfo.rowCount.toLocaleString()}</div>
-                      <div>Columns: {fileInfo.columns.length}</div>
-                    </div>
-                  </div>
-                )}
-              </Col>
-              
-              <Col span={16}>
-                {fileInfo ? (
-                  <>
-                    <Text strong>File Preview (First 10 rows):</Text>
-                    <div className="table-preview">
-                      <Table
-                        dataSource={fileInfo.previewData}
-                        columns={fileInfo.columns.map(col => ({
-                          title: col,
-                          dataIndex: col,
-                          key: col,
-                          ellipsis: true
-                        }))}
-                        pagination={false}
-                        size="small"
-                        scroll={{ x: true }}
-                      />
-                    </div>
-                    <div className="schema-info">
-                      <Text type="secondary">
-                        Detected {fileInfo.columns.length} columns: {fileInfo.columns.join(', ')}
-                      </Text>
-                    </div>
-                  </>
-                ) : (
-                  <div className="empty-preview">
-                    <Text type="secondary">
-                      Select a file to preview its contents
-                    </Text>
-                  </div>
-                )}
-              </Col>
-            </Row>
-          </Card>
-        </Col>
+    <>
+      {/* Inline CSS – replaces the external .css file */}
+      <style>
+        {`
+          .file-lookup-editor {
+            padding: 24px;
+            background: #f5f5f5;
+            min-height: 100vh;
+          }
+          .file-info {
+            margin-top: 16px;
+          }
+          .file-stats {
+            margin-top: 8px;
+            padding: 12px;
+            background: #fafafa;
+            border-radius: 4px;
+            line-height: 1.8;
+          }
+          .table-preview {
+            max-height: 300px;
+            overflow: auto;
+            border: 1px solid #f0f0f0;
+            border-radius: 4px;
+            margin-top: 8px;
+          }
+          .schema-info {
+            margin-top: 8px;
+          }
+          .empty-preview {
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            height: 200px;
+            background: #fafafa;
+            border-radius: 4px;
+            border: 1px dashed #d9d9d9;
+          }
+          .field-option {
+            display: flex;
+            flex-direction: column;
+          }
+          .cache-visualization {
+            margin-top: 8px;
+          }
+          .mapping-container {
+            position: relative;
+            min-height: 400px;
+          }
+          .connection-lines {
+            position: absolute;
+            top: 0;
+            left: 0;
+            width: 100%;
+            height: 100%;
+            pointer-events: none;
+            z-index: 1;
+          }
+          .field-section {
+            padding: 16px;
+            background: #fafafa;
+            border-radius: 4px;
+            min-height: 300px;
+            height: 100%;
+          }
+          .field-item {
+            padding: 12px 16px;
+            margin-bottom: 8px;
+            background: white;
+            border: 1px solid #d9d9d9;
+            border-radius: 4px;
+            cursor: grab;
+            transition: all 0.3s;
+            position: relative;
+            z-index: 2;
+            box-shadow: 0 1px 2px rgba(0,0,0,0.03);
+          }
+          .field-item:hover {
+            border-color: #40a9ff;
+            box-shadow: 0 2px 6px rgba(0,0,0,0.08);
+          }
+          .field-item.dragging {
+            opacity: 0.5;
+            cursor: grabbing;
+            box-shadow: 0 4px 12px rgba(0,0,0,0.15);
+          }
+          .field-item.mapped {
+            border-color: #1890ff;
+            background: #e6f7ff;
+          }
+          .field-item.drop-target {
+            cursor: pointer;
+          }
+          .drag-handle {
+            color: #999;
+            font-size: 16px;
+            margin-right: 8px;
+          }
+          .field-info {
+            flex: 1;
+          }
+          .mapped-indicator {
+            color: #52c41a;
+            margin-left: 8px;
+            font-size: 16px;
+          }
+          .mapping-summary {
+            margin-top: 16px;
+          }
+          .test-results {
+            margin-top: 16px;
+          }
+          .match-stats {
+            display: flex;
+            align-items: center;
+            gap: 24px;
+            margin-top: 16px;
+            flex-wrap: wrap;
+          }
+          .stats-details {
+            display: flex;
+            flex-direction: column;
+            gap: 6px;
+            background: #fafafa;
+            padding: 12px 16px;
+            border-radius: 4px;
+          }
+          .output-preview {
+            margin-top: 16px;
+            max-height: 300px;
+            overflow: auto;
+            border: 1px solid #f0f0f0;
+            border-radius: 4px;
+          }
+          .test-placeholder {
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            height: 200px;
+            background: #fafafa;
+            border-radius: 4px;
+            border: 1px dashed #d9d9d9;
+          }
+          .config-summary {
+            margin-top: 24px;
+            background: #fafafa;
+            border-radius: 8px;
+          }
+        `}
+      </style>
 
-        {/* Key Field Configuration */}
-        <Col span={12}>
-          <Card title="🔑 Key Field Configuration">
-            <Form layout="vertical">
-              <Form.Item
-                label="Select Key Field (from Input)"
-                help="This field will be used to match records between input and lookup file"
-              >
-                <Select
-                  value={config.keyField}
-                  onChange={(value) => setConfig({ ...config, keyField: value })}
-                  placeholder="Choose key field"
-                >
-                  {inputSchema.map(field => (
-                    <Option key={field.name} value={field.name}>
-                      <div className="field-option">
-                        <Text strong>{field.name}</Text>
-                        <Text type="secondary" style={{ fontSize: '12px' }}>
-                          Type: {field.type} | Sample: {field.sampleValues.slice(0, 2).join(', ')}
+      <div className="file-lookup-editor">
+        <Title level={2}>📁 File Lookup Configuration</Title>
+        
+        <Row gutter={[24, 24]}>
+          {/* File Selection Section */}
+          <Col span={24}>
+            <Card 
+              title={
+                <Space>
+                  <UploadOutlined />
+                  File Selection & Preview
+                </Space>
+              }
+              extra={
+                fileInfo && (
+                  <Tag icon={renderFileIcon(fileInfo.type as FileType)}>
+                    {fileInfo.type.toUpperCase()}
+                  </Tag>
+                )
+              }
+            >
+              <Row gutter={16}>
+                <Col span={8}>
+                  <Upload
+                    accept=".csv,.json,.xlsx,.xls,.parquet"
+                    beforeUpload={(file) => {
+                      handleFileUpload(file);
+                      return false;
+                    }}
+                    showUploadList={false}
+                  >
+                    <Button icon={<UploadOutlined />} block size="large">
+                      Select Lookup File
+                    </Button>
+                  </Upload>
+                  
+                  {fileInfo && (
+                    <div className="file-info">
+                      <Divider />
+                      <Text strong>File Info:</Text>
+                      <div className="file-stats">
+                        <div>Name: {fileInfo.name}</div>
+                        <div>Size: {(fileInfo.size / 1024).toFixed(2)} KB</div>
+                        <div>Rows: {fileInfo.rowCount.toLocaleString()}</div>
+                        <div>Columns: {fileInfo.columns.length}</div>
+                      </div>
+                    </div>
+                  )}
+                </Col>
+                
+                <Col span={16}>
+                  {fileInfo ? (
+                    <>
+                      <Text strong>File Preview (First 10 rows):</Text>
+                      <div className="table-preview">
+                        <Table
+                          dataSource={fileInfo.previewData}
+                          columns={fileInfo.columns.map(col => ({
+                            title: col,
+                            dataIndex: col,
+                            key: col,
+                            ellipsis: true
+                          }))}
+                          pagination={false}
+                          size="small"
+                          scroll={{ x: true }}
+                        />
+                      </div>
+                      <div className="schema-info">
+                        <Text type="secondary">
+                          Detected {fileInfo.columns.length} columns: {fileInfo.columns.join(', ')}
                         </Text>
                       </div>
-                    </Option>
-                  ))}
-                </Select>
-              </Form.Item>
-
-              {config.keyField && fileInfo && (
-                <Alert
-                  message={
-                    fileInfo.columns.includes(config.keyField) 
-                      ? `✓ Key field "${config.keyField}" exists in lookup file`
-                      : `⚠ Key field "${config.keyField}" NOT found in lookup file columns`
-                  }
-                  type={fileInfo.columns.includes(config.keyField) ? 'success' : 'warning'}
-                  showIcon
-                />
-              )}
-
-              <Form.Item
-                label="Lookup File Key Column"
-                help="Column in the lookup file that matches the input key field"
-              >
-                <Select
-                  value={config.fieldMapping[config.keyField]}
-                  onChange={(value) => {
-                    const newMapping = { ...config.fieldMapping, [config.keyField]: value };
-                    setConfig({ ...config, fieldMapping: newMapping });
-                    updateConnectionLine(config.keyField, value);
-                  }}
-                  placeholder="Select matching column"
-                  disabled={!config.keyField}
-                >
-                  {fileInfo?.columns.map(col => (
-                    <Option key={col} value={col}>{col}</Option>
-                  ))}
-                </Select>
-              </Form.Item>
-            </Form>
-          </Card>
-        </Col>
-
-        {/* Cache Settings */}
-        <Col span={12}>
-          <Card title="⚡ Lookup Settings">
-            <Form layout="vertical">
-              <Form.Item label="Cache Size (records)">
-                <InputNumber
-                  min={0}
-                  max={100000}
-                  value={config.cacheSize}
-                  onChange={(value) => setConfig({ ...config, cacheSize: value || 0 })}
-                  style={{ width: '100%' }}
-                />
-                <div className="cache-visualization">
-                  <Progress
-                    percent={Math.min((config.cacheSize || 0) / 10000 * 100, 100)}
-                    size="small"
-                    status="active"
-                  />
-                  <Text type="secondary">
-                    Memory usage: {(memoryUsage / 1024).toFixed(2)} MB estimated
-                  </Text>
-                </div>
-              </Form.Item>
-
-              <Row gutter={16}>
-                <Col span={12}>
-                  <Form.Item label="Join Type">
-                    <Radio.Group
-                      value={config.joinType}
-                      onChange={(e) => setConfig({ ...config, joinType: e.target.value })}
-                    >
-                      <Radio value="left">Left Join</Radio>
-                      <Radio value="inner">Inner Join</Radio>
-                    </Radio.Group>
-                  </Form.Item>
-                </Col>
-                <Col span={12}>
-                  <Form.Item label="Reload on Change">
-                    <Switch
-                      checked={config.reloadOnChange}
-                      onChange={(checked) => setConfig({ ...config, reloadOnChange: checked })}
-                    />
-                    <Text type="secondary" style={{ marginLeft: 8 }}>
-                      {config.reloadOnChange ? 'Watching file changes' : 'Manual reload only'}
-                    </Text>
-                  </Form.Item>
+                    </>
+                  ) : (
+                    <div className="empty-preview">
+                      <Text type="secondary">
+                        Select a file to preview its contents
+                      </Text>
+                    </div>
+                  )}
                 </Col>
               </Row>
-            </Form>
-          </Card>
-        </Col>
+            </Card>
+          </Col>
 
-        {/* Field Mapping Matrix */}
-        <Col span={24}>
-          <Card 
-            title={
-              <Space>
-                <LinkOutlined />
-                Field Mapping Matrix
-                <Button 
-                  size="small" 
-                  onClick={handleAutoMap}
-                  icon={<DragOutlined />}
+          {/* Key Field Configuration */}
+          <Col span={12}>
+            <Card title="🔑 Key Field Configuration">
+              <Form layout="vertical">
+                <Form.Item
+                  label="Select Key Field (from Input)"
+                  help="This field will be used to match records between input and lookup file"
                 >
-                  Auto-Map by Name
-                </Button>
-              </Space>
-            }
-          >
-            <div ref={containerRef} className="mapping-container">
-              {/* Connection lines SVG */}
-              <svg className="connection-lines">
-                {connectionLines.map((line, index) => (
-                  <line
-                    key={index}
-                    x1={line.from.x}
-                    y1={line.from.y}
-                    x2={line.to.x}
-                    y2={line.to.y}
-                    stroke="#1890ff"
-                    strokeWidth="2"
-                    strokeDasharray="5,5"
-                  />
-                ))}
-              </svg>
-
-              <Row gutter={48}>
-                {/* Input Fields */}
-                <Col span={12}>
-                  <div className="field-section">
-                    <Title level={4}>Input Fields (Upstream)</Title>
+                  <Select
+                    value={config.keyField}
+                    onChange={(value) => setConfig({ ...config, keyField: value })}
+                    placeholder="Choose key field"
+                  >
                     {inputSchema.map(field => (
-                      <div
-                        key={field.name}
-                        ref={el => { if (el) fieldRefs.current[field.name] = el; }}
-                        className={`field-item ${
-                          isDragging === field.name ? 'dragging' : ''
-                        } ${config.fieldMapping[field.name] ? 'mapped' : ''}`}
-                        draggable
-                        onDragStart={() => handleDragStart(field.name)}
-                      >
-                        <Space>
-                          <DragOutlined className="drag-handle" />
-                          <div className="field-info">
-                            <Text strong>{field.name}</Text>
-                            <br />
-                            <Text type="secondary" style={{ fontSize: '12px' }}>
-                              {field.type} • {field.sampleValues.slice(0, 3).join(', ')}
-                            </Text>
-                          </div>
-                          {config.fieldMapping[field.name] && (
-                            <CheckOutlined className="mapped-indicator" />
-                          )}
-                        </Space>
-                      </div>
+                      <Option key={field.name} value={field.name}>
+                        <div className="field-option">
+                          <Text strong>{field.name}</Text>
+                          <Text type="secondary" style={{ fontSize: '12px' }}>
+                            Type: {field.type} | Sample: {field.sampleValues.slice(0, 2).join(', ')}
+                          </Text>
+                        </div>
+                      </Option>
                     ))}
-                  </div>
-                </Col>
+                  </Select>
+                </Form.Item>
 
-                {/* Lookup File Columns */}
-                <Col span={12}>
-                  <div className="field-section">
-                    <Title level={4}>Lookup File Columns</Title>
-                    {fileInfo ? (
-                      fileInfo.columns.map(column => (
+                {config.keyField && fileInfo && (
+                  <Alert
+                    message={
+                      fileInfo.columns.includes(config.keyField) 
+                        ? `✓ Key field "${config.keyField}" exists in lookup file`
+                        : `⚠ Key field "${config.keyField}" NOT found in lookup file columns`
+                    }
+                    type={fileInfo.columns.includes(config.keyField) ? 'success' : 'warning'}
+                    showIcon
+                  />
+                )}
+
+                <Form.Item
+                  label="Lookup File Key Column"
+                  help="Column in the lookup file that matches the input key field"
+                >
+                  <Select
+                    value={config.fieldMapping[config.keyField]}
+                    onChange={(value) => {
+                      const newMapping = { ...config.fieldMapping, [config.keyField]: value };
+                      setConfig({ ...config, fieldMapping: newMapping });
+                      updateConnectionLine(config.keyField, value);
+                    }}
+                    placeholder="Select matching column"
+                    disabled={!config.keyField}
+                  >
+                    {fileInfo?.columns.map(col => (
+                      <Option key={col} value={col}>{col}</Option>
+                    ))}
+                  </Select>
+                </Form.Item>
+              </Form>
+            </Card>
+          </Col>
+
+          {/* Cache Settings */}
+          <Col span={12}>
+            <Card title="⚡ Lookup Settings">
+              <Form layout="vertical">
+                <Form.Item label="Cache Size (records)">
+                  <InputNumber
+                    min={0}
+                    max={100000}
+                    value={config.cacheSize}
+                    onChange={(value) => setConfig({ ...config, cacheSize: value || 0 })}
+                    style={{ width: '100%' }}
+                  />
+                  <div className="cache-visualization">
+                    <Progress
+                      percent={Math.min((config.cacheSize || 0) / 10000 * 100, 100)}
+                      size="small"
+                      status="active"
+                    />
+                    <Text type="secondary">
+                      Memory usage: {(memoryUsage / 1024).toFixed(2)} MB estimated
+                    </Text>
+                  </div>
+                </Form.Item>
+
+                <Row gutter={16}>
+                  <Col span={12}>
+                    <Form.Item label="Join Type">
+                      <Radio.Group
+                        value={config.joinType}
+                        onChange={(e) => setConfig({ ...config, joinType: e.target.value })}
+                      >
+                        <Radio value="left">Left Join</Radio>
+                        <Radio value="inner">Inner Join</Radio>
+                      </Radio.Group>
+                    </Form.Item>
+                  </Col>
+                  <Col span={12}>
+                    <Form.Item label="Reload on Change">
+                      <Switch
+                        checked={config.reloadOnChange}
+                        onChange={(checked) => setConfig({ ...config, reloadOnChange: checked })}
+                      />
+                      <Text type="secondary" style={{ marginLeft: 8 }}>
+                        {config.reloadOnChange ? 'Watching file changes' : 'Manual reload only'}
+                      </Text>
+                    </Form.Item>
+                  </Col>
+                </Row>
+              </Form>
+            </Card>
+          </Col>
+
+          {/* Field Mapping Matrix */}
+          <Col span={24}>
+            <Card 
+              title={
+                <Space>
+                  <LinkOutlined />
+                  Field Mapping Matrix
+                  <Button 
+                    size="small" 
+                    onClick={handleAutoMap}
+                    icon={<DragOutlined />}
+                  >
+                    Auto-Map by Name
+                  </Button>
+                </Space>
+              }
+            >
+              <div ref={containerRef} className="mapping-container">
+                {/* Connection lines SVG */}
+                <svg className="connection-lines">
+                  {connectionLines.map((line, index) => (
+                    <line
+                      key={index}
+                      x1={line.from.x}
+                      y1={line.from.y}
+                      x2={line.to.x}
+                      y2={line.to.y}
+                      stroke="#1890ff"
+                      strokeWidth="2"
+                      strokeDasharray="5,5"
+                    />
+                  ))}
+                </svg>
+
+                <Row gutter={48}>
+                  {/* Input Fields */}
+                  <Col span={12}>
+                    <div className="field-section">
+                      <Title level={4}>Input Fields (Upstream)</Title>
+                      {inputSchema.map(field => (
                         <div
-                          key={column}
-                          ref={el => { if (el) fieldRefs.current[column] = el; }}
-                          className="field-item drop-target"
-                          onDragOver={(e) => handleDragOver(e, column)}
-                          onDrop={(e) => handleDrop(e, column)}
+                          key={field.name}
+                          ref={el => { if (el) fieldRefs.current[field.name] = el; }}
+                          className={`field-item ${
+                            isDragging === field.name ? 'dragging' : ''
+                          } ${config.fieldMapping[field.name] ? 'mapped' : ''}`}
+                          draggable
+                          onDragStart={() => handleDragStart(field.name)}
                         >
                           <Space>
+                            <DragOutlined className="drag-handle" />
                             <div className="field-info">
-                              <Text strong>{column}</Text>
+                              <Text strong>{field.name}</Text>
                               <br />
                               <Text type="secondary" style={{ fontSize: '12px' }}>
-                                {fileInfo.previewData[0]?.[column]?.toString().substring(0, 30) || 'No sample'}
+                                {field.type} • {field.sampleValues.slice(0, 3).join(', ')}
                               </Text>
                             </div>
-                            {Object.entries(config.fieldMapping).find(([_, col]) => col === column) && (
-                              <Tag color="blue">Mapped</Tag>
+                            {config.fieldMapping[field.name] && (
+                              <CheckOutlined className="mapped-indicator" />
                             )}
                           </Space>
                         </div>
-                      ))
-                    ) : (
-                      <Text type="secondary">Upload a file to see columns</Text>
-                    )}
-                  </div>
-                </Col>
-              </Row>
-            </div>
+                      ))}
+                    </div>
+                  </Col>
 
-            {/* Mapping Summary */}
-            <Divider />
-            <div className="mapping-summary">
-              <Text strong>Current Mappings:</Text>
-              {Object.entries(config.fieldMapping).map(([inputField, lookupColumn]) => (
-                <Tag key={inputField} color="blue">
-                  {inputField} → {lookupColumn}
-                </Tag>
-              ))}
-              {Object.keys(config.fieldMapping).length === 0 && (
-                <Text type="secondary">No mappings configured</Text>
-              )}
-            </div>
-          </Card>
-        </Col>
-
-        {/* Test Lookup Section */}
-        <Col span={24}>
-          <Card 
-            title={
-              <Space>
-                <PlayCircleOutlined />
-                Test Lookup Configuration
-              </Space>
-            }
-            extra={
-              <Button
-                type="primary"
-                icon={<PlayCircleOutlined />}
-                onClick={runTestLookup}
-                loading={isTesting}
-              >
-                Run Test
-              </Button>
-            }
-          >
-            <Row gutter={24}>
-              <Col span={8}>
-                <Upload
-                  accept=".csv,.json"
-                  beforeUpload={() => false}
-                  showUploadList={false}
-                >
-                  <Button icon={<UploadOutlined />} block>
-                    Upload Sample Input Data
-                  </Button>
-                </Upload>
-                
-                {testResults && (
-                  <div className="test-results">
-                    <Divider />
-                    <Text strong>Test Results:</Text>
-                    <div className="match-stats">
-                      <Progress
-                        type="circle"
-                        percent={(testResults.matched / testResults.total) * 100}
-                        format={() => (
-                          <div>
-                            <div style={{ fontSize: '24px', fontWeight: 'bold' }}>
-                              {Math.round((testResults.matched / testResults.total) * 100)}%
-                            </div>
-                            <div style={{ fontSize: '12px' }}>Match Rate</div>
+                  {/* Lookup File Columns */}
+                  <Col span={12}>
+                    <div className="field-section">
+                      <Title level={4}>Lookup File Columns</Title>
+                      {fileInfo ? (
+                        fileInfo.columns.map(column => (
+                          <div
+                            key={column}
+                            ref={el => { if (el) fieldRefs.current[column] = el; }}
+                            className="field-item drop-target"
+                            onDragOver={(e) => handleDragOver(e, column)}
+                            onDrop={(e) => handleDrop(e, column)}
+                          >
+                            <Space>
+                              <div className="field-info">
+                                <Text strong>{column}</Text>
+                                <br />
+                                <Text type="secondary" style={{ fontSize: '12px' }}>
+                                  {fileInfo.previewData[0]?.[column]?.toString().substring(0, 30) || 'No sample'}
+                                </Text>
+                              </div>
+                              {Object.entries(config.fieldMapping).find(([_, col]) => col === column) && (
+                                <Tag color="blue">Mapped</Tag>
+                              )}
+                            </Space>
                           </div>
-                        )}
-                      />
-                      <div className="stats-details">
-                        <div>
-                          <CheckOutlined style={{ color: '#52c41a' }} />
-                          Matched: {testResults.matched}
+                        ))
+                      ) : (
+                        <Text type="secondary">Upload a file to see columns</Text>
+                      )}
+                    </div>
+                  </Col>
+                </Row>
+              </div>
+
+              {/* Mapping Summary */}
+              <Divider />
+              <div className="mapping-summary">
+                <Text strong>Current Mappings:</Text>
+                {Object.entries(config.fieldMapping).map(([inputField, lookupColumn]) => (
+                  <Tag key={inputField} color="blue">
+                    {inputField} → {lookupColumn}
+                  </Tag>
+                ))}
+                {Object.keys(config.fieldMapping).length === 0 && (
+                  <Text type="secondary">No mappings configured</Text>
+                )}
+              </div>
+            </Card>
+          </Col>
+
+          {/* Test Lookup Section */}
+          <Col span={24}>
+            <Card 
+              title={
+                <Space>
+                  <PlayCircleOutlined />
+                  Test Lookup Configuration
+                </Space>
+              }
+              extra={
+                <Button
+                  type="primary"
+                  icon={<PlayCircleOutlined />}
+                  onClick={runTestLookup}
+                  loading={isTesting}
+                >
+                  Run Test
+                </Button>
+              }
+            >
+              <Row gutter={24}>
+                <Col span={8}>
+                  <Upload
+                    accept=".csv,.json"
+                    beforeUpload={() => false}
+                    showUploadList={false}
+                  >
+                    <Button icon={<UploadOutlined />} block>
+                      Upload Sample Input Data
+                    </Button>
+                  </Upload>
+                  
+                  {testResults && (
+                    <div className="test-results">
+                      <Divider />
+                      <Text strong>Test Results:</Text>
+                      <div className="match-stats">
+                        <Progress
+                          type="circle"
+                          percent={(testResults.matched / testResults.total) * 100}
+                          format={() => (
+                            <div>
+                              <div style={{ fontSize: '24px', fontWeight: 'bold' }}>
+                                {Math.round((testResults.matched / testResults.total) * 100)}%
+                              </div>
+                              <div style={{ fontSize: '12px' }}>Match Rate</div>
+                            </div>
+                          )}
+                        />
+                        <div className="stats-details">
+                          <div>
+                            <CheckOutlined style={{ color: '#52c41a' }} />
+                            Matched: {testResults.matched}
+                          </div>
+                          <div>
+                            <CloseOutlined style={{ color: '#ff4d4f' }} />
+                            Unmatched: {testResults.unmatched}
+                          </div>
+                          <div>Total: {testResults.total}</div>
+                          <div>Time: {testResults.executionTime}ms</div>
+                          {testResults.cacheHitRate && (
+                            <div>Cache Hit: {testResults.cacheHitRate}%</div>
+                          )}
                         </div>
-                        <div>
-                          <CloseOutlined style={{ color: '#ff4d4f' }} />
-                          Unmatched: {testResults.unmatched}
-                        </div>
-                        <div>Total: {testResults.total}</div>
-                        <div>Time: {testResults.executionTime}ms</div>
-                        {testResults.cacheHitRate && (
-                          <div>Cache Hit: {testResults.cacheHitRate}%</div>
-                        )}
                       </div>
                     </div>
-                  </div>
-                )}
-              </Col>
-              
-              <Col span={16}>
-                {testResults ? (
-                  <>
-                    <Text strong>Enriched Output Preview:</Text>
-                    <div className="output-preview">
-                      <Table
-                        dataSource={testResults.sampleOutput}
-                        columns={[
-                          ...inputSchema.map(f => ({
-                            title: f.name,
-                            dataIndex: f.name,
-                            key: f.name
-                          })),
-                          ...Object.values(config.fieldMapping).map(col => ({
-                            title: col,
-                            dataIndex: col,
-                            key: col
-                          }))
-                        ]}
-                        pagination={false}
-                        size="small"
-                        scroll={{ x: true }}
-                      />
+                  )}
+                </Col>
+                
+                <Col span={16}>
+                  {testResults ? (
+                    <>
+                      <Text strong>Enriched Output Preview:</Text>
+                      <div className="output-preview">
+                        <Table
+                          dataSource={testResults.sampleOutput}
+                          columns={[
+                            ...inputSchema.map(f => ({
+                              title: f.name,
+                              dataIndex: f.name,
+                              key: f.name
+                            })),
+                            ...Object.values(config.fieldMapping).map(col => ({
+                              title: col,
+                              dataIndex: col,
+                              key: col
+                            }))
+                          ]}
+                          pagination={false}
+                          size="small"
+                          scroll={{ x: true }}
+                        />
+                      </div>
+                    </>
+                  ) : (
+                    <div className="test-placeholder">
+                      <Text type="secondary">
+                        Run a test to see lookup results and enriched output
+                      </Text>
                     </div>
-                  </>
-                ) : (
-                  <div className="test-placeholder">
-                    <Text type="secondary">
-                      Run a test to see lookup results and enriched output
-                    </Text>
-                  </div>
-                )}
-              </Col>
-            </Row>
-          </Card>
-        </Col>
-      </Row>
-
-      {/* Configuration Summary */}
-      <Card className="config-summary">
-        <Row align="middle" justify="space-between">
-          <Col>
-            <Space direction="vertical" size="small">
-              <Text strong>Configuration Summary</Text>
-              <Space>
-                <Tag icon={<HddOutlined />}>
-                  Cache: {config.cacheSize} records
-                </Tag>
-                <Tag icon={renderFileIcon(config.fileType)}>
-                  {config.fileType.toUpperCase()}
-                </Tag>
-                <Tag>{config.joinType} Join</Tag>
-                <Tag color={config.reloadOnChange ? 'green' : 'default'}>
-                  {config.reloadOnChange ? 'Auto-reload' : 'Manual reload'}
-                </Tag>
-              </Space>
-            </Space>
-          </Col>
-          <Col>
-            <Space>
-              <Button>Save Configuration</Button>
-              <Button type="primary">Deploy Lookup</Button>
-            </Space>
+                  )}
+                </Col>
+              </Row>
+            </Card>
           </Col>
         </Row>
-      </Card>
-    </div>
+
+        {/* Configuration Summary */}
+        <Card className="config-summary">
+          <Row align="middle" justify="space-between">
+            <Col>
+              <Space direction="vertical" size="small">
+                <Text strong>Configuration Summary</Text>
+                <Space>
+                  <Tag icon={<HddOutlined />}>
+                    Cache: {config.cacheSize} records
+                  </Tag>
+                  <Tag icon={renderFileIcon(config.fileType as FileType)}>
+                    {config.fileType.toUpperCase()}
+                  </Tag>
+                  <Tag>{config.joinType} Join</Tag>
+                  <Tag color={config.reloadOnChange ? 'green' : 'default'}>
+                    {config.reloadOnChange ? 'Auto-reload' : 'Manual reload'}
+                  </Tag>
+                </Space>
+              </Space>
+            </Col>
+            <Col>
+              <Space>
+                <Button>Save Configuration</Button>
+                <Button type="primary">Deploy Lookup</Button>
+              </Space>
+            </Col>
+          </Row>
+        </Card>
+      </div>
+    </>
   );
 };
 

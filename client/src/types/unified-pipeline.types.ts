@@ -75,7 +75,8 @@ export enum NodeType {
   JSON = 'JSON',
   CACHE = 'CACHE',
   SURVIVORSHIP_RULE = 'SURVIVORSHIP_RULE',
-  JSONB = 'JSONB'
+  JSONB = 'JSONB',
+  CONDITIONAL_SPLIT = "CONDITIONAL_SPLIT"
 }
 
 export enum PortType {
@@ -736,7 +737,11 @@ export interface NamespaceMapping {
   prefix: string;                        // e.g., "ns"
   uri: string;                            // e.g., "http://example.com/ns"
 }
-
+export function isConvertConfig(
+  config: ComponentConfiguration
+): config is { type: 'CONVERT'; config: ConvertComponentConfiguration } {
+  return config.type === 'CONVERT';
+}
 export interface ExtractXMLFieldConfiguration {
   version: string;
   sourceColumn: string;                   // Name of the input XML column
@@ -1471,6 +1476,7 @@ export type ComponentConfiguration =
   | { type: 'PIVOT_TO_COLUMNS_DELIMITED'; config: PivotToColumnsDelimitedConfiguration } // ✅ added
   | { type: 'DENORMALIZE'; config: DenormalizeComponentConfiguration }           // ✅ added
   | { type: 'OTHER'; config: Record<string, any> }
+  | { type: 'PARSE_RECORD_SET'; config: ParseRecordSetComponentConfiguration } 
   | { type: 'EXTRACT_DELIMITED'; config: ExtractDelimitedFieldsConfiguration }
   | { type: 'EXTRACT_JSON_FIELDS'; config: ExtractJSONFieldsConfiguration }
   | { type: 'EXTRACT_XML_FIELD'; config: ExtractXMLFieldConfiguration }
@@ -1601,7 +1607,7 @@ export interface PivotToColumnsDelimitedConfiguration {
   errorHandling: 'fail' | 'skip' | 'setNull';
   parallelization: boolean;
   batchSize?: number;                        // Rows per batch
-
+  pivotValues: string[];       // NEW: list of distinct values to pivot
   // Compiler metadata (filled by the system)
   compilerMetadata?: {
     lastModified: string;

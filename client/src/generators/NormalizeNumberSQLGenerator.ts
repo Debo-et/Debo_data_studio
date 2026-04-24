@@ -1,9 +1,9 @@
 // src/generators/NormalizeNumberSQLGenerator.ts
 import { BaseSQLGenerator, SQLGenerationContext, GeneratedSQLFragment } from './BaseSQLGenerator';
-import { UnifiedCanvasNode } from '../types/unified-pipeline.types';
 
 interface NormalizeNumberConfig {
-  column: string;
+  sourceColumn: string;
+  targetType?: 'INTEGER' | 'DECIMAL' | 'NUMERIC' | 'FLOAT' | 'DOUBLE PRECISION';
   min?: number;
   max?: number;
   targetMin?: number;
@@ -12,81 +12,96 @@ interface NormalizeNumberConfig {
 
 export class NormalizeNumberSQLGenerator extends BaseSQLGenerator {
   protected generateSelectStatement(context: SQLGenerationContext): GeneratedSQLFragment {
-    const { node } = context;
-    // Use type assertion to tell TypeScript the expected shape; undefined is still possible.
-    const config = node.metadata?.configuration?.config as NormalizeNumberConfig | undefined;
+    const { node, connection, upstreamSchema } = context;
 
-    if (!config || !config.column) {
-      return this.fallbackSelect(node);
+    // Access config from the correct metadata path
+    const config = (node.metadata as any)?.normalizeNumberConfig as NormalizeNumberConfig | undefined;
+
+    // If no config or missing required source column, fallback to a simple SELECT *
+    if (!config || !config.sourceColumn) {
+      return this.fallbackSelect(context);
     }
 
-    const col = this.sanitizeIdentifier(config.column);
-    let expr = col;
-    if (config.min !== undefined && config.max !== undefined) {
-      const targetMin = config.targetMin ?? 0;
-      const targetMax = config.targetMax ?? 1;
-      expr = `((${col} - ${config.min})::float / (${config.max} - ${config.min}) * (${targetMax} - ${targetMin}) + ${targetMin})`;
+    const sourceColumn = config.sourceColumn;
+    const targetType = config.targetType;
+    const hasScaling = config.min !== undefined && config.max !== undefined;
+
+    // Determine the source reference (table, CTE, or subquery alias)
+    const sourceRef = connection?.sourceNodeId
+      ? this.sanitizeIdentifier(connection.sourceNodeId)
+      : 'source_table'; // fallback, should rarely happen
+
+    // Build column list from upstream schema, transforming the target column
+    const selectParts: string[] = [];
+    const allColumns = upstreamSchema || [];
+
+    for (const col of allColumns) {
+      const colName = col.name;
+      const sanitized = this.sanitizeIdentifier(colName);
+
+      if (colName === sourceColumn) {
+        let expr: string;
+        if (hasScaling) {
+          // Min-max scaling
+          const min = config.min!;
+          const max = config.max!;
+          const targetMin = config.targetMin ?? 0;
+          const targetMax = config.targetMax ?? 1;
+          expr = `((${sanitized} - ${min})::float / (${max} - ${min}) * (${targetMax} - ${targetMin}) + ${targetMin})`;
+          // Optionally cast to targetType if specified
+          if (targetType) {
+            expr = `CAST(${expr} AS ${targetType})`;
+          }
+        } else if (targetType) {
+          // Simple type cast
+          expr = `CAST(${sanitized} AS ${targetType})`;
+        } else {
+          // No transformation – keep as is
+          expr = sanitized;
+        }
+        selectParts.push(`${expr} AS ${sanitized}`);
+      } else {
+        selectParts.push(sanitized);
+      }
     }
 
-    const otherColumns = node.metadata?.schemas?.output?.fields
-      .filter(c => c.name !== config.column)
-      .map(c => this.sanitizeIdentifier(c.name)) || [];
-
-    const selectList = [...otherColumns, `${expr} AS ${col}`].join(', ');
-    const sql = `SELECT ${selectList} FROM source_table`;
+    // If upstream schema is empty, fallback to SELECT *
+    const selectClause = selectParts.length > 0 ? selectParts.join(', ') : '*';
+    const sql = `SELECT ${selectClause} FROM ${sourceRef}`;
 
     return {
       sql,
-      dependencies: ['source_table'],
+      dependencies: connection ? [connection.sourceNodeId] : [],
       parameters: new Map(),
       errors: [],
       warnings: [],
-      metadata: { generatedAt: new Date().toISOString(), fragmentType: 'normalize_number', lineCount: 1 }
+      metadata: {
+        generatedAt: new Date().toISOString(),
+        fragmentType: 'normalize_number',
+        lineCount: sql.split('\n').length,
+      },
     };
   }
 
-  // Implement required abstract methods (none of these clauses are modified by this generator)
-  protected generateJoinConditions(_context: SQLGenerationContext): GeneratedSQLFragment {
-    return this.emptyFragment();
-  }
+  // Implement required abstract methods (unused)
+  protected generateJoinConditions(): GeneratedSQLFragment { return this.emptyFragment(); }
+  protected generateWhereClause(): GeneratedSQLFragment { return this.emptyFragment(); }
+  protected generateHavingClause(): GeneratedSQLFragment { return this.emptyFragment(); }
+  protected generateOrderByClause(): GeneratedSQLFragment { return this.emptyFragment(); }
+  protected generateGroupByClause(): GeneratedSQLFragment { return this.emptyFragment(); }
 
-  protected generateWhereClause(_context: SQLGenerationContext): GeneratedSQLFragment {
-    return this.emptyFragment();
-  }
-
-  protected generateHavingClause(_context: SQLGenerationContext): GeneratedSQLFragment {
-    return this.emptyFragment();
-  }
-
-  protected generateOrderByClause(_context: SQLGenerationContext): GeneratedSQLFragment {
-    return this.emptyFragment();
-  }
-
-  protected generateGroupByClause(_context: SQLGenerationContext): GeneratedSQLFragment {
-    return this.emptyFragment();
-  }
-
-  // Helper to produce a basic SELECT fragment when configuration is missing
-  private fallbackSelect(_node: UnifiedCanvasNode): GeneratedSQLFragment {
+  private fallbackSelect(context: SQLGenerationContext): GeneratedSQLFragment {
+    const sourceRef = context.connection?.sourceNodeId
+      ? this.sanitizeIdentifier(context.connection.sourceNodeId)
+      : 'source_table';
+    const sql = `SELECT * FROM ${sourceRef}`;
     return {
-      sql: 'SELECT * FROM source_table',
-      dependencies: ['source_table'],
-      parameters: new Map(),
-      errors: [], // Optionally add a warning: [{ code: 'MISSING_CONFIG', message: 'NormalizeNumber config missing, using passthrough', severity: 'WARNING' }]
-      warnings: [],
-      metadata: { generatedAt: new Date().toISOString(), fragmentType: 'fallback_select', lineCount: 1 }
-    };
-  }
-
-  // Helper to return an empty fragment for unused clauses
-  private emptyFragment(): GeneratedSQLFragment {
-    return {
-      sql: '',
-      dependencies: [],
+      sql,
+      dependencies: context.connection ? [context.connection.sourceNodeId] : [],
       parameters: new Map(),
       errors: [],
-      warnings: [],
-      metadata: { generatedAt: new Date().toISOString(), fragmentType: 'empty', lineCount: 0 }
+      warnings: ['NormalizeNumber configuration missing; using SELECT *'],
+      metadata: { generatedAt: new Date().toISOString(), fragmentType: 'fallback_select', lineCount: 1 },
     };
   }
 }

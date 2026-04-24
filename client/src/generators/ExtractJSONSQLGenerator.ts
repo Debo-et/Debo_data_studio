@@ -10,36 +10,50 @@ interface JSONExtractConfig {
 
 export class ExtractJSONSQLGenerator extends BaseSQLGenerator {
   protected generateSelectStatement(context: SQLGenerationContext): GeneratedSQLFragment {
-    const { node } = context;
+    const { node, connection, upstreamSchema } = context;
     
-    // Safely extract and validate configuration
     const config = this.extractConfig(node);
     if (!config) {
-      return this.fallbackSelect(node);
+      return this.fallbackSelect(context);
     }
 
-    const source = this.sanitizeIdentifier(config.sourceColumn);
+    const sourceColumn = this.sanitizeIdentifier(config.sourceColumn);
+    const sourceRef = connection
+      ? this.sanitizeIdentifier(connection.sourceNodeId)
+      : 'source_table';
+
+    // Collect other columns to keep (everything except the JSON source column)
+    const otherColumns: string[] = [];
+    if (upstreamSchema && upstreamSchema.length > 0) {
+      otherColumns.push(...upstreamSchema
+        .filter(col => col.name !== config.sourceColumn)
+        .map(col => this.sanitizeIdentifier(col.name))
+      );
+    } else {
+      // Fallback to node's output schema
+      const outputFields = node.metadata?.schemas?.output?.fields || [];
+      otherColumns.push(...outputFields
+        .filter((f: any) => f.name !== config.sourceColumn)
+        .map((f: any) => this.sanitizeIdentifier(f.name))
+      );
+    }
+
+    // Build JSON extraction expressions
     const expressions = config.mappings.map(m => {
-      // Use appropriate JSON operator based on type (jsonb recommended)
       const op = config.jsonType === 'jsonb' ? '->>' : '->>';
-      let expr = `${source}${op}'${m.jsonPath}'`; // simplified path expression
+      let expr = `${sourceColumn}${op}'${m.jsonPath}'`;
       if (m.dataType) {
         expr = `(${expr})::${m.dataType.toLowerCase()}`;
       }
       return `${expr} AS ${this.sanitizeIdentifier(m.targetColumn)}`;
     });
 
-    // Include all output fields except the source JSON column
-    const otherColumns = node.metadata?.schemas?.output?.fields
-      .filter(c => c.name !== config.sourceColumn)
-      .map(c => this.sanitizeIdentifier(c.name)) || [];
-
     const selectList = [...otherColumns, ...expressions].join(', ');
-    const sql = `SELECT ${selectList} FROM source_table`;
+    const sql = `SELECT ${selectList} FROM ${sourceRef}`;
 
     return {
       sql,
-      dependencies: ['source_table'],
+      dependencies: connection ? [connection.sourceNodeId] : [],
       parameters: new Map(),
       errors: [],
       warnings: [],
@@ -51,33 +65,55 @@ export class ExtractJSONSQLGenerator extends BaseSQLGenerator {
     };
   }
 
-  // Required abstract method implementations (return empty fragments)
-  protected generateJoinConditions(_context: SQLGenerationContext): GeneratedSQLFragment {
-    return this.emptyFragment();
+  // ========== Configuration Extraction ==========
+  private extractConfig(node: UnifiedCanvasNode): JSONExtractConfig | null {
+    // 1. Legacy metadata.extractJSONConfig
+    const legacy = (node.metadata as any)?.extractJSONConfig;
+    if (legacy) {
+      return this.normalizeConfig(legacy);
+    }
+
+    // 2. Unified configuration
+    const configuration = node.metadata?.configuration;
+    if (configuration && typeof configuration === 'object' && 'config' in configuration) {
+      const raw = (configuration as any).config;
+      if (raw) {
+        return this.normalizeConfig(raw);
+      }
+    }
+
+    return null;
   }
 
-  protected generateWhereClause(_context: SQLGenerationContext): GeneratedSQLFragment {
-    return this.emptyFragment();
-  }
+  private normalizeConfig(raw: any): JSONExtractConfig | null {
+    if (typeof raw.sourceColumn !== 'string' || !Array.isArray(raw.mappings)) {
+      return null;
+    }
+    const mappings = raw.mappings.filter((m: any) =>
+      m && typeof m.targetColumn === 'string' && typeof m.jsonPath === 'string'
+    );
+    if (mappings.length === 0) return null;
 
-  protected generateHavingClause(_context: SQLGenerationContext): GeneratedSQLFragment {
-    return this.emptyFragment();
-  }
-
-  protected generateOrderByClause(_context: SQLGenerationContext): GeneratedSQLFragment {
-    return this.emptyFragment();
-  }
-
-  protected generateGroupByClause(_context: SQLGenerationContext): GeneratedSQLFragment {
-    return this.emptyFragment();
-  }
-
-  // Helper: produce a fallback SELECT when configuration is missing/invalid
-  private fallbackSelect(_node: UnifiedCanvasNode): GeneratedSQLFragment {
-    const warning = 'Missing or invalid JSON extraction configuration; using SELECT * FROM source_table';
     return {
-      sql: 'SELECT * FROM source_table',
-      dependencies: ['source_table'],
+      sourceColumn: raw.sourceColumn,
+      jsonType: raw.jsonType === 'jsonb' ? 'jsonb' : 'json',
+      mappings: mappings.map((m: any) => ({
+        targetColumn: m.targetColumn,
+        jsonPath: m.jsonPath,
+        dataType: m.dataType,
+      })),
+    };
+  }
+
+  // ========== Fallback ==========
+  private fallbackSelect(context: SQLGenerationContext): GeneratedSQLFragment {
+    const sourceRef = context.connection
+      ? this.sanitizeIdentifier(context.connection.sourceNodeId)
+      : 'source_table';
+    const warning = 'Missing or invalid JSON extraction configuration; using SELECT *';
+    return {
+      sql: `SELECT * FROM ${sourceRef}`,
+      dependencies: context.connection ? [context.connection.sourceNodeId] : [],
       parameters: new Map(),
       errors: [],
       warnings: [warning],
@@ -89,66 +125,10 @@ export class ExtractJSONSQLGenerator extends BaseSQLGenerator {
     };
   }
 
-  // Helper: produce an empty fragment for unused clauses
-  private emptyFragment(): GeneratedSQLFragment {
-    return {
-      sql: '',
-      dependencies: [],
-      parameters: new Map(),
-      errors: [],
-      warnings: [],
-      metadata: {
-        generatedAt: new Date().toISOString(),
-        fragmentType: 'empty',
-        lineCount: 0,
-      },
-    };
-  }
-
-  // Safely extract and validate the JSON extract configuration without relying on type discriminators
-  private extractConfig(node: UnifiedCanvasNode): JSONExtractConfig | null {
-    const configuration = node.metadata?.configuration;
-    // Check if configuration exists and has a 'config' property that is an object
-    if (!configuration || typeof configuration !== 'object' || !('config' in configuration)) {
-      return null;
-    }
-
-    const rawConfig = (configuration as any).config as Partial<JSONExtractConfig> | undefined;
-    if (!rawConfig || typeof rawConfig !== 'object') {
-      return null;
-    }
-
-    // Validate required fields
-    if (typeof rawConfig.sourceColumn !== 'string' || !rawConfig.sourceColumn) {
-      return null;
-    }
-    if (!Array.isArray(rawConfig.mappings) || rawConfig.mappings.length === 0) {
-      return null;
-    }
-    // Optionally validate jsonType
-    if (rawConfig.jsonType !== 'json' && rawConfig.jsonType !== 'jsonb') {
-      // Default to 'jsonb' if missing or invalid? Or treat as invalid.
-      // Here we treat missing/invalid as null, but you could default.
-      return null;
-    }
-
-    // Validate each mapping (basic check)
-    const mappings = rawConfig.mappings.filter(m => 
-      m && typeof m.targetColumn === 'string' && typeof m.jsonPath === 'string'
-    );
-    if (mappings.length === 0) {
-      return null;
-    }
-
-    // Construct and return a valid config object
-    return {
-      sourceColumn: rawConfig.sourceColumn,
-      jsonType: rawConfig.jsonType,
-      mappings: mappings.map(m => ({
-        targetColumn: m.targetColumn,
-        jsonPath: m.jsonPath,
-        dataType: m.dataType, // optional
-      })),
-    };
-  }
+  // ========== Required Abstract Methods (Unused) ==========
+  protected generateJoinConditions(): GeneratedSQLFragment { return this.emptyFragment(); }
+  protected generateWhereClause(): GeneratedSQLFragment { return this.emptyFragment(); }
+  protected generateHavingClause(): GeneratedSQLFragment { return this.emptyFragment(); }
+  protected generateOrderByClause(): GeneratedSQLFragment { return this.emptyFragment(); }
+  protected generateGroupByClause(): GeneratedSQLFragment { return this.emptyFragment(); }
 }

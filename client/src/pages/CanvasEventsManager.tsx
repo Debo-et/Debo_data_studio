@@ -1,16 +1,113 @@
-// src/components/canvas/CanvasEventsManager.tsx - FIXED VERSION WITH WORKING DRAG-AND-DROP
+// src/components/canvas/CanvasEventsManager.tsx - FIXED VERSION WITH INLINE UTILITIES
 import { useCallback, Dispatch, SetStateAction } from 'react';
 import { Node, Edge, Connection, OnConnect, Viewport, useReactFlow } from 'reactflow';
 import { useAppDispatch } from '../hooks';
-
-import {
-  canvasUtils,
-  CanvasNodeType,
-  EnhancedCanvasConnection,
-  ComponentPort
-} from './CanvasUtils';
-
 import { ValidationLevel } from '../validation';
+
+// ==================== INLINE TYPES AND UTILITIES (formerly from CanvasUtils) ====================
+
+/**
+ * Type for a component port (input/output handle)
+ */
+export interface ComponentPort {
+  id: string;
+  type: 'input' | 'output';
+  side: 'left' | 'right';
+  position: number;
+  label: string;
+  maxConnections: number;
+  required: boolean;
+  dataType: string;
+}
+
+/**
+ * Type for a canvas node before conversion to React Flow node
+ */
+export interface CanvasNodeType {
+  id: string;
+  name: string;
+  type: string;
+  nodeType: string;
+  componentType: string;
+  componentCategory: 'input' | 'output' | 'processing';
+  technology: string;
+  position: { x: number; y: number };
+  size: { width: number; height: number };
+  connectionPorts: ComponentPort[];
+  metadata: Record<string, any>;
+  status: 'active' | 'inactive' | 'error' | 'warning';
+  draggable: boolean;
+  droppable: boolean;
+  dragType: string;
+}
+
+/**
+ * Enhanced connection type (also defined in CanvasContext; redefined here for self-containment)
+ */
+export interface EnhancedCanvasConnection {
+  id: string;
+  sourceNodeId: string;
+  sourcePortId: string;
+  targetNodeId: string;
+  targetPortId: string;
+  status: 'valid' | 'invalid' | 'pending';
+  metadata?: Record<string, any>;
+}
+
+/**
+ * Utility functions used by canvas event handlers
+ */
+const canvasUtils = {
+  /**
+   * Generate a unique snake_case name for a new node
+   */
+  generateSnakeCaseName: (
+    baseName: string,
+    existingNodes: CanvasNodeType[],
+    _options?: { baseName?: string; metadata?: any }
+  ): string => {
+    const prefix = baseName.replace(/\s+/g, '_').toLowerCase();
+    const existingNames = existingNodes.map((n) => n.name);
+    
+    let counter = 1;
+    let candidate = prefix;
+    
+    while (existingNames.includes(candidate)) {
+      candidate = `${prefix}_${counter}`;
+      counter++;
+    }
+    
+    return candidate;
+  },
+
+  /**
+   * Extract validation messages for a specific element (node or edge)
+   */
+  getValidationMessages: (
+    validationSummary: any,
+    elementId: string,
+    type: 'node' | 'edge'
+  ): { errors: string[]; warnings: string[] } => {
+    if (!validationSummary || !validationSummary.results) {
+      return { errors: [], warnings: [] };
+    }
+
+    const results = validationSummary.results.filter(
+      (r: any) => r.elementId === elementId && r.elementType === type
+    );
+
+    return {
+      errors: results
+        .filter((r: any) => r.level === 'ERROR' || r.level === 0)
+        .map((r: any) => r.message),
+      warnings: results
+        .filter((r: any) => r.level === 'WARNING' || r.level === 1)
+        .map((r: any) => r.message),
+    };
+  },
+};
+
+// ==================== EVENT HANDLERS PROPS AND HOOK ====================
 
 export interface CanvasEventHandlers {
   onDragOver: (event: React.DragEvent) => void;
@@ -32,7 +129,6 @@ export interface CanvasEventHandlers {
   handleCancelComponent: () => void;
   validateAllConnections: () => void;
   fixValidationIssues: () => void;
-  // React Flow specific handlers
   onReactFlowDragOver: (event: React.DragEvent) => void;
   onReactFlowDragLeave: (event: React.DragEvent) => void;
   onReactFlowDrop: (event: React.DragEvent) => void;
@@ -65,7 +161,6 @@ const generatePortsForType = (
 ): ComponentPort[] => {
   const ports: ComponentPort[] = [];
   
-  // Determine if component is a source (input), sink (output), or processor
   const isSource = category === 'input';
   const isSink = category === 'output';
   const isProcessor = category === 'processing' || 
@@ -73,7 +168,6 @@ const generatePortsForType = (
                      componentType.includes('tJoin') ||
                      componentType.includes('tFilter');
   
-  // Input ports (left side)
   if (isProcessor || isSink) {
     ports.push({
       id: `input-${Date.now()}-${Math.random().toString(36).substr(2, 4)}`,
@@ -81,13 +175,12 @@ const generatePortsForType = (
       side: 'left',
       position: 50,
       label: 'In',
-      maxConnections: isProcessor ? 999 : 5, // Processors can have multiple inputs
+      maxConnections: isProcessor ? 999 : 5,
       required: isSink,
       dataType: 'any'
     });
   }
   
-  // Output ports (right side)
   if (isProcessor || isSource) {
     ports.push({
       id: `output-${Date.now()}-${Math.random().toString(36).substr(2, 4)}`,
@@ -95,15 +188,13 @@ const generatePortsForType = (
       side: 'right',
       position: 50,
       label: 'Out',
-      maxConnections: isProcessor ? 999 : 5, // Processors can have multiple outputs
+      maxConnections: isProcessor ? 999 : 5,
       required: isSource,
       dataType: 'any'
     });
   }
   
-  // Special ports for certain components
   if (componentType.includes('tJoin')) {
-    // Join has two inputs
     ports.push({
       id: `input-2-${Date.now()}-${Math.random().toString(36).substr(2, 4)}`,
       type: 'input',
@@ -117,7 +208,6 @@ const generatePortsForType = (
   }
   
   if (componentType.includes('tReplicate')) {
-    // Replicate has multiple outputs
     ports.push({
       id: `output-2-${Date.now()}-${Math.random().toString(36).substr(2, 4)}`,
       type: 'output',
@@ -156,115 +246,105 @@ export const useCanvasEvents = ({
 }: UseCanvasEventsProps): CanvasEventHandlers => {
   const { screenToFlowPosition } = useReactFlow();
 
-  // Update the createNodeFromDragData function in CanvasEventsManager.tsx
-
-const createNodeFromDragData = useCallback((
-  dragData: any,
-  flowPosition: { x: number; y: number },
-  category?: 'input' | 'output' | 'processing'
-): CanvasNodeType | null => {
-  try {
-    console.log('🛠️ Creating node from drag data:', dragData);
-    
-    // Extract component info - handle different data structures with null checks
-    let componentType = dragData?.componentType || 
-                       dragData?.type || 
-                       dragData?.component?.type || 
-                       dragData?.nodeType || 
-                       dragData?.name || 
+  const createNodeFromDragData = useCallback((
+    dragData: any,
+    flowPosition: { x: number; y: number },
+    category?: 'input' | 'output' | 'processing'
+  ): CanvasNodeType | null => {
+    try {
+      console.log('🛠️ Creating node from drag data:', dragData);
+      
+      let componentType = dragData?.componentType || 
+                         dragData?.type || 
+                         dragData?.component?.type || 
+                         dragData?.nodeType || 
+                         dragData?.name || 
+                         'tFilterRow';
+      
+      if (componentType === 'reactflow' || componentType === 'component') {
+        componentType = dragData?.component?.id || 
+                       dragData?.component?.type ||
+                       dragData?.nodeType ||
+                       dragData?.name?.replace(/^t/, 't') || 
                        'tFilterRow';
-    
-    // If type is 'reactflow' or 'component', look deeper
-    if (componentType === 'reactflow' || componentType === 'component') {
-      componentType = dragData?.component?.id || 
-                     dragData?.component?.type ||
-                     dragData?.nodeType ||
-                     dragData?.name?.replace(/^t/, 't') || 
-                     'tFilterRow';
-    }
-    
-    // Ensure componentType is defined before checking startsWith
-    if (!componentType || typeof componentType !== 'string') {
-      console.warn('⚠️ Invalid component type:', componentType, 'defaulting to tFilterRow');
-      componentType = 'tFilterRow';
-    }
-    
-    // Ensure it starts with 't' if it's a component type
-    if (componentType && !componentType.startsWith('t') && componentType.length > 1) {
-      componentType = 't' + componentType.charAt(0).toUpperCase() + componentType.slice(1);
-    }
-    
-    const displayName = dragData?.displayName || 
-                       dragData?.name || 
-                       dragData?.component?.name || 
-                       componentType;
-    
-    // Determine category
-    let nodeCategory = category || 'processing';
-    if (!category) {
-      if (componentType.includes('input') || componentType.includes('source')) {
-        nodeCategory = 'input';
-      } else if (componentType.includes('output') || componentType.includes('sink')) {
-        nodeCategory = 'output';
-      } else {
-        nodeCategory = 'processing';
       }
+      
+      if (!componentType || typeof componentType !== 'string') {
+        console.warn('⚠️ Invalid component type:', componentType, 'defaulting to tFilterRow');
+        componentType = 'tFilterRow';
+      }
+      
+      if (componentType && !componentType.startsWith('t') && componentType.length > 1) {
+        componentType = 't' + componentType.charAt(0).toUpperCase() + componentType.slice(1);
+      }
+      
+      const displayName = dragData?.displayName || 
+                         dragData?.name || 
+                         dragData?.component?.name || 
+                         componentType;
+      
+      let nodeCategory = category || 'processing';
+      if (!category) {
+        if (componentType.includes('input') || componentType.includes('source')) {
+          nodeCategory = 'input';
+        } else if (componentType.includes('output') || componentType.includes('sink')) {
+          nodeCategory = 'output';
+        } else {
+          nodeCategory = 'processing';
+        }
+      }
+      
+      const existingNodes = nodes.map(n => n.data?.nodeData).filter(Boolean) as CanvasNodeType[];
+      const baseName = componentType ? componentType.replace(/^t/, '').toLowerCase() : 'component';
+      const uniqueName = canvasUtils.generateSnakeCaseName(baseName, existingNodes, {
+        baseName: baseName,
+        metadata: dragData?.metadata
+      });
+      
+      const connectionPorts = generatePortsForType(componentType, nodeCategory);
+      
+      const newNode: CanvasNodeType = {
+        id: `node-${Date.now()}-${Math.random().toString(36).substr(2, 9)}`,
+        name: uniqueName,
+        type: componentType,
+        nodeType: componentType,
+        componentType: componentType,
+        componentCategory: nodeCategory,
+        technology: componentType,
+        position: flowPosition,
+        size: { width: 146, height: 93 },
+        connectionPorts,
+        metadata: {
+          ...dragData?.metadata,
+          dragSource: dragData?.source || dragData?.metadata?.source || 'component-palette',
+          originalDragData: dragData,
+          componentData: dragData?.component || dragData?.nodeData || dragData,
+          description: dragData?.description || dragData?.metadata?.description || `A ${displayName} component`,
+          createdAt: new Date().toISOString(),
+          version: '1.0'
+        },
+        status: 'active',
+        draggable: true,
+        droppable: true,
+        dragType: 'node'
+      };
+      
+      console.log('✅ Node created successfully:', {
+        id: newNode.id,
+        name: newNode.name,
+        type: newNode.type,
+        category: newNode.componentCategory,
+        position: flowPosition,
+        ports: connectionPorts.length
+      });
+      
+      return newNode;
+    } catch (error) {
+      console.error('❌ Failed to create node from drag data:', error);
+      console.error('Drag data that failed:', dragData);
+      return null;
     }
-    
-    // Generate unique node name
-    const existingNodes = nodes.map(n => n.data?.nodeData).filter(Boolean) as CanvasNodeType[];
-    const baseName = componentType ? componentType.replace(/^t/, '').toLowerCase() : 'component';
-    const uniqueName = canvasUtils.generateSnakeCaseName(baseName, existingNodes, {
-      baseName: baseName,
-      metadata: dragData?.metadata
-    });
-    
-    // Generate ports based on type and category
-    const connectionPorts = generatePortsForType(componentType, nodeCategory);
-    
-    // Create the node
-    const newNode: CanvasNodeType = {
-      id: `node-${Date.now()}-${Math.random().toString(36).substr(2, 9)}`,
-      name: uniqueName,
-      type: componentType,
-      nodeType: componentType,
-      componentType: componentType,
-      componentCategory: nodeCategory,
-      technology: componentType,
-      position: flowPosition,
-      size: { width: 146, height: 93 },
-      connectionPorts,
-      metadata: {
-        ...dragData?.metadata,
-        dragSource: dragData?.source || dragData?.metadata?.source || 'component-palette',
-        originalDragData: dragData,
-        componentData: dragData?.component || dragData?.nodeData || dragData,
-        description: dragData?.description || dragData?.metadata?.description || `A ${displayName} component`,
-        createdAt: new Date().toISOString(),
-        version: '1.0'
-      },
-      status: 'active',
-      draggable: true,
-      droppable: true,
-      dragType: 'node'
-    };
-    
-    console.log('✅ Node created successfully:', {
-      id: newNode.id,
-      name: newNode.name,
-      type: newNode.type,
-      category: newNode.componentCategory,
-      position: flowPosition,
-      ports: connectionPorts.length
-    });
-    
-    return newNode;
-  } catch (error) {
-    console.error('❌ Failed to create node from drag data:', error);
-    console.error('Drag data that failed:', dragData);
-    return null;
-  }
-}, [nodes]);
+  }, [nodes]);
 
   // React Flow Drag and Drop Handlers
   const onReactFlowDragOver = useCallback((event: React.DragEvent) => {
@@ -285,7 +365,6 @@ const createNodeFromDragData = useCallback((
     console.log('Event position:', { x: event.clientX, y: event.clientY });
     console.log('DataTransfer types:', Array.from(event.dataTransfer.types));
     
-    // Get the node type from React Flow's expected data format
     const reactFlowData = event.dataTransfer.getData('application/reactflow');
     let nodeType = '';
     let dragData: any = null;
@@ -300,14 +379,12 @@ const createNodeFromDragData = useCallback((
       }
     }
     
-    // Fallback to alternative data formats
     if (!nodeType) {
       nodeType = event.dataTransfer.getData('reactflow/node-type') || 
                  event.dataTransfer.getData('text/plain') || 
                  'tFilterRow';
     }
     
-    // If we have text/plain data but no proper dragData, create a simple one
     if (!dragData && nodeType) {
       dragData = {
         type: 'reactflow',
@@ -325,7 +402,6 @@ const createNodeFromDragData = useCallback((
       };
     }
     
-    // Check if we need to show the component selection popup
     const sidebarPopupMarker = event.dataTransfer.getData('sidebar-with-popup');
     if (sidebarPopupMarker === 'true' && dragData) {
       console.log('🔄 Component requires selection popup');
@@ -352,7 +428,6 @@ const createNodeFromDragData = useCallback((
       return;
     }
     
-    // Process direct node creation
     if (nodeType && dragData) {
       console.log('🎯 Creating node from React Flow drop:', nodeType);
       
@@ -361,15 +436,12 @@ const createNodeFromDragData = useCallback((
         y: event.clientY
       });
       
-      // Create the node
       const newNode = createNodeFromDragData(dragData, targetFlowPosition);
       
       if (newNode) {
-        // Convert to React Flow node and add to canvas
         const reactFlowNode = convertToReactFlowNodeWithMetadata(newNode);
         setNodes((nds) => [...nds, reactFlowNode]);
         
-        // Visual feedback
         setTimeout(() => {
           const nodeElement = document.querySelector(`[data-node-id="${newNode.id}"]`);
           if (nodeElement) {
@@ -380,12 +452,10 @@ const createNodeFromDragData = useCallback((
           }
         }, 100);
         
-        // Normalize names after a short delay
         setTimeout(() => {
           normalizeExistingNodeNames();
         }, 500);
         
-        // Update job if needed
         if (onJobUpdate) {
           onJobUpdate({
             nodes: [...nodes, reactFlowNode],
@@ -405,19 +475,17 @@ const createNodeFromDragData = useCallback((
     event.dataTransfer.clearData();
   }, [screenToFlowPosition, createNodeFromDragData, convertToReactFlowNodeWithMetadata, setNodes, normalizeExistingNodeNames, nodes, onJobUpdate, setState]);
 
-  // Legacy Drag and Drop Events (for compatibility)
+  // Legacy Drag and Drop Events
   const onDragOver = useCallback((event: React.DragEvent) => {
     event.preventDefault();
     event.stopPropagation();
     event.dataTransfer.dropEffect = 'copy';
-    
     setState((prev: any) => ({ ...prev, isDragOver: true }));
   }, [setState]);
 
   const onDragLeave = useCallback((event: React.DragEvent) => {
     event.preventDefault();
     event.stopPropagation();
-    
     setState((prev: any) => ({ ...prev, isDragOver: false }));
   }, [setState]);
 
@@ -437,7 +505,6 @@ const createNodeFromDragData = useCallback((
     
     let dragData = null;
     
-    // Log all available data for debugging
     Array.from(event.dataTransfer.types).forEach(type => {
       try {
         const data = event.dataTransfer.getData(type);
@@ -447,7 +514,6 @@ const createNodeFromDragData = useCallback((
       }
     });
     
-    // Try to get data from React Flow format first
     const reactFlowData = event.dataTransfer.getData('application/reactflow');
     if (reactFlowData) {
       try {
@@ -458,7 +524,6 @@ const createNodeFromDragData = useCallback((
       }
     }
     
-    // If no React Flow data, try JSON
     if (!dragData) {
       const jsonData = event.dataTransfer.getData('application/json');
       if (jsonData) {
@@ -471,16 +536,13 @@ const createNodeFromDragData = useCallback((
       }
     }
     
-    // If still no data, try text/plain
     if (!dragData) {
       const textData = event.dataTransfer.getData('text/plain');
       if (textData) {
         try {
-          // Try to parse as JSON first
           dragData = JSON.parse(textData);
           console.log('📤 Parsed text as JSON:', dragData);
         } catch {
-          // If not JSON, create a simple component from text
           dragData = { 
             type: 'component',
             name: textData,
@@ -494,7 +556,6 @@ const createNodeFromDragData = useCallback((
       }
     }
     
-    // Check for component-type marker
     const componentTypeMarker = event.dataTransfer.getData('component-type');
     if (componentTypeMarker && !dragData?.componentType) {
       dragData = dragData || {};
@@ -507,7 +568,6 @@ const createNodeFromDragData = useCallback((
       return;
     }
     
-    // Check if we need to show the component selection popup
     const sidebarPopupMarker = event.dataTransfer.getData('sidebar-with-popup');
     if (sidebarPopupMarker === 'true') {
       console.log('🔄 Component requires selection popup');
@@ -515,7 +575,6 @@ const createNodeFromDragData = useCallback((
       let canonicalType = dragData.componentType || dragData.type || 'unknown';
       let displayName = dragData.displayName || dragData.name || 'Component';
       
-      // Convert screen coordinates to flow coordinates if not provided
       const targetFlowPosition = flowPosition || screenToFlowPosition({
         x: event.clientX,
         y: event.clientY
@@ -527,7 +586,7 @@ const createNodeFromDragData = useCallback((
         ...prev,
         pendingDrop: {
           data: dragData,
-          position: targetFlowPosition, // Store in flow coordinates
+          position: targetFlowPosition,
           defaultName: displayName,
           metadata: dragData.metadata || 
                    dragData.nodeData?.metadata || 
@@ -541,10 +600,8 @@ const createNodeFromDragData = useCallback((
       return;
     }
     
-    // Process direct node creation (no popup needed)
     console.log('🎯 Creating node directly from drag data:', dragData);
     
-    // Convert screen coordinates to flow coordinates if not provided
     const targetFlowPosition = flowPosition || screenToFlowPosition({
       x: event.clientX,
       y: event.clientY
@@ -552,18 +609,14 @@ const createNodeFromDragData = useCallback((
     
     console.log('🎯 Target flow position:', targetFlowPosition);
     
-    // Create the node
     const newNode = createNodeFromDragData(dragData, targetFlowPosition);
     
     if (newNode) {
-      // Convert to React Flow node and add to canvas
       const reactFlowNode = convertToReactFlowNodeWithMetadata(newNode);
       setNodes((nds) => [...nds, reactFlowNode]);
       
-      // Clear drag data
       event.dataTransfer.clearData();
       
-      // Visual feedback
       setTimeout(() => {
         const nodeElement = document.querySelector(`[data-node-id="${newNode.id}"]`);
         if (nodeElement) {
@@ -574,12 +627,10 @@ const createNodeFromDragData = useCallback((
         }
       }, 100);
       
-      // Normalize names after a short delay
       setTimeout(() => {
         normalizeExistingNodeNames();
       }, 500);
       
-      // Update job if needed
       if (onJobUpdate) {
         onJobUpdate({
           nodes: [...nodes, reactFlowNode],
@@ -587,7 +638,6 @@ const createNodeFromDragData = useCallback((
         });
       }
       
-      // Log success
       console.log('✅ Node added to canvas:', {
         id: newNode.id,
         name: newNode.name,
@@ -599,7 +649,7 @@ const createNodeFromDragData = useCallback((
     }
   }, [screenToFlowPosition, createNodeFromDragData, convertToReactFlowNodeWithMetadata, setNodes, normalizeExistingNodeNames, nodes, onJobUpdate, setState]);
 
-  // React Flow Connection Event
+  // Connection Event
   const onConnect: OnConnect = useCallback(
     (connection: Connection) => {
       if (!connection.source || !connection.target) return;
@@ -626,7 +676,6 @@ const createNodeFromDragData = useCallback((
         connections: [...prev.connections, newConnection]
       }));
       
-      // Add the new edge to React Flow
       const newEdge = convertToReactFlowEdge(newConnection);
       onEdgesChange([{ type: 'add', item: newEdge }]);
       
@@ -637,7 +686,6 @@ const createNodeFromDragData = useCallback((
         });
       }
       
-      // Visual feedback
       setTimeout(() => {
         const edgeElement = document.querySelector(`[data-edge-id="${newConnection.id}"]`);
         if (edgeElement) {
@@ -707,13 +755,12 @@ const createNodeFromDragData = useCallback((
   }, [setState]);
 
   const onNodeDrag = useCallback((_event: React.MouseEvent) => {
-    // Intentionally empty - we could update connection positions here if needed
+    // intentionally empty
   }, []);
 
   const onNodeDragStop = useCallback((_event: React.MouseEvent, node: Node<any>) => {
     console.log('🎯 Node drag stopped:', node.id, 'at', node.position);
     
-    // Update the node position in our internal state
     setNodes(nds => nds.map(n => {
       if (n.id === node.id) {
         return {
@@ -754,7 +801,6 @@ const createNodeFromDragData = useCallback((
   const handleEdgeClick = useCallback((event: React.MouseEvent, edge: Edge) => {
     event.stopPropagation();
     
-    // Select the edge
     setState((prev: any) => ({ ...prev, selectedEdgeId: edge.id }));
     
     if (state.validationSummary) {
@@ -818,7 +864,6 @@ const createNodeFromDragData = useCallback((
       }
     }));
     
-    // Also remove from React Flow edges
     onEdgesChange([{ type: 'remove', id: connectionId }]);
     
     console.log('🗑️ Connection deleted:', connectionId);
@@ -860,22 +905,18 @@ const createNodeFromDragData = useCallback((
 
     console.log('🎯 Creating component from pending drop:', state.pendingDrop);
     
-    // Create the node from pending drop data
     const newNode = createNodeFromDragData(state.pendingDrop.data, state.pendingDrop.position, category);
     
     if (newNode) {
-      // Update the node name to reflect the selected category
       const updatedNode = {
         ...newNode,
         name: `${newNode.name}_${category}`,
         componentCategory: category
       };
       
-      // Convert to React Flow node and add to canvas
       const reactFlowNode = convertToReactFlowNodeWithMetadata(updatedNode);
       setNodes((nds) => [...nds, reactFlowNode]);
       
-      // Visual feedback
       setTimeout(() => {
         const nodeElement = document.querySelector(`[data-node-id="${updatedNode.id}"]`);
         if (nodeElement) {
@@ -886,12 +927,10 @@ const createNodeFromDragData = useCallback((
         }
       }, 100);
       
-      // Normalize names after a short delay
       setTimeout(() => {
         normalizeExistingNodeNames();
       }, 500);
       
-      // Update job if needed
       if (onJobUpdate) {
         onJobUpdate({
           nodes: [...nodes, reactFlowNode],
@@ -900,7 +939,6 @@ const createNodeFromDragData = useCallback((
       }
     }
     
-    // Clear pending drop state
     setState((prev: any) => ({ ...prev, pendingDrop: null }));
   }, [state.pendingDrop, createNodeFromDragData, convertToReactFlowNodeWithMetadata, setNodes, normalizeExistingNodeNames, nodes, onJobUpdate, setState]);
 
@@ -940,7 +978,6 @@ const createNodeFromDragData = useCallback((
       return;
     }
     
-    // Auto-fix simple issues
     let fixedCount = 0;
     
     issues.forEach((issue: any) => {
@@ -977,7 +1014,6 @@ const createNodeFromDragData = useCallback((
     handleCancelComponent,
     validateAllConnections,
     fixValidationIssues,
-    // React Flow specific handlers
     onReactFlowDragOver,
     onReactFlowDragLeave,
     onReactFlowDrop

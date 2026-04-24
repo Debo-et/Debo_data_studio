@@ -170,11 +170,20 @@ export function buildMapNode(
 export function buildJoinNode(
   id: string,
   name: string,
-  joinType: 'INNER' | 'LEFT' | 'RIGHT' = 'INNER',
-  condition: string
+  joinType: 'INNER' | 'LEFT' | 'RIGHT' | 'FULL' | 'CROSS' = 'INNER',
+  condition: string,
+  outputColumns?: string[]
 ): CanvasNode {
+  const joinConfig: any = { type: joinType, condition };
+  
+  if (outputColumns && outputColumns.length > 0) {
+    joinConfig.outputSchema = {
+      fields: outputColumns.map(col => ({ name: col })),
+    };
+  }
+
   return buildUnifiedNode(id, name, NodeType.JOIN, {
-    joinConfig: { type: joinType, condition },
+    joinConfig,
   });
 }
 
@@ -210,9 +219,18 @@ export function buildEdge(
   id: string,
   sourceId: string,
   targetId: string,
-  schemaMappings?: Array<{ sourceColumn: string; targetColumn: string; isRequired?: boolean }>
+  options?: {
+    schemaMappings?: Array<{ sourceColumn: string; targetColumn: string; isRequired?: boolean }>;
+    sourcePort?: string;
+    targetPort?: string;
+    port?: string; // Alias for targetPort to support existing tests
+  }
 ): CanvasConnection {
-  const mappings: SchemaMapping[] = (schemaMappings || []).map(m => ({
+  const schemaMappings = options?.schemaMappings || [];
+  const sourcePort = options?.sourcePort || 'out';
+  const targetPort = options?.targetPort || options?.port || 'in';
+
+  const mappings: SchemaMapping[] = schemaMappings.map(m => ({
     sourceColumn: m.sourceColumn,
     targetColumn: m.targetColumn,
     isRequired: m.isRequired ?? true,
@@ -222,8 +240,8 @@ export function buildEdge(
     id,
     sourceNodeId: sourceId,
     targetNodeId: targetId,
-    sourcePortId: 'out',
-    targetPortId: 'in',
+    sourcePortId: sourcePort,
+    targetPortId: targetPort,
     status: ConnectionStatus.VALID,
     dataFlow: {
       schemaMappings: mappings,

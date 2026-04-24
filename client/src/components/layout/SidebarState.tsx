@@ -398,6 +398,7 @@ export const getInitialDeletionHistory = (): DeletionHistoryItem[] => {
 // ==================== STATE VALIDATORS ====================
 
 export const isNodeDeletable = (node: RepositoryNode, currentJob?: any): boolean => {
+  // Categories (root-level nodes) are system items and cannot be deleted
   if (node.type === 'category') {
     return false;
   }
@@ -407,18 +408,17 @@ export const isNodeDeletable = (node: RepositoryNode, currentJob?: any): boolean
     'sql-templates', 'business-models', 'documentation', 'recycle-bin'
   ];
   
+  // Block deletion of the system folders themselves (not their children)
   if (systemFolders.includes(node.id)) {
     return false;
   }
   
-  if (node.parentId && systemFolders.includes(node.parentId)) {
-    return false;
-  }
-  
+  // Block deletion of the currently active job to avoid breaking the UI
   if (node.type === 'job' && currentJob?.id === node.id.replace('job-', '')) {
     return false;
   }
   
+  // All other items (jobs, canvases, metadata entries, etc.) are deletable
   return true;
 };
 

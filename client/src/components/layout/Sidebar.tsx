@@ -1,5 +1,6 @@
 import React, { useState, useCallback, useEffect, useRef, useContext } from 'react';
 import { toast } from 'react-toastify';
+// @ts-ignore
 import 'react-toastify/dist/ReactToastify.css';
 
 // Import modular components
@@ -35,7 +36,7 @@ import {
 } from '../../types/types';
 
 // Import icons
-import { Plus, Layers, RefreshCw } from 'lucide-react';
+import { Plus, Layers, RefreshCw, Trash2 } from 'lucide-react';
 import * as XLSX from 'xlsx';
 
 // Import Canvas Design Service and Hook
@@ -46,7 +47,6 @@ import { COMPONENT_REGISTRY, getCategoryColor } from '@/pages/ComponentRegistry'
 // ==================== DATABASE CONTEXT & FOREIGN TABLE HELPERS ====================
 import { DatabaseContext } from '../../App';
 import { DatabaseApiService } from '../../services/database-api.service';
-import { ColumnDefinition } from '../../api/postgres-foreign-table';
 
 // ==================== REVERSE METADATA IMPORTS ====================
 import {
@@ -83,7 +83,7 @@ interface EnhancedRepositorySidebarProps extends Omit<State.RepositorySidebarPro
   activeCanvasDesignId?: string | null;
   activeCanvasId?: string | null;
   // NEW: Callback to notify App to load a canvas by ID
-  onCanvasSelect?: (canvasId: string) => void;
+  onCanvasSelect?: (canvasId: string | null) => void;
 }
 
 // ============================================================================
@@ -321,7 +321,9 @@ const RepositorySidebar: React.FC<EnhancedRepositorySidebarProps> = ({
   onCanvasDesignDelete,
   onCanvasDesignSwitch,
   activeCanvasDesignId,
-  onCanvasSelect, // NEW
+  onCanvasSelect, 
+ activeCanvasId,        // ← add this
+// NEW
 }) => {
   // ==================== DATABASE CONTEXT ====================
   const databaseContext = useContext(DatabaseContext);
@@ -445,17 +447,19 @@ const RepositorySidebar: React.FC<EnhancedRepositorySidebarProps> = ({
   // Sidebar.tsx – add state variables
 const [, setCanvasLoading] = useState(false);
 const [, setCanvasError] = useState<string | null>(null);
-const [isDeletingForeignTable, setIsDeletingForeignTable] = useState(false);
+const [, setIsDeletingForeignTable] = useState(false);
 const [isDeleting, setIsDeleting] = useState(false);
+
+// Inside Sidebar.tsx, replace the existing useEffect that loads canvases with this version.
 
 useEffect(() => {
   if (!isConnected) return;
 
-  const loadCanvases = async () => {
+  const loadCanvasesAsJobs = async () => {
     setCanvasLoading(true);
     setCanvasError(null);
     try {
-      console.log('🎨 [Sidebar] Loading canvases from database...');
+      console.log('🎨 [Sidebar] Loading canvases from database to build job nodes...');
       const canvasesList = await canvasPersistence.listCanvases();
       console.log('🎨 [Sidebar] Fetched canvases:', canvasesList);
 
@@ -464,7 +468,23 @@ useEffect(() => {
         return;
       }
 
-      // Update repository tree with canvas nodes
+      // Transform each canvas into a job node
+      const jobNodesFromCanvases: RepositoryNode[] = canvasesList.map(canvas => ({
+        id: `job-${canvas.id}`,
+        name: canvas.name,
+        type: 'job' as const,
+        children: [],
+        metadata: {
+          canvasId: canvas.id,
+          createdAt: canvas.updated_at,
+          updatedAt: canvas.updated_at,
+        },
+        draggable: true,
+        droppable: true,
+        parentId: 'job-designs',
+      }));
+
+      // Update repository tree: preserve existing jobs and add only new ones
       setRepositoryData(prev => {
         const jobDesignsIndex = prev.findIndex(n => n.id === 'job-designs');
         if (jobDesignsIndex === -1) {
@@ -473,32 +493,39 @@ useEffect(() => {
         }
 
         const jobDesignsNode = prev[jobDesignsIndex];
-        const nonCanvasChildren = (jobDesignsNode.children || []).filter(
-          child => child.type !== 'canvas'
-        );
-        const canvasNodes = canvasesList.map(canvas => ({
-          id: `canvas-${canvas.id}`,
-          name: canvas.name,
-          type: 'canvas' as const,
-          metadata: {
-            canvasId: canvas.id,
-            createdAt: canvas.updated_at,
-            updatedAt: canvas.updated_at,
-          },
-          draggable: true,
-          droppable: false,
-          parentId: 'job-designs',
-        }));
+        const existingChildren = jobDesignsNode.children || [];
 
-        const newChildren = [...canvasNodes, ...nonCanvasChildren];
-        console.log('🎨 [Sidebar] New children under job-designs:', newChildren.map(c => ({ id: c.id, name: c.name })));
+        // Separate existing children into jobs and non-jobs
+        const existingNonJobChildren = existingChildren.filter(child => child.type !== 'job');
+        const existingJobChildren = existingChildren.filter(child => child.type === 'job');
+
+        // Build a set of existing canvas IDs for deduplication
+        const existingCanvasIds = new Set<string>();
+        existingJobChildren.forEach(child => {
+          if (child.metadata?.canvasId) {
+            existingCanvasIds.add(child.metadata.canvasId);
+          }
+        });
+
+        // Create new job nodes for canvases not yet represented
+        const newJobNodes = jobNodesFromCanvases.filter(
+          job => !existingCanvasIds.has(job.metadata?.canvasId as string)
+        );
+
+        // Merge existing job nodes with new ones
+        const mergedJobChildren = [...existingJobChildren, ...newJobNodes];
+        const updatedChildren = [...existingNonJobChildren, ...mergedJobChildren];
+
+        console.log('🎨 [Sidebar] Job nodes under job-designs after sync:',
+          updatedChildren.map(c => ({ id: c.id, name: c.name, canvasId: c.metadata?.canvasId }))
+        );
 
         const updatedNode = {
           ...jobDesignsNode,
-          children: newChildren,
+          children: updatedChildren,
           metadata: {
             ...jobDesignsNode.metadata,
-            count: newChildren.length,
+            count: updatedChildren.length,
           },
         };
         const newTree = [...prev];
@@ -509,9 +536,12 @@ useEffect(() => {
       // Expand the Job Designs folder
       setExpandedNodes(prev => new Set([...prev, 'job-designs']));
 
-      // Notify parent to load the most recent canvas
+      // Optionally select the most recent canvas
       if (onCanvasSelect && canvasesList.length > 0) {
-        onCanvasSelect(canvasesList[0].id);
+        const sorted = [...canvasesList].sort((a, b) =>
+          new Date(b.updated_at).getTime() - new Date(a.updated_at).getTime()
+        );
+        onCanvasSelect(sorted[0].id);
       }
     } catch (error: any) {
       console.error('❌ [Sidebar] Failed to load canvases:', error);
@@ -522,7 +552,7 @@ useEffect(() => {
     }
   };
 
-  loadCanvases();
+  loadCanvasesAsJobs();
 }, [isConnected, setRepositoryData, setExpandedNodes, onCanvasSelect]);
   // ==================== METADATA CREATION EVENT LISTENER ====================
   useEffect(() => {
@@ -692,33 +722,83 @@ useEffect(() => {
     setJobDesignContextMenu(null);
   }, [createNodeInTree, updateRepositoryTree, onCreateItem]);
 
-const handleCreateJobWizard = useCallback(() => {
+  
+
+const handleCreateJobWizard = useCallback(async () => {
   const jobName = window.prompt('Enter job name:');
-  if (!jobName || !jobName.trim()) {
+  if (!jobName?.trim()) {
     setContextMenu(null);
     return;
   }
 
-  // 1. Create the new job node
-  const newNode: RepositoryNode = {
-    id: `job-${Date.now()}-${Math.random().toString(36).substr(2, 9)}`,
-    name: jobName.trim(),
+  const trimmedName = jobName.trim();
+
+  // ------------------------------------------------------------------
+  // STEP 1: Create the canvas record in the database (atomic first step)
+  // ------------------------------------------------------------------
+  let newCanvasId: string | null = null;
+  try {
+    // Check for existing canvas with same name (optional, but good UX)
+    const existing = await canvasPersistence.getCanvasByName(trimmedName);
+    if (existing) {
+      toast.error(`A canvas named "${trimmedName}" already exists.`);
+      return;
+    }
+
+    const initialData = {
+      nodes: [],
+      edges: [],
+      viewport: { x: 0, y: 0, zoom: 1 }
+    };
+
+    const newCanvas = await canvasPersistence.saveCanvas(
+      trimmedName,                     // Canvas name = Job name
+      initialData,                     // Empty React Flow state
+      {
+        description: `Canvas for job: ${trimmedName}`,
+        tags: ['job-design', 'auto-created'],
+        otherUiState: { jobName: trimmedName }
+      },
+      null                             // ownerId (to be replaced when auth is added)
+    );
+
+    if (!newCanvas?.id) {
+      throw new Error('Failed to create canvas – no ID returned.');
+    }
+    newCanvasId = newCanvas.id;
+    console.log(`✅ Canvas created with ID: ${newCanvasId}`);
+  } catch (error: any) {
+    console.error('Canvas creation failed:', error);
+    toast.error(`Failed to create canvas: ${error.message}`);
+    return; // Stop – job not created
+  }
+
+  // ------------------------------------------------------------------
+  // STEP 2: Create the job node with canvasId in metadata
+  // ------------------------------------------------------------------
+  const newJobId = `job-${Date.now()}-${Math.random().toString(36).substring(2, 9)}`;
+
+  const newJobNode: RepositoryNode = {
+    id: newJobId,
+    name: trimmedName,
     type: 'job',
-    children: [],               // jobs can have canvas children later
+    children: [],                      // No separate canvas child node
     metadata: {
+      canvasId: newCanvasId,           // 🔑 Direct link to canvas
       createdAt: new Date().toISOString(),
-      // you may add more fields (author, version, etc.) as needed
     },
     draggable: true,
-    droppable: true,            // allow canvas nodes to be added
-    parentId: 'job-designs',    // hardcoded because the wizard is only for this folder
+    droppable: true,
+    parentId: 'job-designs',
   };
 
-  // 2. Update the repository tree
+  // ------------------------------------------------------------------
+  // STEP 3: Update the repository tree (add job node under job-designs)
+  // ------------------------------------------------------------------
   setRepositoryData(prev => {
     const updated = updateNodeInTree(prev, 'job-designs', folder => ({
       ...folder,
-      children: [...(folder.children || []), newNode],
+      children: [...(folder.children || []), newJobNode],
       metadata: {
         ...folder.metadata,
         count: (folder.metadata?.count || 0) + 1,
@@ -727,18 +807,21 @@ const handleCreateJobWizard = useCallback(() => {
     return updated;
   });
 
-  // 3. Ensure the folder is expanded
-  setExpandedNodes(prev => new Set([...prev, 'job-designs']));
+  // ------------------------------------------------------------------
+  // STEP 4: Expand the Job Designs folder and select the new job
+  // ------------------------------------------------------------------
+  setExpandedNodes(prev => new Set([...prev, 'job-designs', newJobId]));
+  setSelectedNode(newJobId);
 
-  // 4. (Optional) select the new job
-  setSelectedNode(newNode.id);
+  // ------------------------------------------------------------------
+  // STEP 5: Notify parent components
+  // ------------------------------------------------------------------
+  onCreateJob?.(trimmedName, newJobId);          // Let App know about new job
+  onCanvasSelect?.(newCanvasId);                 // Load the newly created canvas
 
-  // 5. Call the parent callback (if any)
-  onCreateJob?.(jobName.trim());
-
-  // 6. Close the context menu
+  toast.success(`✅ Job "${trimmedName}" created and canvas ready.`);
   setContextMenu(null);
-}, [onCreateJob, setRepositoryData, setExpandedNodes, setSelectedNode]);
+}, [onCreateJob, onCanvasSelect, setRepositoryData, setExpandedNodes, setSelectedNode]);
 
   // ==================== EVENT HANDLERS ====================
   const handleToggle = useCallback((nodeId: string) => {
@@ -765,24 +848,6 @@ const handleCreateJobWizard = useCallback(() => {
   }, []);
 
   const handleDeleteNode = useCallback((node: RepositoryNode) => {
-  // Job deletion (canvas) – unchanged
-  if (node.type === 'job') {
-    const designId = node.metadata?.canvasDesignId;
-    if (designId) {
-      const design = CanvasDesignManager.getDesign(designId);
-      handleDeleteCanvasDesign(designId, design?.name || node.name);
-    }
-    setRepositoryData(prev => {
-      const removeNode = (nodes: RepositoryNode[]): RepositoryNode[] => {
-        return nodes.filter(n => n.id !== node.id).map(n => ({
-          ...n,
-          children: n.children ? removeNode(n.children) : undefined
-        }));
-      };
-      return removeNode(prev);
-    });
-    return;
-  }
 
   // Check if this node represents a PostgreSQL foreign table
   const isForeignTable = node.metadata?.postgresTableName && node.metadata?.connection?.connectionId;
@@ -802,45 +867,211 @@ const handleCreateJobWizard = useCallback(() => {
   );
 }, [currentJob, handleDeleteCanvasDesign, setRepositoryData]);
 
- const confirmDeleteNode = useCallback(async () => {
-  if (!nodeToDelete || isDeleting) return;
+/**
+ * Deletes all foreign tables under a database connection folder,
+ * then drops the foreign server if unused.
+ */
+const deleteDatabaseConnectionFolder = useCallback(
+  async (folderNode: RepositoryNode) => {
+    const connectionId = folderNode.metadata?.connectionId;
+    const serverName = folderNode.metadata?.serverName;
+    const metadataEntryId = folderNode.metadata?.entryId;   // ✅ retrieve entry ID
 
-  // Foreign table deletion path
-  if (isDeletingForeignTable) {
-    setIsDeleting(true);
-
-    const connectionId = nodeToDelete.metadata?.connection?.connectionId;
-    const tableName = nodeToDelete.metadata?.postgresTableName;
-    const schema = nodeToDelete.metadata?.schema || 'public';
-
-    if (!connectionId || !tableName) {
-      toast.error('Cannot delete: missing connection or table name.');
-      setIsDeletingForeignTable(false);
-      setDeleteDialogOpen(false);
-      setNodeToDelete(null);
-      setIsDeleting(false);
-      return;
+    if (!connectionId || !apiService) {
+      throw new Error('Missing connection ID or API service');
     }
 
-    // Guard against missing apiService
-    if (!apiService) {
-      toast.error('Database API service is not available.');
-      setIsDeletingForeignTable(false);
-      setDeleteDialogOpen(false);
-      setNodeToDelete(null);
-      setIsDeleting(false);
-      return;
-    }
+    // Collect all foreign table names from the folder's children
+    const tableNames: string[] = [];
+    const collectTables = (nodes: RepositoryNode[]) => {
+      nodes.forEach(node => {
+        if (node.metadata?.postgresTableName) {
+          tableNames.push(node.metadata.postgresTableName);
+        }
+        if (node.children) collectTables(node.children);
+      });
+    };
+    collectTables(folderNode.children || []);
 
-    try {
-      const sql = `DROP FOREIGN TABLE IF EXISTS ${schema}.${tableName} CASCADE;`;
-      const result = await apiService.executeQuery(connectionId, sql);
-
+    // Drop each foreign table with cascade
+    for (const tableName of tableNames) {
+      const result = await apiService.dropForeignTableCascade(connectionId, tableName);
       if (!result.success) {
-        throw new Error(result.error || 'Failed to drop foreign table');
+        console.error(`Failed to drop table ${tableName}:`, result.error);
+        // Continue with other tables even if one fails
+      }
+    }
+
+    // Drop the foreign server if unused
+    if (serverName) {
+      const serverResult = await apiService.dropForeignServerIfUnused(
+        connectionId,
+        serverName
+      );
+      if (!serverResult.success) {
+        console.warn(`Could not drop server ${serverName}:`, serverResult.error);
+      }
+    }
+
+    // Delete the database metadata configuration entry
+    if (metadataEntryId) {
+      const metaResult = await apiService.deleteDatabaseMetadata(metadataEntryId);
+      if (!metaResult.success) {
+        console.warn(`Could not delete metadata entry ${metadataEntryId}:`, metaResult.error);
+      }
+    }
+  },
+  [apiService]
+);
+
+const deleteCanvasRecord = useCallback(async (canvasId: string): Promise<void> => {
+  try {
+    const success = await canvasPersistence.deleteCanvasById(canvasId);
+    if (!success) {
+      throw new Error(`Canvas with ID ${canvasId} not found or not deleted.`);
+    }
+    console.log(`✅ Canvas ${canvasId} deleted from database`);
+  } catch (error: any) {
+    console.error(`❌ Failed to delete canvas ${canvasId}:`, error);
+    throw new Error(`Failed to delete canvas: ${error.message}`);
+  }
+}, []);
+
+// Helper to recursively collect all canvas IDs under a node
+
+// ==================== CONFIRM DELETE NODE (UPDATED: JOB DELETION CASCADES + AUTO‑SELECT NEXT) ====================
+const confirmDeleteNode = useCallback(async () => {
+  if (!nodeToDelete || isDeleting) return;
+  setIsDeleting(true);
+
+  try {
+    // ---------------------------------------------------------------------
+    // 1. JOB NODE DELETION – cascade canvas deletion & auto‑switch
+    // ---------------------------------------------------------------------
+    if (nodeToDelete.type === 'job') {
+      const canvasId = nodeToDelete.metadata?.canvasId;
+      if (canvasId) {
+        console.log(`🗑️ Deleting canvas "${canvasId}" associated with job "${nodeToDelete.name}"`);
+        await deleteCanvasRecord(canvasId);
+      } else {
+        console.warn(`⚠️ Job "${nodeToDelete.name}" has no canvasId metadata; nothing to delete.`);
       }
 
-      // Success: remove from UI using the existing handler
+      // Determine next available canvas *before* removing from tree
+      const jobDesignsNode = repositoryData.find(n => n.id === 'job-designs');
+      const remainingJobNodes = (jobDesignsNode?.children || []).filter(
+        child => child.id !== nodeToDelete.id && child.type === 'job'
+      );
+      const nextCanvasId = remainingJobNodes.length > 0
+        ? remainingJobNodes[0].metadata?.canvasId
+        : null;
+
+      // Remove the job node from the repository tree
+      setRepositoryData(prev => Handlers.deleteNodeRecursive(prev, nodeToDelete.id));
+      setExpandedNodes(prev => {
+        const next = new Set(prev);
+        next.delete(nodeToDelete.id);
+        return next;
+      });
+      if (selectedNode === nodeToDelete.id) setSelectedNode(null);
+
+      // If the deleted job was the currently displayed canvas, switch or clear
+      if (activeCanvasId === canvasId) {
+        if (nextCanvasId) {
+          onCanvasSelect?.(nextCanvasId);
+        } else {
+          onCanvasSelect?.(null);   // will show WorkspacePlaceholder
+        }
+      }
+
+      toast.success(`Job "${nodeToDelete.name}" and its canvas deleted.`);
+      return;
+    }
+
+    // ---------------------------------------------------------------------
+    // 2. CANVAS NODE DELETION – remove canvas record from database
+    // ---------------------------------------------------------------------
+    if (nodeToDelete.type === 'canvas') {
+      const canvasId = nodeToDelete.metadata?.canvasId;
+      if (!canvasId) {
+        throw new Error('Canvas node missing canvasId');
+      }
+      await deleteCanvasRecord(canvasId);
+
+      setRepositoryData(prev => Handlers.deleteNodeRecursive(prev, nodeToDelete.id));
+      setExpandedNodes(prev => {
+        const next = new Set(prev);
+        next.delete(nodeToDelete.id);
+        return next;
+      });
+      if (selectedNode === nodeToDelete.id) setSelectedNode(null);
+
+      toast.success(`Canvas "${nodeToDelete.name}" deleted.`);
+      return;
+    }
+
+    // ---------------------------------------------------------------------
+    // 3. DATABASE CONNECTION FOLDER DELETION (existing logic – unchanged)
+    // ---------------------------------------------------------------------
+    if (
+      nodeToDelete.type === 'folder' &&
+      nodeToDelete.metadata?.dbType &&
+      nodeToDelete.metadata?.connectionId
+    ) {
+      if (!apiService) {
+        throw new Error('Database API service not available');
+      }
+      await deleteDatabaseConnectionFolder(nodeToDelete);
+
+      setRepositoryData(prev => Handlers.deleteNodeRecursive(prev, nodeToDelete.id));
+      setExpandedNodes(prev => {
+        const next = new Set(prev);
+        next.delete(nodeToDelete.id);
+        return next;
+      });
+      if (selectedNode === nodeToDelete.id) setSelectedNode(null);
+
+      toast.success(`Database connection "${nodeToDelete.name}" and all its tables deleted.`);
+      return;
+    }
+
+    // ---------------------------------------------------------------------
+    // 4. SINGLE FOREIGN TABLE DELETION (existing logic – unchanged)
+    // ---------------------------------------------------------------------
+    const isForeignTable =
+      nodeToDelete.metadata?.postgresTableName &&
+      nodeToDelete.metadata?.connection?.connectionId;
+
+    if (isForeignTable) {
+      const connectionId = nodeToDelete.metadata?.connection?.connectionId;
+      const tableName = nodeToDelete.metadata?.postgresTableName;
+
+      if (!connectionId || !tableName) {
+        toast.error('Invalid foreign table metadata – missing connection ID or table name.');
+        return;
+      }
+
+      if (!apiService) {
+        toast.error('Database API service is not available.');
+        return;
+      }
+
+      const cascadeResult = await apiService.dropForeignTableCascade(connectionId, tableName);
+      if (!cascadeResult.success) {
+        throw new Error(cascadeResult.error || 'Failed to drop foreign table');
+      }
+
+      if (cascadeResult.serverName) {
+        const serverDropResult = await apiService.dropForeignServerIfUnused(
+          connectionId,
+          cascadeResult.serverName
+        );
+        if (!serverDropResult.success) {
+          console.warn(`Could not drop server ${cascadeResult.serverName}:`, serverDropResult.error);
+        }
+      }
+
+      // Use the existing Handlers.confirmDeleteNode for tree removal and UI updates
       await Handlers.confirmDeleteNode(
         nodeToDelete,
         repositoryData,
@@ -851,22 +1082,17 @@ const handleCreateJobWizard = useCallback(() => {
         setDeletionHistory,
         setDeleteDialogOpen,
         setNodeToDelete,
-        async () => {}, // onSuccess (already handled)
-        () => {}        // onError
+        async () => {},
+        () => {}
       );
 
-      toast.success(`Foreign table "${tableName}" dropped successfully.`);
-    } catch (error: any) {
-      toast.error(`Failed to delete: ${error.message}`);
-      console.error('Foreign table deletion error:', error);
-      setDeleteDialogOpen(false);
-      setNodeToDelete(null);
-    } finally {
-      setIsDeletingForeignTable(false);
-      setIsDeleting(false);
+      toast.success(`Foreign table "${tableName}" and its metadata deleted.`);
+      return;
     }
-  } else {
-    // Regular deletion (non-foreign table)
+
+    // ---------------------------------------------------------------------
+    // 5. REGULAR NODE DELETION (fallback – existing logic unchanged)
+    // ---------------------------------------------------------------------
     await Handlers.confirmDeleteNode(
       nodeToDelete,
       repositoryData,
@@ -880,21 +1106,32 @@ const handleCreateJobWizard = useCallback(() => {
       async () => {},
       () => {}
     );
+  } catch (error: any) {
+    toast.error(`Deletion failed: ${error.message}`);
+    console.error(error);
+  } finally {
+    setIsDeleting(false);
+    setDeleteDialogOpen(false);
+    setNodeToDelete(null);
   }
 }, [
   nodeToDelete,
-  isDeletingForeignTable,
+  isDeleting,
   repositoryData,
   selectedNode,
+  activeCanvasId,
+  onCanvasSelect,
+  apiService,
+  deleteDatabaseConnectionFolder,
+  deleteCanvasRecord,
   setRepositoryData,
   setExpandedNodes,
   setSelectedNode,
   setDeletionHistory,
   setDeleteDialogOpen,
   setNodeToDelete,
-  apiService,
-  isDeleting
 ]);
+
   // ==================== DRAG HANDLER ====================
   const handleDragStart = useCallback((node: RepositoryNode, event: React.DragEvent) => {
     let componentKey = 'delimited-file'; // Default fallback
@@ -1152,10 +1389,6 @@ const handleCreateJobWizard = useCallback(() => {
     setContextMenu(null);
   }, []);
 
-  const handleOpenSAPWizard = useCallback(() => {
-  setSapWizardOpen(true);
-  setContextMenu(null);
-}, []);
 
 const handleOpenFTPWizard = useCallback(() => {
   setFtpWizardOpen(true);
@@ -1167,106 +1400,24 @@ const handleOpenLDAPWizard = useCallback(() => {
   setContextMenu(null);
 }, []);
 
-const handleOpenSalesforceWizard = useCallback(() => {
-  setSalesforceWizardOpen(true);
-  setContextMenu(null);
-}, []);
 
   // ==================== CREATE CANVAS FROM JOB ====================
-  const handleCreateCanvasFromJob = useCallback(async (jobNode: RepositoryNode) => {
-    const jobName = jobNode.name;
-
-    try {
-      // 1. Check for existing canvas with the same name (optional, but good UX)
-      const existing = await canvasPersistence.getCanvasByName(jobName);
-      if (existing) {
-        toast.error(`A canvas named "${jobName}" already exists.`);
-        return;
-      }
-
-      // 2. Initial empty canvas data
-      const initialData = {
-        nodes: [],
-        edges: [],
-        viewport: { x: 0, y: 0, zoom: 1 }
-      };
-
-      // 3. Save via canvasPersistence – passing ownerId = null (no auth yet)
-      const newCanvas = await canvasPersistence.saveCanvas(
-        jobName,                     // canvas name (matches job name)
-        initialData,                 // empty React Flow state
-        {
-          description: `Created from job: ${jobName}`,
-          tags: ['job-design', 'auto-created'],
-          otherUiState: { jobId: jobNode.id }
-        },
-        null                         // ownerId – will be replaced with actual user ID when auth is added
-      );
-
-      if (!newCanvas) {
-        throw new Error('Failed to save canvas – no record returned.');
-      }
-
-      // 4. Create a child node under the job to represent the canvas
-      const canvasNode: RepositoryNode = {
-        id: `canvas-${newCanvas.id}`,
-        name: jobName,
-        type: 'canvas',
-        metadata: {
-          canvasId: newCanvas.id,    // store the database ID for later loading
-          createdAt: new Date().toISOString()
-        },
-        draggable: false,
-        droppable: false,
-        parentId: jobNode.id
-      };
-
-      // 5. Update repository tree (PREPEND canvas node so newest appears at top)
-      setRepositoryData(prev => {
-        const updateNode = (nodes: RepositoryNode[]): RepositoryNode[] => {
-          return nodes.map(node => {
-            if (node.id === jobNode.id) {
-              return {
-                ...node,
-                children: [canvasNode, ...(node.children || [])], // prepend
-                metadata: {
-                  ...node.metadata,
-                  count: (node.metadata?.count || 0) + 1
-                }
-              };
-            }
-            if (node.children) {
-              return { ...node, children: updateNode(node.children) };
-            }
-            return node;
-          });
-        };
-        return updateNode(prev);
-      });
-
-      // Ensure the job folder is expanded so the user sees the new canvas node
-      setExpandedNodes(prev => new Set([...prev, jobNode.id]));
-
-      toast.success(`Canvas "${jobName}" created.`);
-
-       //OPTIONAL: Automatically load the new canvas
-       if (onCanvasSelect) {
-         onCanvasSelect(newCanvas.id);
-       }
-    } catch (error: any) {
-      console.error('Failed to create canvas:', error);
-      toast.error(`Failed to create canvas: ${error.message || 'Unknown error'}`);
-    }
-  }, [setRepositoryData, setExpandedNodes, onCanvasSelect]);
-
+  
   // ==================== WIZARD SAVE HANDLERS (WITH FOREIGN TABLE CREATION) ====================
   const handleSaveExcelMetadata = useCallback(async (metadata: ExcelMetadataFormData) => {
+  // Early API service check
   if (!apiService) {
     toast.error('❌ Database API service is not initialized.', { autoClose: 5000 });
     return;
   }
 
   try {
+    // ✅ CRITICAL FIX: Guard against null file
+    if (!metadata.file) {
+      toast.error('❌ No Excel file provided. Please select a file in the wizard.', { autoClose: 5000 });
+      return;
+    }
+
     // 1. Ensure PostgreSQL connection is active
     console.log('🔍 [Excel] Checking PostgreSQL connection...');
     if (!isConnected) {
@@ -1284,24 +1435,19 @@ const handleOpenSalesforceWizard = useCallback(() => {
     }
     console.log('✅ [Excel] Using connection ID:', connectionId);
 
-    // 2. Validate that we have a file and a selected sheet
-    if (!metadata.file) {
-      toast.error('❌ No Excel file provided.', { autoClose: 5000 });
-      return;
-    }
+    // 2. Validate that we have a selected sheet
     if (!metadata.selectedSheet) {
       toast.error('❌ No sheet selected.', { autoClose: 5000 });
       return;
     }
-    console.log('📄 [Excel] File:', metadata.file.name, 'Size:', metadata.file.size, 'Sheet:', metadata.selectedSheet);
 
-    // 3. Read the Excel file as ArrayBuffer
+    // 3. Read the Excel file as ArrayBuffer – metadata.file is now guaranteed non‑null
     console.log('📖 [Excel] Reading Excel file...');
     const fileReader = new FileReader();
     const fileBuffer = await new Promise<ArrayBuffer>((resolve, reject) => {
       fileReader.onload = () => resolve(fileReader.result as ArrayBuffer);
       fileReader.onerror = () => reject(fileReader.error);
-      fileReader.readAsArrayBuffer(metadata.file);
+      fileReader.readAsArrayBuffer(metadata.file!); // non‑null after check
     });
     console.log('✅ [Excel] File read complete, size:', fileBuffer.byteLength, 'bytes');
 
@@ -1322,10 +1468,8 @@ const handleOpenSalesforceWizard = useCallback(() => {
 
     // 6. Upload CSV to backend – use the original file name (without extension) as CSV filename
     const formData = new FormData();
-    // Extract base name from the original Excel file (remove extension)
     const originalFileName = metadata.file.name;
-    const baseName = originalFileName.replace(/\.[^/.]+$/, ""); // removes last dot extension
-    // Sanitize the base name to be filesystem-safe
+    const baseName = originalFileName.replace(/\.[^/.]+$/, "");
     const safeBaseName = baseName.replace(/[^a-z0-9]/gi, '_');
     const csvFileName = `${safeBaseName}.csv`;
     const csvBlob = new Blob([csvString], { type: 'text/csv' });
@@ -1351,27 +1495,27 @@ const handleOpenSalesforceWizard = useCallback(() => {
     // 7. Prepare column definitions (from wizard's inferred schema)
     const columns = metadata.schema.map(col => ({
       name: col.name,
-      type: col.type,          // app type like 'String', 'Integer', etc.
+      type: col.type,
       length: col.length,
-      nullable: true,          // default; can be refined later
+      nullable: true,
     }));
     console.log('📋 [Excel] Column definitions:', columns);
 
-    // 8. Options for the delimited FDW – include the custom tag
+    // 8. Options for the delimited FDW
     const options = {
       delimiter: ',',
       header: metadata.hasHeaders ? 'true' : 'false',
       format: 'csv',
-      original_file_type: 'excel',   // tag for reverse‑engineering
+      original_file_type: 'excel',
     };
 
-    // 9. Create the foreign table using the existing 'fdw_delimited' server
+    // 9. Create the foreign table
     console.log('🛠️ [Excel] Creating foreign table with name:', metadata.name);
     const result = await apiService.createForeignTableViaBackend(
       connectionId,
-      metadata.name,            // table name
+      metadata.name,
       columns,
-      'delimited',              // fileType – triggers fdw_delimited server
+      'delimited',
       csvPath,
       options
     );
@@ -1381,11 +1525,9 @@ const handleOpenSalesforceWizard = useCallback(() => {
     }
 
     console.log('✅ [Excel] Foreign table created successfully, result:', result);
-
-    // 10. Store the resulting PostgreSQL table name in metadata
     metadata.postgresTableName = result.tableName || metadata.name;
 
-    // --- NEW: Insert metadata record into data_source_metadata table ---
+    // 10. Insert metadata record into data_source_metadata table
     const insertResult = await apiService.insertDataSourceMetadata(connectionId, {
       name: metadata.name,
       type: 'excel',
@@ -1396,20 +1538,17 @@ const handleOpenSalesforceWizard = useCallback(() => {
         original_file_type: 'excel',
         sheet: metadata.selectedSheet,
         hasHeaders: metadata.hasHeaders,
-        // include any other relevant metadata
       }
     });
 
     if (!insertResult.success) {
-      // Log warning but don't fail the overall operation – the foreign table already exists.
       console.warn('⚠️ [Excel] Metadata insertion failed (non‑fatal):', insertResult.error);
       toast.warn(`Foreign table created, but metadata tracking failed: ${insertResult.error}`, { autoClose: 5000 });
     } else {
       console.log('✅ [Excel] Data source metadata recorded with ID:', insertResult.id);
     }
-    // --- END NEW ---
 
-    // 11. Dispatch event to add node to the repository (still under "Excel Files")
+    // 11. Dispatch event to add node to the repository
     window.dispatchEvent(new CustomEvent('metadata-created', {
       detail: {
         metadata,
@@ -1425,7 +1564,6 @@ const handleOpenSalesforceWizard = useCallback(() => {
     toast.error(`❌ ${error.message || 'Could not create foreign table'}`, { autoClose: 5000 });
   }
 }, [apiService, isConnected, testConnection]);
-
   // Helper to convert a file via a backend endpoint
   const convertFileViaBackend = useCallback(async (
     file: File,
@@ -2062,60 +2200,101 @@ function createDatabaseTableNode(
   };
 }
 
-// ============================================================================
-// handleSaveDatabaseMetadata – Modified to use createForeignTableViaBackend
-// ============================================================================
 const handleSaveDatabaseMetadata = useCallback(async (metadata: any) => {
   if (!apiService) {
     console.error('❌ Database API service is not initialized.');
+    toast.error('Database API service is not available.');
     return;
   }
 
   try {
     if (!isConnected && !(await testConnection())) {
       console.error('❌ No active PostgreSQL connection.');
+      toast.error('No active PostgreSQL connection. Please connect first.');
       return;
     }
 
     const connectionId = await getActivePostgresConnectionId(apiService);
     if (!connectionId) {
       console.error('❌ No active PostgreSQL connection found.');
+      toast.error('No active PostgreSQL connection found.');
       return;
     }
 
     const remoteDbType = metadata.dbType;
-    const remoteConn = metadata.connection;
 
-    // --- 1. Create a unique foreign server name ---
-    const baseName = metadata.name.replace(/[^a-z0-9]/gi, '_');
-    const serverName = `remote_server_${baseName}_${Date.now()}`;
-    console.log(`🌐 Creating foreign server: ${serverName}`);
+    // ---------- Handle existing connection vs new connection ----------
+    let serverName: string = '';          // ✅ initialized
+    let parentFolderId: string | null = null;
+    let connectionDetails: any = null;
 
-    const createServerResult = await apiService.createForeignServer(
-      connectionId,
-      serverName,
-      remoteDbType,
-      {
-        host: remoteConn.host,
-        port: remoteConn.port,
-        dbname: remoteConn.dbname,
-        user: remoteConn.user,
-        password: remoteConn.password,
-        schema: remoteConn.schema,
+    if (metadata.useExistingConnection) {
+      // Use an existing database connection (previously saved)
+      const existingConnectionId = metadata.selectedConnectionId;
+      if (!existingConnectionId) {
+        toast.error('❌ No existing connection selected.');
+        return;
       }
-    );
 
-    if (!createServerResult.success) {
-      throw new Error(`Failed to create foreign server: ${createServerResult.error}`);
+      // Find the existing folder node for this connection
+      const dbConnectionsNode = findNodeAndParent(repositoryData, 'db-connections')?.node;
+      if (dbConnectionsNode) {
+        const existingFolder = dbConnectionsNode.children?.find(
+          (child: RepositoryNode) =>
+            child.type === 'folder' && child.metadata?.entryId === existingConnectionId
+        );
+        if (existingFolder) {
+          parentFolderId = existingFolder.id;
+          serverName = existingFolder.metadata?.serverName || '';
+          connectionDetails = existingFolder.metadata?.connectionDetails;
+        }
+      }
+
+      if (!serverName || !connectionDetails) {
+        toast.error('❌ Could not retrieve existing connection details.');
+        return;
+      }
+
+      console.log(`♻️ Using existing foreign server: ${serverName}`);
+    } else {
+      // New connection – create a foreign server and a new folder
+      const remoteConn = metadata.connection;
+      if (!remoteConn) {
+        toast.error('❌ Connection details missing for new database.');
+        return;
+      }
+      connectionDetails = remoteConn;
+
+      const baseName = metadata.name.replace(/[^a-z0-9]/gi, '_');
+      serverName = `remote_server_${baseName}_${Date.now()}`;
+      console.log(`🌐 Creating foreign server: ${serverName}`);
+
+      const createServerResult = await apiService.createForeignServer(
+        connectionId,
+        serverName,
+        remoteDbType,
+        {
+          host: remoteConn.host,
+          port: remoteConn.port,
+          dbname: remoteConn.dbname,
+          user: remoteConn.user,
+          password: remoteConn.password,
+          schema: remoteConn.schema,
+        }
+      );
+
+      if (!createServerResult.success) {
+        throw new Error(`Failed to create foreign server: ${createServerResult.error}`);
+      }
+      console.log(`✅ Foreign server created: ${serverName}`);
     }
-    console.log(`✅ Foreign server created: ${serverName}`);
 
-    // --- 2. Create foreign tables for each selected table ---
+    // ---------- Create foreign tables for each selected table ----------
     const allTables = metadata.tables || [];
     const selectedTableIds = metadata.selectedTables || [];
 
     if (selectedTableIds.length === 0) {
-      console.error('❌ No tables selected.');
+      toast.error('❌ No tables selected.');
       return;
     }
 
@@ -2133,7 +2312,7 @@ const handleSaveDatabaseMetadata = useCallback(async (metadata: any) => {
         continue;
       }
 
-      const columns = tableDef.columns.map((col: any) => ({
+      const columns = (tableDef.columns || []).map((col: any) => ({
         name: col.name,
         type: col.type,
         length: col.length,
@@ -2148,8 +2327,6 @@ const handleSaveDatabaseMetadata = useCallback(async (metadata: any) => {
         continue;
       }
 
-      // ✅ Simplified options: only table_name and schema_name are passed.
-      // Connection details are already in the foreign server.
       const options: Record<string, string> = {
         table_name: tableName,
       };
@@ -2159,15 +2336,14 @@ const handleSaveDatabaseMetadata = useCallback(async (metadata: any) => {
 
       const localTableName = tableName.toLowerCase().replace(/[^a-z0-9_]/g, '_');
 
-      // ✅ Use the new backend endpoint via createForeignTableViaBackend
       const result = await apiService.createForeignTableViaBackend(
         connectionId,
         localTableName,
         columns,
-        remoteDbType,   // fileType – indicates a database source
-        '',             // filePath – empty for database
+        remoteDbType,
+        '',          // filePath not needed for database tables
         options,
-        serverName      // ← the server we just created
+        serverName   // ✅ now guaranteed to be assigned
       );
 
       if (!result.success) {
@@ -2179,7 +2355,7 @@ const handleSaveDatabaseMetadata = useCallback(async (metadata: any) => {
         result.tableName || localTableName,
         connectionId,
         remoteDbType,
-        remoteConn,
+        connectionDetails,
         schema
       );
       createdTableNodes.push(tableNode);
@@ -2187,25 +2363,65 @@ const handleSaveDatabaseMetadata = useCallback(async (metadata: any) => {
     }
 
     if (createdCount === 0) {
-      console.error('❌ No tables were created.');
+      toast.error('❌ No tables were created.');
       return;
     }
 
-    // --- 3. Update repository tree with new nodes ---
-    let newParentFolderId: string | null = null;
+    // ---------- Save metadata to backend ----------
+    const metadataToSave = {
+      name: metadata.name,
+      purpose: metadata.purpose,
+      description: metadata.description,
+      dbType: remoteDbType,
+      connectionId: metadata.useExistingConnection ? metadata.selectedConnectionId : undefined,
+      connection: metadata.useExistingConnection
+        ? undefined
+        : {
+            host: connectionDetails.host,
+            port: connectionDetails.port,
+            dbname: connectionDetails.dbname,
+            user: connectionDetails.user,
+            password: connectionDetails.password,
+            schema: connectionDetails.schema,
+          },
+      tables: allTables,
+      selectedTables: selectedTableIds,
+      tableSelections: metadata.tableSelections,
+      foreignServerName: serverName,
+    };
 
+    const saveResult = await apiService.saveDatabaseMetadata(metadataToSave);
+    let metadataEntryId: string | undefined;
+    if (!saveResult.success) {
+      toast.warning(`⚠️ Foreign tables created, but metadata storage failed: ${saveResult.error}`);
+      console.warn('Metadata storage error:', saveResult.error);
+    } else {
+      console.log('✅ Database metadata saved with ID:', saveResult.metadataEntryId);
+      metadataEntryId = saveResult.metadataEntryId;
+    }
+
+    // ---------- Update repository tree ----------
     setRepositoryData(prev => {
       const folderId = 'db-connections';
       const dbConnectionsNode = findNodeAndParent(prev, folderId)?.node;
       if (!dbConnectionsNode) return prev;
 
       const connectionFolderName = metadata.name;
-      let parentFolder = dbConnectionsNode.children?.find(
-        child => child.name === connectionFolderName && child.type === 'folder'
-      );
+      let parentFolder: RepositoryNode | undefined;
 
-      if (!parentFolder) {
-        const newFolderId = `folder-${Date.now()}-${Math.random().toString(36).substr(2, 9)}`;
+      if (metadata.useExistingConnection && parentFolderId) {
+        // Find the existing folder by its ID
+        parentFolder = findNodeAndParent(prev, parentFolderId)?.node;
+      } else {
+        // Look for a folder with the same name (new connection)
+        parentFolder = dbConnectionsNode.children?.find(
+          child => child.name === connectionFolderName && child.type === 'folder'
+        );
+      }
+
+      // Create a new folder only if it's a new connection and no folder exists yet
+      if (!parentFolder && !metadata.useExistingConnection) {
+        const newFolderId = `folder-${Date.now()}-${Math.random().toString(36).substring(2, 9)}`;
         parentFolder = {
           id: newFolderId,
           name: connectionFolderName,
@@ -2215,20 +2431,27 @@ const handleSaveDatabaseMetadata = useCallback(async (metadata: any) => {
           metadata: {
             connectionId,
             dbType: remoteDbType,
-            connectionDetails: remoteConn,
+            connectionDetails,
+            serverName,
+            entryId: metadataEntryId,
             createdAt: new Date().toISOString(),
           },
         };
-        newParentFolderId = newFolderId;
         prev = updateNodeInTree(prev, folderId, node => ({
           ...node,
-          children: [...(node.children || []), parentFolder],
+          children: [...(node.children || []), parentFolder!],
           metadata: { ...node.metadata, count: (node.metadata?.count || 0) + 1 },
         }));
       }
 
+      if (!parentFolder) {
+        console.warn('Could not locate parent folder for table nodes');
+        return prev;
+      }
+
+      // Add table nodes to the folder (avoid duplicates)
       for (const tableNode of createdTableNodes) {
-        const exists = parentFolder.children?.some(child => child.id === tableNode.id);
+        const exists = (parentFolder.children || []).some(child => child.id === tableNode.id);
         if (!exists) {
           prev = updateNodeInTree(prev, parentFolder.id, node => ({
             ...node,
@@ -2241,44 +2464,15 @@ const handleSaveDatabaseMetadata = useCallback(async (metadata: any) => {
       return prev;
     });
 
-    if (newParentFolderId) {
-      setExpandedNodes(prev => new Set([...prev, newParentFolderId]));
-    }
-
-    // --- 4. Save metadata to the new schema tables (optional) ---
-    const metadataToSave = {
-      name: metadata.name,
-      purpose: metadata.purpose,
-      description: metadata.description,
-      dbType: remoteDbType,
-      connectionId: metadata.useExistingConnection ? metadata.selectedConnectionId : undefined,
-      connection: metadata.useExistingConnection ? undefined : {
-        host: remoteConn.host,
-        port: remoteConn.port,
-        dbname: remoteConn.dbname,
-        user: remoteConn.user,
-        password: remoteConn.password,
-        schema: remoteConn.schema,
-      },
-      tables: allTables,
-      selectedTables: selectedTableIds,
-      tableSelections: metadata.tableSelections,
-    };
-
-    const saveResult = await apiService.saveDatabaseMetadata(metadataToSave);
-    if (!saveResult.success) {
-      toast.warn(`⚠️ Foreign tables created, but metadata storage failed: ${saveResult.error}`);
-      console.warn('Metadata storage error:', saveResult.error);
-    } else {
-      console.log('✅ Database metadata saved with ID:', saveResult.metadataEntryId);
-    }
+    // Expand the parent folder so the new tables are visible
+    setExpandedNodes(prev => new Set([...prev, parentFolderId || `folder-${Date.now()}`]));
 
     toast.success(`✅ Created ${createdCount} foreign table(s).`);
   } catch (error: any) {
     console.error('❌ Failed to create database foreign tables:', error);
     toast.error(`❌ ${error.message || 'Could not create foreign tables'}`);
   }
-}, [apiService, isConnected, testConnection, setRepositoryData, setExpandedNodes]);
+}, [apiService, isConnected, testConnection, setRepositoryData, setExpandedNodes, repositoryData]);
 
   const handleSaveWebServiceMetadata = useCallback(async (metadata: any) => {
     window.dispatchEvent(new CustomEvent('metadata-created', {
@@ -2307,7 +2501,8 @@ const handleSaveDatabaseMetadata = useCallback(async (metadata: any) => {
   // ============================================================================
   // ✅ FIXED: INITIAL SYNC FROM POSTGRESQL – now works with nested categories
   // ============================================================================
-useEffect(() => {
+
+  useEffect(() => {
   if (!apiService || !isConnected || isSyncing) {
     console.log('⏭️ Sync skipped:', { hasApiService: !!apiService, isConnected, isSyncing });
     return;
@@ -2341,11 +2536,11 @@ useEffect(() => {
           const meta = await reverseForeignTableMetadata(apiService, connectionId, schema, table.tablename);
           console.log(`🔍 Before override: ${table.tablename} fileType = ${meta.fileType}`);
 
-          // --- Look up original type from data_source_metadata (ignore connection_id) ---
+          // --- Look up original type from data_source_metadata ---
           try {
             const sql = `SELECT type, file_path, options
                          FROM data_source_metadata
-                         WHERE foreign_table_name = $1`; // No connection_id filter
+                         WHERE foreign_table_name = $1`;
             const params = [meta.tableName];
             console.log(`🔎 Executing metadata lookup for ${meta.tableName} with SQL:`, sql, 'params:', params);
 
@@ -2356,21 +2551,15 @@ useEffect(() => {
               let rows: any[] = [];
               if (Array.isArray(lookupResult.rows)) {
                 rows = lookupResult.rows;
-                console.log(`📊 Extracted rows from lookupResult.rows (length ${rows.length})`);
               } else if (lookupResult.result && Array.isArray(lookupResult.result)) {
                 rows = lookupResult.result;
-                console.log(`📊 Extracted rows from lookupResult.result (length ${rows.length})`);
               } else if (lookupResult.result?.rows && Array.isArray(lookupResult.result.rows)) {
                 rows = lookupResult.result.rows;
-                console.log(`📊 Extracted rows from lookupResult.result.rows (length ${rows.length})`);
-              } else {
-                console.log(`❓ No array found in any expected location. Full structure:`, lookupResult);
               }
 
               if (rows.length > 0) {
                 const stored = rows[0];
                 console.log(`📦 Found stored metadata for ${meta.tableName}:`, stored);
-                console.log(`   stored.type = "${stored.type}"`);
                 meta.fileType = stored.type;
                 if (stored.file_path) meta.filePath = stored.file_path;
                 if (stored.options) meta.options = { ...meta.options, ...stored.options };
@@ -2388,7 +2577,6 @@ useEffect(() => {
               console.warn(`⚠️ Unexpected error during metadata lookup for ${meta.tableName}:`, lookupErr.message);
             }
           }
-          // --- End lookup ---
 
           console.log(`✅ Final for ${table.tablename}: fileType = ${meta.fileType}`);
           return { ...meta, oid: table.oid };
@@ -2432,15 +2620,17 @@ useEffect(() => {
             return;
           }
           newTree = updateNodeInTree(newTree, folderId, (folder) => {
-            const existingNames = new Set(folder.children.map((c) => c.name));
+            // ✅ FIX: Use optional chaining and fallback empty array
+            const existingChildren = folder.children ?? [];
+            const existingNames = new Set(existingChildren.map((c) => c.name));
             if (existingNames.has(newNode.name)) {
               console.log(`⏭️ Node with name "${newNode.name}" already exists in ${folderId}, skipping`);
               return folder;
             }
             return {
               ...folder,
-              children: [...folder.children, newNode].sort((a, b) => a.name.localeCompare(b.name)),
-              metadata: { ...folder.metadata, count: (folder.metadata?.count || 0) + 1 }
+              children: [...existingChildren, newNode].sort((a, b) => a.name.localeCompare(b.name)),
+              metadata: { ...folder.metadata, count: (folder.metadata?.count ?? 0) + 1 }
             };
           });
         });
@@ -2465,13 +2655,13 @@ useEffect(() => {
   syncExistingForeignTables();
 }, [apiService, isConnected, setRepositoryData]);
 
-
 useEffect(() => {
-  if (!databaseContext.apiService || !databaseContext.isConnected) return;
+  const apiService = databaseContext.apiService;
+  if (!apiService || !databaseContext.isConnected) return;
 
   const loadDatabaseMetadataEntries = async () => {
     try {
-      const result = await databaseContext.apiService.getDatabaseMetadataEntries();
+      const result = await apiService.getDatabaseMetadataEntries();
       if (!result.success || !result.entries) {
         console.warn('Failed to load metadata entries:', result.error);
         return;
@@ -2629,12 +2819,13 @@ useEffect(() => {
     );
   }, [repositoryData]);
 
-  useEffect(() => {
-  if (!databaseContext.apiService || !databaseContext.isConnected) return;
+useEffect(() => {
+  const apiService = databaseContext.apiService;
+  if (!apiService || !databaseContext.isConnected) return;
 
   const loadDatabaseMetadataEntries = async () => {
     try {
-      const result = await databaseContext.apiService.getDatabaseMetadataEntries();
+      const result = await apiService.getDatabaseMetadataEntries();
       if (!result.success || !result.entries) {
         console.warn('Failed to load metadata entries:', result.error);
         return;
@@ -3102,7 +3293,7 @@ useEffect(() => {
               expandedMetadataNodes={expandedMetadataNodes}
               onToggle={handleToggle}
               onSelect={handleSelect}
-              onDoubleClick={undefined}
+              onDoubleClick={() => {}} 
               onContextMenu={handleContextMenu}
               onDelete={handleDeleteNode}
               onDragStart={handleDragStart}
@@ -3168,40 +3359,60 @@ useEffect(() => {
             />
           </div>
         )}
+{/* Job Design Context Menu */}
+{jobDesignContextMenu && (
+  <div
+    ref={jobDesignContextMenuRef}
+    className="fixed z-[9999] bg-white dark:bg-gray-800 rounded-lg shadow-xl border border-gray-200 dark:border-gray-700 py-2 min-w-[200px]"
+    style={{
+      left: `${jobDesignContextMenu.position.x}px`,
+      top: `${jobDesignContextMenu.position.y}px`
+    }}
+    onClick={(e) => e.stopPropagation()}
+  >
+    {/* Header with job name */}
+    <div className="px-3 py-2 border-b border-gray-100 dark:border-gray-700">
+      <p className="text-sm font-medium text-gray-900 dark:text-white">
+        {jobDesignContextMenu.node.name}
+      </p>
+    </div>
 
-        {/* Job Design Context Menu */}
-        {jobDesignContextMenu && (
-          <div
-            ref={jobDesignContextMenuRef}
-            className="fixed z-[9999] bg-white dark:bg-gray-800 rounded-lg shadow-xl border border-gray-200 dark:border-gray-700 py-2 min-w-[200px]"
-            style={{
-              left: `${jobDesignContextMenu.position.x}px`,
-              top: `${jobDesignContextMenu.position.y}px`
-            }}
-            onClick={(e) => e.stopPropagation()}
-          >
-            <div className="px-3 py-2 border-b border-gray-100 dark:border-gray-700">
-              <p className="text-sm font-medium text-gray-900 dark:text-white">
-                {jobDesignContextMenu.node.name}
-              </p>
-            </div>
-            {/* 🔥 New "Create Canvas" button */}
-            <button
-              onClick={() => handleCreateCanvasFromJob(jobDesignContextMenu.node)}
-              className="w-full text-left px-4 py-2 text-sm text-gray-700 hover:bg-gray-100 dark:text-gray-200 dark:hover:bg-gray-700"
-            >
-              Create Canvas
-            </button>
-            <div className="border-t border-gray-100 dark:border-gray-700 pt-2 mt-2">
-              <button
-                onClick={() => setJobDesignContextMenu(null)}
-                className="w-full px-3 py-1 text-xs text-center text-gray-500 hover:text-gray-700 dark:text-gray-400 dark:hover:text-gray-300"
-              >
-                Close
-              </button>
-            </div>
-          </div>
-        )}
+    {/* Move to Recycle Bin (placeholder – can be implemented later) */}
+    <button
+      onClick={() => {
+        // TODO: Implement move to recycle bin logic
+        toast.info('Move to Recycle Bin – not yet implemented');
+        setJobDesignContextMenu(null);
+      }}
+      className="w-full text-left px-4 py-2 text-sm text-gray-700 hover:bg-gray-100 dark:text-gray-200 dark:hover:bg-gray-700 flex items-center"
+    >
+      <Trash2 className="h-4 w-4 mr-2" />
+      Move to Recycle Bin
+    </button>
+
+    {/* Delete option */}
+    <button
+      onClick={() => {
+        handleDeleteNode(jobDesignContextMenu.node);
+        setJobDesignContextMenu(null);
+      }}
+      className="w-full text-left px-4 py-2 text-sm text-red-600 hover:bg-red-50 dark:text-red-400 dark:hover:bg-red-900/20 flex items-center"
+    >
+      <Trash2 className="h-4 w-4 mr-2" />
+      Delete
+    </button>
+
+    {/* Separator and Close button */}
+    <div className="border-t border-gray-100 dark:border-gray-700 mt-1 pt-1">
+      <button
+        onClick={() => setJobDesignContextMenu(null)}
+        className="w-full px-3 py-1 text-xs text-center text-gray-500 hover:text-gray-700 dark:text-gray-400 dark:hover:text-gray-300"
+      >
+        Close
+      </button>
+    </div>
+  </div>
+)}
       </div>
 
       {/* Dialogs */}
@@ -3315,51 +3526,8 @@ useEffect(() => {
 // ============================================================================
 // Helper functions used in wizard save handlers
 // ============================================================================
-function generateForeignTableName(metadata: any, type: string): string {
-  const base = metadata.name || metadata.fileName || `etl_${type}`;
-  return base
-    .toLowerCase()
-    .replace(/[^a-z0-9_]/g, '_')
-    .replace(/_{2,}/g, '_')
-    .replace(/^_|_$/g, '')
-    .substring(0, 63);
-}
 
-function extractColumnsFromMetadata(metadata: any, _type: string): ColumnDefinition[] {
-  const columnsArray = metadata.columns || metadata.schema || metadata.fields || [];
-  if (!Array.isArray(columnsArray) || columnsArray.length === 0) {
-    return [];
-  }
-  return columnsArray.map((col: any) => ({
-    name: col.name || col.columnName || 'column',
-    type: col.type || col.dataType || 'TEXT',
-    length: col.length || col.maxLength,
-    precision: col.precision,
-    scale: col.scale,
-    nullable: col.nullable !== false,
-    defaultValue: col.defaultValue,
-  }));
-}
 
-function extractFilePath(metadata: any, _type: string): string {
-  return metadata.filePath || metadata.fileName || metadata.path || '';
-}
 
-function extractOptions(metadata: any, _type: string): Record<string, string> {
-  const options: Record<string, string> = {};
-  if (metadata.delimiter) options.delimiter = metadata.delimiter;
-  if (metadata.header !== undefined) options.header = metadata.header ? 'true' : 'false';
-  if (metadata.encoding) options.encoding = metadata.encoding;
-  if (metadata.sheet) options.sheet = metadata.sheet;
-  if (metadata.recordLength) options.recordLength = String(metadata.recordLength);
-  if (metadata.pattern) options.pattern = metadata.pattern;
-  if (metadata.format) options.format = metadata.format;
-  if (metadata.textQualifier) options.textQualifier = metadata.textQualifier;
-  if (metadata.escape) options.escape = metadata.escape;
-  if (metadata.compression) options.compression = metadata.compression;
-  if (metadata.flags) options.flags = metadata.flags;
-  if (metadata.schemaType) options.schemaType = metadata.schemaType;
-  return options;
-}
 
 export default RepositorySidebar;

@@ -22,6 +22,7 @@ export interface CanvasPersistedData {
   };
 }
 
+
 // Canvas record from database
 export interface CanvasRecord {
   id: string;
@@ -104,6 +105,27 @@ async saveCanvas(
     return this.mapCanvasRecord(result.rows[0]);
   } catch (error) {
     console.error('Error saving canvas:', error);
+    throw error;
+  }
+}
+// ==================== DELETE CANVAS BY ID ====================
+async deleteCanvasById(id: string): Promise<boolean> {
+  try {
+    if (!this.isInitialized) {
+      await this.initialize();
+    }
+
+    const query = `
+      DELETE FROM canvases 
+      WHERE id = $1 
+      RETURNING id
+    `;
+
+    const result = await this.executeAppDbQuery(query, [id]);
+    console.log(`🗑️ Deleted canvas with ID: ${id}, rows affected: ${result.rows.length}`);
+    return result.rows.length > 0;
+  } catch (error) {
+    console.error('Error deleting canvas by ID:', error);
     throw error;
   }
 }
@@ -491,29 +513,29 @@ async saveCanvas(
 
   // ==================== ENSURE CANVAS TABLE EXISTS ====================
   private async ensureCanvasTableExists(connectionId: string): Promise<void> {
-    const createTableSQL = `
-      CREATE TABLE IF NOT EXISTS canvases (
-        id SERIAL PRIMARY KEY,
-        name VARCHAR(255) NOT NULL,
-        data JSONB NOT NULL,
-        version INTEGER DEFAULT 1,
-        owner_id VARCHAR(255),
-        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-        updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-      );
-    `;
-    try {
-      const result = await this.api.executeQuery(connectionId, createTableSQL, { autoDisconnect: false });
-      if (result.success) {
-        console.log('✅ Canvases table created successfully');
-      } else {
-        console.error('❌ Failed to create canvases table:', result.error);
-      }
-    } catch (error) {
-      console.error('❌ Error creating canvases table:', error);
-      throw error;
+  const createTableSQL = `
+    CREATE TABLE IF NOT EXISTS canvases (
+      id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+      name VARCHAR(255) NOT NULL,
+      data JSONB NOT NULL,
+      version INTEGER DEFAULT 1,
+      owner_id VARCHAR(255),
+      created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+      updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+    );
+  `;
+  try {
+    const result = await this.api.executeQuery(connectionId, createTableSQL, { autoDisconnect: false });
+    if (result.success) {
+      console.log('✅ Canvases table created successfully (UUID primary key)');
+    } else {
+      console.error('❌ Failed to create canvases table:', result.error);
     }
+  } catch (error) {
+    console.error('❌ Error creating canvases table:', error);
+    throw error;
   }
+}
 
   // ==================== GET APP DB CONNECTION ID (always fresh) ====================
   private async getAppDbConnectionId(): Promise<string | null> {

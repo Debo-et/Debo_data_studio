@@ -49,10 +49,10 @@ const XMLMetadataWizard: React.FC<XMLMetadataWizardProps> = ({
     schema: []
   });
 
-  const [xmlContent, setXmlContent] = useState<string>('');
+  const [, setXmlContent] = useState<string>('');
   const [isLoading, setIsLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const [parsedStructure, setParsedStructure] = useState<any>(null);
+  const [, setParsedStructure] = useState<any>(null);
   const [rowXPath, setRowXPath] = useState('');                     // local state for row XPath
   const [filteredColumns, setFilteredColumns] = useState<Array<{ name: string; type: string; sample: string }>>([]);
 

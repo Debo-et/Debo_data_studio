@@ -20,72 +20,12 @@ import {
   Database,
   RefreshCw
 } from 'lucide-react';
-
 // Import drag-drop utilities
 import { setupDragEvent } from '../utils/drag-drop.utils';
 
 // Import Database Context - ADDED
 import { DatabaseContext } from '../App'; // Or move context to separate file
-
-
-// Types
-export interface RepositoryNode {
-  id: string;
-  name: string;
-  type: 'category' | 'folder' | 'item' | 'job';
-  icon?: React.ReactNode;
-  children?: RepositoryNode[];
-  metadata?: {
-    description?: string;
-    lastModified?: string;
-    created?: string;
-    size?: string;
-    type?: string;
-    dataType?: string;
-    length?: number;
-    precision?: number;
-    scale?: number;
-    isKey?: boolean;
-    nullable?: boolean;
-    defaultValue?: string;
-    tags?: string[];
-    version?: string;
-    author?: string;
-    status?: string;
-    postgresTableName?: string;
-    connection?: {
-      connectionId?: string;
-      [key: string]: any;
-    };
-    columns?: Array<{
-      name: string;
-      type: string;
-      dataType?: string;
-      length?: number;
-      precision?: number;
-      scale?: number;
-      nullable?: boolean;
-      isKey?: boolean;
-      defaultValue?: string;
-      description?: string;
-      [key: string]: any;
-    }>;
-    schema?: Array<{
-      name: string;
-      type: string;
-      [key: string]: any;
-    }>;
-    fields?: Array<{
-      name: string;
-      type: string;
-      [key: string]: any;
-    }>;
-    [key: string]: any;
-  };
-  draggable?: boolean;
-  droppable?: boolean;
-  parentId?: string;
-}
+import { RepositoryNode } from '../types/types';
 
 export interface TreeNodeProps {
   node: RepositoryNode;
@@ -107,6 +47,8 @@ export interface TreeNodeProps {
   // ADDED: Database interaction props
   onFetchDatabaseData?: (connectionId: string) => Promise<any>;
   onRefreshDatabase?: () => void;
+    expandedMetadataNodes?: Set<string>;
+  onToggleMetadata?: (nodeId: string) => void;
 }
 
 
@@ -514,7 +456,7 @@ const TreeNode: React.FC<TreeNodeProps> = ({
               {/* Database connection indicator - ADDED */}
               {isDatabaseTable && databaseContext.isConnected && (
                 <div className="ml-2 flex items-center">
-                  <Database className="h-3 w-3 text-green-500" title="Connected to PostgreSQL" />
+                  <Database className="h-3 w-3 text-green-500" aria-label="Connected to PostgreSQL" />
                 </div>
               )}
             </div>

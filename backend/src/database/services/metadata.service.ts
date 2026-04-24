@@ -1,3 +1,5 @@
+// backend/src/database/services/metadata.service.ts
+
 import { localPostgres } from '../local-postgres';
 
 export interface SaveMetadataRequest {
@@ -294,5 +296,58 @@ export async function getAllMetadataEntries(): Promise<{
       success: false,
       error: error.message,
     };
+  }
+}
+
+/**
+ * Delete a database metadata entry by its ID.
+ * This cascades to delete all selected_tables and selected_columns records.
+ * The associated connection is NOT deleted automatically – it may be reused elsewhere.
+ */
+export async function deleteDatabaseMetadata(
+  metadataId: string
+): Promise<{ success: boolean; error?: string }> {
+  const pool = localPostgres.getPool();
+  if (!pool) return { success: false, error: 'Database pool not available' };
+
+  const client = await pool.connect();
+  try {
+    await client.query('BEGIN');
+
+    // First, delete all columns belonging to selected tables of this entry
+    await client.query(
+      `DELETE FROM selected_columns
+       WHERE selected_table_id IN (
+         SELECT id FROM selected_tables WHERE metadata_entry_id = $1
+       )`,
+      [metadataId]
+    );
+
+    // Then delete the selected tables
+    await client.query(
+      `DELETE FROM selected_tables WHERE metadata_entry_id = $1`,
+      [metadataId]
+    );
+
+    // Finally delete the metadata entry itself
+    const result = await client.query(
+      `DELETE FROM metadata_entries WHERE id = $1 RETURNING id`,
+      [metadataId]
+    );
+
+    if (result.rowCount === 0) {
+      await client.query('ROLLBACK');
+      return { success: false, error: 'Metadata entry not found' };
+    }
+
+    await client.query('COMMIT');
+    console.log(`✅ Deleted database metadata entry ${metadataId} and all related tables/columns`);
+    return { success: true };
+  } catch (error: any) {
+    await client.query('ROLLBACK');
+    console.error('❌ Failed to delete database metadata:', error);
+    return { success: false, error: error.message };
+  } finally {
+    client.release();
   }
 }

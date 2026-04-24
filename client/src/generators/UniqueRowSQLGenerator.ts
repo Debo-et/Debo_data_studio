@@ -1,107 +1,122 @@
 // src/generators/UniqueRowSQLGenerator.ts
-import { BaseSQLGenerator, SQLGenerationContext, GeneratedSQLFragment } from './BaseSQLGenerator';
+import { BaseSQLGenerator, SQLGenerationContext, GeneratedSQLFragment, SQLGenerationError } from './BaseSQLGenerator';
 
 interface UniqueConfig {
-  columns?: string[];        // columns to consider for uniqueness; if empty, use all
-  keep: 'first' | 'last';    // which row to keep
+  columns?: string[];
+  keep: 'first' | 'last';
 }
 
 export class UniqueRowSQLGenerator extends BaseSQLGenerator {
-  // Implement all required abstract methods (most return empty fragments)
   protected generateJoinConditions(_context: SQLGenerationContext): GeneratedSQLFragment {
     return this.emptyFragment();
   }
-
   protected generateWhereClause(_context: SQLGenerationContext): GeneratedSQLFragment {
     return this.emptyFragment();
   }
-
   protected generateHavingClause(_context: SQLGenerationContext): GeneratedSQLFragment {
     return this.emptyFragment();
   }
-
   protected generateOrderByClause(_context: SQLGenerationContext): GeneratedSQLFragment {
-    // ORDER BY is already included in generateSelectStatement for DISTINCT ON
     return this.emptyFragment();
   }
-
   protected generateGroupByClause(_context: SQLGenerationContext): GeneratedSQLFragment {
     return this.emptyFragment();
   }
 
   protected generateSelectStatement(context: SQLGenerationContext): GeneratedSQLFragment {
-    const { node } = context;
+    const { node, connection, upstreamSchema } = context;
+    const errors: SQLGenerationError[] = [];
+    const warnings: string[] = [];
 
-    // Safely extract the unique configuration
+    // Determine source reference
+    let sourceRef: string;
+    if (connection) {
+      sourceRef = this.sanitizeIdentifier(connection.sourceNodeId);
+    } else {
+      sourceRef = 'unknown_source';
+      warnings.push('No incoming connection; using "unknown_source" as table reference.');
+    }
+
     const config = this.extractUniqueConfig(node);
 
-    // TODO: Replace hardcoded 'source_table' with the actual input source
-    // (e.g., from the upstream node's CTE name or dependency)
+    // If no upstream schema, fallback to SELECT *
+    if (!upstreamSchema || upstreamSchema.length === 0) {
+      warnings.push('No upstream schema available; using SELECT DISTINCT *');
+      const sql = `SELECT DISTINCT * FROM ${sourceRef}`;
+      return {
+        sql,
+        dependencies: connection ? [connection.sourceNodeId] : [],
+        parameters: new Map(),
+        errors,
+        warnings,
+        metadata: { generatedAt: new Date().toISOString(), fragmentType: 'unique_row', lineCount: 1 }
+      };
+    }
+
+    const allColumns = upstreamSchema.map(col => col.name);
+    const distinctCols = config.columns && config.columns.length > 0
+      ? config.columns.filter(col => allColumns.includes(col))
+      : [];
+
     let sql: string;
-    if (config?.columns?.length) {
-      const cols = config.columns.map(c => this.sanitizeIdentifier(c)).join(', ');
-      // ORDER BY is required for DISTINCT ON; we assume a default ordering column exists
-      sql = `SELECT DISTINCT ON (${cols}) * FROM source_table ORDER BY ${cols}, id ${config.keep === 'last' ? 'DESC' : 'ASC'}`;
+    if (distinctCols.length > 0) {
+      const distinctList = distinctCols.map(c => this.sanitizeIdentifier(c)).join(', ');
+      const orderDirection = config.keep === 'last' ? 'DESC' : 'ASC';
+      const orderByClause = distinctCols.map(c => this.sanitizeIdentifier(c) + ' ' + orderDirection).join(', ');
+      const columnList = allColumns.map(c => this.sanitizeIdentifier(c)).join(', ');
+      sql = `SELECT DISTINCT ON (${distinctList}) ${columnList} FROM ${sourceRef} ORDER BY ${orderByClause}`;
     } else {
-      sql = `SELECT DISTINCT * FROM source_table`;
+      const columnList = allColumns.map(c => this.sanitizeIdentifier(c)).join(', ');
+      sql = `SELECT DISTINCT ${columnList} FROM ${sourceRef}`;
     }
 
     return {
       sql,
-      dependencies: ['source_table'], // This should eventually be the upstream CTE/table name
+      dependencies: connection ? [connection.sourceNodeId] : [],
       parameters: new Map(),
-      errors: [],
-      warnings: [],
-      metadata: { generatedAt: new Date().toISOString(), fragmentType: 'unique_row', lineCount: 1 }
+      errors,
+      warnings,
+      metadata: { generatedAt: new Date().toISOString(), fragmentType: 'unique_row', lineCount: sql.split('\n').length }
     };
   }
 
-  /**
-   * Helper to extract UniqueConfig from node metadata.
-   * Returns a default config if none is found.
-   */
   private extractUniqueConfig(node: any): UniqueConfig {
+    // 1. Test builder pattern: metadata.uniqRowConfig.keyColumns
+    if (node.metadata?.uniqRowConfig?.keyColumns) {
+      return {
+        columns: node.metadata.uniqRowConfig.keyColumns,
+        keep: node.metadata.uniqRowConfig.keep === 'last' ? 'last' : 'first',
+      };
+    }
+
+    // 2. Unified configuration wrapper
     const configuration = node.metadata?.configuration;
-    if (!configuration) {
-      // Default config when nothing is provided
-      return { keep: 'first' };
+    if (configuration) {
+      if (configuration.type === 'UNIQ_ROW' && configuration.config) {
+        const cfg = configuration.config;
+        return {
+          columns: cfg.keyColumns || cfg.columns || [],
+          keep: cfg.keep === 'last' ? 'last' : 'first',
+        };
+      }
+      if (configuration.type === 'OTHER' && configuration.config) {
+        const cfg = configuration.config;
+        return {
+          columns: cfg.columns || [],
+          keep: cfg.keep === 'last' ? 'last' : 'first',
+        };
+      }
     }
 
-    // For NodeType.UNIQ_ROW, we expect the config to be stored under the 'config' property
-    // of an 'OTHER' type configuration. If not, fallback to default.
-    if (configuration.type === 'OTHER' && configuration.config) {
-      const rawConfig = configuration.config;
-      // Ensure the required fields exist
-      return {
-        columns: rawConfig.columns || [],
-        keep: rawConfig.keep === 'last' ? 'last' : 'first',
-      };
-    }
-
-    // If the node has a top-level config (legacy), try that too
+    // 3. Legacy metadata locations
     if (node.metadata?.config) {
-      const rawConfig = node.metadata.config;
+      const cfg = node.metadata.config;
       return {
-        columns: rawConfig.columns || [],
-        keep: rawConfig.keep === 'last' ? 'last' : 'first',
+        columns: cfg.keyColumns || cfg.columns || [],
+        keep: cfg.keep === 'last' ? 'last' : 'first',
       };
     }
 
-    // Default fallback
     return { keep: 'first' };
-  }
-
-  /**
-   * Returns an empty SQL fragment (used for unused clauses).
-   */
-  private emptyFragment(): GeneratedSQLFragment {
-    return {
-      sql: '',
-      dependencies: [],
-      parameters: new Map(),
-      errors: [],
-      warnings: [],
-      metadata: { generatedAt: new Date().toISOString(), fragmentType: 'empty', lineCount: 0 }
-    };
   }
 }

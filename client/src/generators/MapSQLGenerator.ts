@@ -1,8 +1,9 @@
 // src/generators/MapSQLGenerator.ts
 
 import { BaseSQLGenerator, SQLGenerationContext, GeneratedSQLFragment, SQLGenerationError } from './BaseSQLGenerator';
-import { CanvasNode, SchemaMapping, TransformationRule, PostgreSQLDataType, SortConfig, CanvasConnection } from '../types/pipeline-types';
-import { UnifiedCanvasNode } from '@/types/unified-pipeline.types';
+import { SchemaMapping, TransformationRule, PostgreSQLDataType, SortConfig } from '../types/pipeline-types';
+import { UnifiedCanvasNode, UnifiedCanvasConnection, MapComponentConfiguration } from '@/types/unified-pipeline.types';
+import { globalLogger } from '../utils/Logger';
 
 // Import MapEditor types for canvas integration
 interface ColumnDefinition {
@@ -49,50 +50,85 @@ export interface CanvasMappingContext {
  * Handles column mapping, transformations, expression evaluation, and canvas-based SQL generation
  */
 export class MapSQLGenerator extends BaseSQLGenerator {
+  // ==================== CONSTRUCTOR WITH LOGGING ====================
+  constructor(options?: any) {
+    super(options);
+    globalLogger.debug(`[MapSQLGenerator] Constructor called with options:`, options);
+  }
+
   // ==================== TEMPLATE METHOD IMPLEMENTATIONS ====================
 
   protected generateSelectStatement(context: SQLGenerationContext): GeneratedSQLFragment {
-    const { node, connection } = context;
+    globalLogger.debug(`[MapSQLGenerator] generateSelectStatement called for node ${context.node.id} (${context.node.name})`, {
+      hasUpstreamSchema: !!context.upstreamSchema,
+      upstreamSchemaLength: context.upstreamSchema?.length,
+      hasConnection: !!context.connection,
+      connectionSourceId: context.connection?.sourceNodeId,
+    });
+
+    const { node, connection, upstreamSchema } = context;
+    
+    // Extract mappings from node metadata (supports MapComponentConfiguration)
     const mappings = this.extractSchemaMappings(node, connection);
+    const transformationRules = node.metadata?.transformationRules || [];
+
+    globalLogger.debug(`[MapSQLGenerator] Extracted ${mappings.length} mappings and ${transformationRules.length} transformation rules`);
 
     if (mappings.length === 0) {
+      globalLogger.warn(`[MapSQLGenerator] No mappings found for node ${node.id}, falling back to SELECT *`);
       return this.generateFallbackSelect(context);
     }
 
-    // Build SELECT clause with mappings – now includes type casting
-    const selectColumns = this.generateMappedColumns(
-      mappings,
-      node.metadata?.transformationRules || [],
-      node   // <-- pass node to access output schema
-    );
-
-    // Determine the source table/CTE reference
-    let sourceRef = 'source_table';
-    if (connection && connection.sourceNodeId) {
-      sourceRef = connection.sourceNodeId;
-    } else {
-      this.logger?.warn('tMap node has no incoming connection; using placeholder source.');
+    // Validate mappings against upstream schema
+    const errors: SQLGenerationError[] = [];
+    const warnings: string[] = [];
+    this.validateMappings(upstreamSchema || [], mappings, errors, warnings);
+    if (errors.length > 0) {
+      globalLogger.warn(`[MapSQLGenerator] Validation errors: ${errors.map(e => e.message).join(', ')}`);
+    }
+    if (warnings.length > 0) {
+      globalLogger.warn(`[MapSQLGenerator] Validation warnings: ${warnings.join(', ')}`);
     }
 
-    const sql = `SELECT ${selectColumns} FROM ${this.sanitizeIdentifier(sourceRef)}`;
+    // Determine source table/CTE reference
+    let sourceRef = 'source_table';
+    if (connection && connection.sourceNodeId) {
+      sourceRef = this.sanitizeIdentifier(connection.sourceNodeId);
+      globalLogger.debug(`[MapSQLGenerator] Using source reference from connection: ${sourceRef}`);
+    } else {
+      warnings.push('No incoming connection found for tMap node. Using placeholder source.');
+      globalLogger.warn(`[MapSQLGenerator] No incoming connection, using placeholder source: ${sourceRef}`);
+    }
+
+    // Build SELECT clause with proper type casting and transformations
+    const selectColumns = this.generateMappedColumns(
+      mappings,
+      transformationRules,
+      node,
+      upstreamSchema || []
+    );
+
+    const sql = `SELECT ${selectColumns} FROM ${sourceRef}`;
+    globalLogger.debug(`[MapSQLGenerator] Generated SELECT SQL: ${sql.substring(0, 200)}...`);
 
     return {
       sql,
       dependencies: this.extractSourceDependencies(mappings),
       parameters: new Map(),
-      errors: [],
-      warnings: connection ? [] : ['No incoming connection found for tMap node. Using placeholder source.'],
+      errors,
+      warnings,
       metadata: {
         generatedAt: new Date().toISOString(),
         fragmentType: 'map_select',
-        lineCount: 1
+        lineCount: 1,
+        outputColumns: mappings.map(m => m.targetColumn)
       }
     };
   }
 
   protected generateJoinConditions(_context: SQLGenerationContext): GeneratedSQLFragment {
     // MAP nodes typically don't have JOIN conditions
-    return this.emptyFragment('join_conditions');
+    return this.createEmptyFragment('join_conditions');
   }
 
   protected generateWhereClause(context: SQLGenerationContext): GeneratedSQLFragment {
@@ -101,10 +137,11 @@ export class MapSQLGenerator extends BaseSQLGenerator {
       .filter((rule: { type: string; }) => rule.type === 'filter');
     
     if (filterRules.length === 0) {
-      return this.emptyFragment('where_clause');
+      return this.createEmptyFragment('where_clause');
     }
 
     const whereClause = this.buildFilterConditions(filterRules);
+    globalLogger.debug(`[MapSQLGenerator] Generated WHERE clause: ${whereClause}`);
     
     return {
       sql: `WHERE ${whereClause}`,
@@ -122,22 +159,23 @@ export class MapSQLGenerator extends BaseSQLGenerator {
 
   protected generateHavingClause(_context: SQLGenerationContext): GeneratedSQLFragment {
     // MAP nodes typically don't use HAVING
-    return this.emptyFragment('having_clause');
+    return this.createEmptyFragment('having_clause');
   }
 
   protected generateOrderByClause(context: SQLGenerationContext): GeneratedSQLFragment {
     const { node } = context;
     
     if (node.metadata?.sortConfig) {
+      globalLogger.debug(`[MapSQLGenerator] Generating ORDER BY from sortConfig`, node.metadata.sortConfig);
       return this.generateOrderByFromSortConfig(node.metadata.sortConfig);
     }
     
-    return this.emptyFragment('order_by_clause');
+    return this.createEmptyFragment('order_by_clause');
   }
 
   protected generateGroupByClause(_context: SQLGenerationContext): GeneratedSQLFragment {
     // MAP nodes typically don't use GROUP BY
-    return this.emptyFragment('group_by_clause');
+    return this.createEmptyFragment('group_by_clause');
   }
 
   // ==================== CANVAS INTEGRATION METHODS ====================
@@ -147,12 +185,23 @@ export class MapSQLGenerator extends BaseSQLGenerator {
    * FIXED: Supports simple direct mapping, type casting, transformations, multiple wires to same target.
    */
   public generateSQLFromCanvasMapping(context: CanvasMappingContext): GeneratedSQLFragment {
+    globalLogger.debug(`[MapSQLGenerator] generateSQLFromCanvasMapping called`, {
+      nodeId: context.nodeId,
+      nodeName: context.nodeName,
+      sourceTablesCount: context.sourceTables.length,
+      targetTablesCount: context.targetTables.length,
+      wiresCount: context.wires.length,
+      hasNode: !!context.node,
+    });
+
     const errors: SQLGenerationError[] = [];
     const warnings: string[] = [];
     
     // Extract primary source and target tables
     const primarySourceTable = context.sourceTables.find(t => t.type === 'input');
     const primaryTargetTable = context.targetTables.find(t => t.type === 'output');
+    
+    globalLogger.debug(`[MapSQLGenerator] Primary source table: ${primarySourceTable?.name || 'none'}, primary target table: ${primaryTargetTable?.name || 'none'}`);
     
     if (!primarySourceTable || !primaryTargetTable) {
       errors.push({
@@ -161,6 +210,7 @@ export class MapSQLGenerator extends BaseSQLGenerator {
         severity: 'ERROR',
         field: 'tables'
       });
+      globalLogger.error(`[MapSQLGenerator] Missing primary source/target table`);
       return this.errorFragment('canvas_mapping', errors, warnings);
     }
     
@@ -176,8 +226,10 @@ export class MapSQLGenerator extends BaseSQLGenerator {
         });
       });
       warnings.push(...validation.warnings);
+      globalLogger.warn(`[MapSQLGenerator] Canvas validation failed`, { errors: validation.errors, warnings: validation.warnings });
     } else {
       warnings.push(...validation.warnings);
+      globalLogger.debug(`[MapSQLGenerator] Canvas validation passed, warnings: ${validation.warnings.length}`);
     }
     
     // Group wires by target column to handle multiple wires to same target
@@ -189,15 +241,20 @@ export class MapSQLGenerator extends BaseSQLGenerator {
       }
       targetToWiresMap.get(targetColId)!.push(wire);
     }
+    globalLogger.debug(`[MapSQLGenerator] Grouped wires into ${targetToWiresMap.size} target column groups`);
 
     // Build explicit mappings from grouped wires
     const explicitMappings: SchemaMapping[] = [];
     for (const [targetColId, wiresForTarget] of targetToWiresMap.entries()) {
       const targetColumn = primaryTargetTable.columns.find(c => c.id === targetColId);
-      if (!targetColumn) continue;
+      if (!targetColumn) {
+        globalLogger.debug(`[MapSQLGenerator] Target column ${targetColId} not found in primary target table`);
+        continue;
+      }
 
       // If multiple wires to same target, combine into a CONCAT expression
       if (wiresForTarget.length > 1) {
+        globalLogger.debug(`[MapSQLGenerator] Multiple wires (${wiresForTarget.length}) for target column ${targetColumn.name}, using CONCAT`);
         const sourceExpressions: string[] = [];
         let defaultValue: any = undefined;
         for (const wire of wiresForTarget) {
@@ -226,9 +283,11 @@ export class MapSQLGenerator extends BaseSQLGenerator {
           if (wire.transformation) {
             // Replace {column} placeholders with actual column names
             expression = this.replaceColumnPlaceholders(wire.transformation, context.sourceTables);
+            globalLogger.debug(`[MapSQLGenerator] Wire ${wire.id} has transformation: ${wire.transformation} -> ${expression}`);
           } else {
             // Simple direct mapping: use unqualified column name (no table prefix)
             expression = this.sanitizeIdentifier(sourceColumn.name);
+            globalLogger.debug(`[MapSQLGenerator] Direct mapping: ${sourceColumn.name} -> ${targetColumn.name}`);
           }
           explicitMappings.push({
             sourceColumn: expression,
@@ -238,6 +297,8 @@ export class MapSQLGenerator extends BaseSQLGenerator {
             isRequired: true,
             defaultValue: wire.defaultValue
           });
+        } else {
+          globalLogger.warn(`[MapSQLGenerator] Source column not found for wire ${wire.id}`);
         }
       }
     }
@@ -251,12 +312,15 @@ export class MapSQLGenerator extends BaseSQLGenerator {
         primaryTargetTable,
         mappedTargetNames
       );
+      globalLogger.debug(`[MapSQLGenerator] Generated ${defaultMappings.length} default positional mappings`);
     }
     
     const allMappings = [...explicitMappings, ...defaultMappings];
+    globalLogger.debug(`[MapSQLGenerator] Total mappings: ${allMappings.length} (explicit: ${explicitMappings.length}, default: ${defaultMappings.length})`);
     
     if (allMappings.length === 0) {
       warnings.push('No column mappings found. Using SELECT * fallback.');
+      globalLogger.warn(`[MapSQLGenerator] No mappings, using fallback SELECT *`);
       return {
         sql: `SELECT * FROM ${this.sanitizeIdentifier(primarySourceTable.name)}`,
         dependencies: [primarySourceTable.name],
@@ -279,6 +343,7 @@ export class MapSQLGenerator extends BaseSQLGenerator {
     
     // Extract transformation rules from variables
     const transformationRules = this.extractTransformationRulesFromVariables(context.variables);
+    globalLogger.debug(`[MapSQLGenerator] Extracted ${transformationRules.length} transformation rules from variables`);
     
     // Build SELECT clause with proper type casting (using output schema from context.node)
     const selectColumns = this.buildSelectClauseFromMappings(
@@ -289,6 +354,7 @@ export class MapSQLGenerator extends BaseSQLGenerator {
     );
     
     const sql = `SELECT ${selectColumns} FROM ${this.sanitizeIdentifier(primarySourceTable.name)}`;
+    globalLogger.debug(`[MapSQLGenerator] Final SQL from canvas mapping: ${sql.substring(0, 300)}...`);
     
     return {
       sql,
@@ -331,6 +397,14 @@ export class MapSQLGenerator extends BaseSQLGenerator {
       distinct?: boolean;
     } = {}
   ): GeneratedSQLFragment {
+    globalLogger.debug(`[MapSQLGenerator] generateInsertSelectSQL called`, {
+      sourceTable,
+      targetTable,
+      mappingsCount: mappings.length,
+      transformationRulesCount: transformationRules.length,
+      options
+    });
+
     const errors: SQLGenerationError[] = [];
     const warnings: string[] = [];
     
@@ -341,6 +415,7 @@ export class MapSQLGenerator extends BaseSQLGenerator {
         severity: 'ERROR',
         field: 'mappings'
       });
+      globalLogger.error(`[MapSQLGenerator] No mappings provided`);
       return this.errorFragment('insert_select', errors, warnings);
     }
     
@@ -362,6 +437,7 @@ export class MapSQLGenerator extends BaseSQLGenerator {
     );
     
     if (mappingResult.errors.length > 0) {
+      globalLogger.error(`[MapSQLGenerator] Mapping SQL generation failed`, mappingResult.errors);
       return mappingResult;
     }
     
@@ -374,6 +450,7 @@ export class MapSQLGenerator extends BaseSQLGenerator {
         severity: 'ERROR',
         field: 'sql'
       });
+      globalLogger.error(`[MapSQLGenerator] Failed to extract SELECT clause from mapping SQL: ${mappingResult.sql}`);
       return this.errorFragment('insert_select', errors, warnings);
     }
     
@@ -430,6 +507,8 @@ export class MapSQLGenerator extends BaseSQLGenerator {
       warnings.push('Consider adding indexes on join/where columns for large datasets');
     }
     
+    globalLogger.debug(`[MapSQLGenerator] Generated INSERT SELECT SQL: ${sql.substring(0, 200)}...`);
+    
     return {
       sql,
       dependencies: [sourceTable, targetTable],
@@ -463,10 +542,13 @@ export class MapSQLGenerator extends BaseSQLGenerator {
       updateColumns?: string[];
     } = {}
   ): GeneratedSQLFragment {
+    globalLogger.debug(`[MapSQLGenerator] generateInsertSelectFromCanvasMapping called`, { options });
+    
     const primarySourceTable = context.sourceTables.find(t => t.type === 'input');
     const primaryTargetTable = context.targetTables.find(t => t.type === 'output');
     
     if (!primarySourceTable || !primaryTargetTable) {
+      globalLogger.error(`[MapSQLGenerator] Missing source or target table for canvas insert select`);
       return this.errorFragment('canvas_insert_select', [{
         code: 'INVALID_CONFIG',
         message: 'Missing source or target table',
@@ -481,6 +563,7 @@ export class MapSQLGenerator extends BaseSQLGenerator {
       context.sourceTables,
       context.targetTables
     );
+    globalLogger.debug(`[MapSQLGenerator] Extracted ${mappings.length} mappings from wires`);
     
     // Apply default positional mapping
     const defaultMappings = this.generateDefaultPositionalMappings(
@@ -490,6 +573,7 @@ export class MapSQLGenerator extends BaseSQLGenerator {
     );
     
     const allMappings = [...mappings, ...defaultMappings];
+    globalLogger.debug(`[MapSQLGenerator] Total mappings after adding defaults: ${allMappings.length}`);
     
     // Extract transformation rules
     const transformationRules = this.extractTransformationRulesFromVariables(context.variables);
@@ -517,6 +601,8 @@ export class MapSQLGenerator extends BaseSQLGenerator {
       options?: any;
     }>
   ): GeneratedSQLFragment {
+    globalLogger.debug(`[MapSQLGenerator] generateETLPipelineSQL called with ${stages.length} stages`);
+    
     const errors: SQLGenerationError[] = [];
     const warnings: string[] = [];
     const allSQL: string[] = [];
@@ -527,6 +613,7 @@ export class MapSQLGenerator extends BaseSQLGenerator {
     allSQL.push('');
     
     stages.forEach((stageConfig, index) => {
+      globalLogger.debug(`[MapSQLGenerator] Generating stage ${index + 1}: ${stageConfig.stage}`);
       const stageResult = this.generateInsertSelectSQL(
         stageConfig.sourceTable,
         stageConfig.targetTable,
@@ -540,10 +627,12 @@ export class MapSQLGenerator extends BaseSQLGenerator {
           ...err,
           message: `Stage ${index + 1} (${stageConfig.stage}): ${err.message}`
         })));
+        globalLogger.error(`[MapSQLGenerator] Stage ${index + 1} failed`, stageResult.errors);
       }
       
       if (stageResult.warnings.length > 0) {
         warnings.push(...stageResult.warnings.map(w => `Stage ${index + 1}: ${w}`));
+        globalLogger.warn(`[MapSQLGenerator] Stage ${index + 1} warnings`, stageResult.warnings);
       }
       
       allSQL.push(`-- Stage ${index + 1}: ${stageConfig.stage}`);
@@ -592,6 +681,13 @@ export class MapSQLGenerator extends BaseSQLGenerator {
       parameterize?: boolean;
     } = {}
   ): GeneratedSQLFragment {
+    globalLogger.debug(`[MapSQLGenerator] generateMappingSQL called`, {
+      sourceColumnsCount: sourceColumns.length,
+      mappingsCount: mappings.length,
+      transformationRulesCount: transformationRules.length,
+      options
+    });
+
     const errors: SQLGenerationError[] = [];
     const warnings: string[] = [];
 
@@ -607,6 +703,7 @@ export class MapSQLGenerator extends BaseSQLGenerator {
     this.validateMappings(sourceColumns, mappings, errors, warnings);
 
     if (errors.length > 0) {
+      globalLogger.error(`[MapSQLGenerator] Mapping validation failed`, errors);
       return this.errorFragment('mapping_generation', errors, warnings);
     }
 
@@ -617,6 +714,7 @@ export class MapSQLGenerator extends BaseSQLGenerator {
       transformationRules,
       mergedOptions
     );
+    globalLogger.debug(`[MapSQLGenerator] Generated ${columnExpressions.length} column expressions`);
 
     // Apply conditional logic
     const transformedExpressions = this.applyConditionalLogic(
@@ -629,6 +727,7 @@ export class MapSQLGenerator extends BaseSQLGenerator {
       transformedExpressions,
       this.determineSourceTable(mappings)
     );
+    globalLogger.debug(`[MapSQLGenerator] Generated mapping SQL: ${sql.substring(0, 200)}...`);
 
     // Add performance hints
     const performanceHints = this.generateMappingPerformanceHints(mappings, transformationRules);
@@ -655,6 +754,11 @@ export class MapSQLGenerator extends BaseSQLGenerator {
     mappings: SchemaMapping[],
     transformationRules: TransformationRule[]
   ): string[] {
+    globalLogger.debug(`[MapSQLGenerator] generateCaseStatements called`, {
+      mappingsCount: mappings.length,
+      transformationRulesCount: transformationRules.length
+    });
+
     const caseStatements: string[] = [];
 
     mappings.forEach(mapping => {
@@ -673,6 +777,7 @@ export class MapSQLGenerator extends BaseSQLGenerator {
         
         if (caseStatement) {
           caseStatements.push(caseStatement);
+          globalLogger.debug(`[MapSQLGenerator] Generated CASE statement for ${mapping.targetColumn}: ${caseStatement.substring(0, 100)}...`);
         }
       }
     });
@@ -687,12 +792,15 @@ export class MapSQLGenerator extends BaseSQLGenerator {
     expression: string,
     sourceColumns: Array<{ name: string; dataType: PostgreSQLDataType }>
   ): { sql: string; errors: string[] } {
+    globalLogger.debug(`[MapSQLGenerator] generateExpressionEvaluation called`, { expression, sourceColumnsCount: sourceColumns.length });
+    
     const errors: string[] = [];
 
     // Validate expression syntax
     const validationResult = this.validateExpression(expression, sourceColumns);
     if (!validationResult.valid) {
       errors.push(...validationResult.errors);
+      globalLogger.warn(`[MapSQLGenerator] Expression validation failed`, { expression, errors });
       return { sql: '', errors };
     }
 
@@ -708,6 +816,7 @@ export class MapSQLGenerator extends BaseSQLGenerator {
       sql = this.addTypeCasting(sql, inferredType);
     }
 
+    globalLogger.debug(`[MapSQLGenerator] Expression evaluation result: ${sql}`);
     return { sql, errors };
   }
 
@@ -721,6 +830,8 @@ export class MapSQLGenerator extends BaseSQLGenerator {
     sourceTables: TableDefinition[],
     targetTables: TableDefinition[]
   ): SchemaMapping[] {
+    globalLogger.debug(`[MapSQLGenerator] extractMappingsFromWires called with ${wires.length} wires`);
+    
     const mappings: SchemaMapping[] = [];
     
     wires.forEach(wire => {
@@ -738,6 +849,9 @@ export class MapSQLGenerator extends BaseSQLGenerator {
           isRequired: true,
           defaultValue: undefined
         });
+        globalLogger.debug(`[MapSQLGenerator] Mapped ${sourceTable?.name}.${sourceColumn.name} -> ${targetColumn.name}`);
+      } else {
+        globalLogger.warn(`[MapSQLGenerator] Could not resolve mapping for wire ${wire.id}: sourceColumn=${wire.sourceColumnId}, targetColumn=${wire.targetColumnId}`);
       }
     });
     
@@ -752,6 +866,12 @@ export class MapSQLGenerator extends BaseSQLGenerator {
     targetTable: TableDefinition,
     alreadyMappedTargetNames: Set<string>
   ): SchemaMapping[] {
+    globalLogger.debug(`[MapSQLGenerator] generateDefaultPositionalMappings called`, {
+      sourceTable: sourceTable.name,
+      targetTable: targetTable.name,
+      alreadyMappedCount: alreadyMappedTargetNames.size
+    });
+
     const defaultMappings: SchemaMapping[] = [];
     
     // Get unmapped target columns
@@ -764,6 +884,7 @@ export class MapSQLGenerator extends BaseSQLGenerator {
     
     // Map by position
     const maxPosition = Math.min(sourceColumns.length, unmappedTargetColumns.length);
+    globalLogger.debug(`[MapSQLGenerator] Positional mapping: source columns=${sourceColumns.length}, unmapped targets=${unmappedTargetColumns.length}, maxPosition=${maxPosition}`);
     
     for (let i = 0; i < maxPosition; i++) {
       const sourceColName = sourceColumns[i];
@@ -779,6 +900,7 @@ export class MapSQLGenerator extends BaseSQLGenerator {
           isRequired: true,
           defaultValue: undefined
         });
+        globalLogger.debug(`[MapSQLGenerator] Positional mapping ${i}: ${sourceColName} -> ${targetColName}`);
       }
     }
     
@@ -796,6 +918,7 @@ export class MapSQLGenerator extends BaseSQLGenerator {
     const targetPGType = this.stringToPostgreSQLDataType(targetType);
     
     if (sourcePGType !== targetPGType) {
+      globalLogger.debug(`[MapSQLGenerator] Data type conversion needed: ${sourceType} (${sourcePGType}) -> ${targetType} (${targetPGType})`);
       return {
         from: sourcePGType,
         to: targetPGType,
@@ -840,13 +963,17 @@ export class MapSQLGenerator extends BaseSQLGenerator {
       'BIGSERIAL': PostgreSQLDataType.BIGSERIAL
     };
     
-    return typeMap[typeUpper] || PostgreSQLDataType.VARCHAR;
+    const result = typeMap[typeUpper] || PostgreSQLDataType.VARCHAR;
+    globalLogger.debug(`[MapSQLGenerator] stringToPostgreSQLDataType: ${type} -> ${result}`);
+    return result;
   }
 
   /**
    * Extract transformation rules from canvas variables
    */
   private extractTransformationRulesFromVariables(variables: any[]): TransformationRule[] {
+    globalLogger.debug(`[MapSQLGenerator] extractTransformationRulesFromVariables called with ${variables.length} variables`);
+    
     const rules: TransformationRule[] = [];
     
     variables.forEach((variable, index) => {
@@ -863,6 +990,7 @@ export class MapSQLGenerator extends BaseSQLGenerator {
             },
             order: index + 1
           });
+          globalLogger.debug(`[MapSQLGenerator] Extracted arithmetic rule from variable ${variable.name}: ${variable.expression}`);
         } else if (variable.expression.includes('UPPER') || variable.expression.includes('LOWER') ||
                    variable.expression.includes('TRIM') || variable.expression.includes('CONCAT')) {
           rules.push({
@@ -874,6 +1002,7 @@ export class MapSQLGenerator extends BaseSQLGenerator {
             },
             order: index + 1
           });
+          globalLogger.debug(`[MapSQLGenerator] Extracted string rule from variable ${variable.name}: ${variable.expression}`);
         } else if (variable.expression.includes('EXTRACT') || variable.expression.includes('DATE')) {
           rules.push({
             id: `var_${index}`,
@@ -884,6 +1013,7 @@ export class MapSQLGenerator extends BaseSQLGenerator {
             },
             order: index + 1
           });
+          globalLogger.debug(`[MapSQLGenerator] Extracted date rule from variable ${variable.name}: ${variable.expression}`);
         }
       }
     });
@@ -900,6 +1030,12 @@ export class MapSQLGenerator extends BaseSQLGenerator {
     warnings: string[];
     suggestions: string[];
   } {
+    globalLogger.debug(`[MapSQLGenerator] validateCanvasMapping called`, {
+      sourceTablesCount: context.sourceTables.length,
+      targetTablesCount: context.targetTables.length,
+      wiresCount: context.wires.length
+    });
+
     const errors: string[] = [];
     const warnings: string[] = [];
     const suggestions: string[] = [];
@@ -980,6 +1116,8 @@ export class MapSQLGenerator extends BaseSQLGenerator {
       });
     }
     
+    globalLogger.debug(`[MapSQLGenerator] Validation result: isValid=${errors.length === 0}, errors=${errors.length}, warnings=${warnings.length}`);
+    
     return {
       isValid: errors.length === 0,
       errors,
@@ -996,6 +1134,13 @@ export class MapSQLGenerator extends BaseSQLGenerator {
     transformationRules: TransformationRule[],
     options: { preserveNulls?: boolean; useCoalesce?: boolean; parameterize?: boolean }
   ): Array<{ expression: string; alias: string }> {
+    globalLogger.debug(`[MapSQLGenerator] generateColumnExpressions called`, {
+      sourceColumnsCount: sourceColumns.length,
+      mappingsCount: mappings.length,
+      transformationRulesCount: transformationRules.length,
+      options
+    });
+
     const expressions: Array<{ expression: string; alias: string }> = [];
 
     mappings.forEach(mapping => {
@@ -1010,6 +1155,7 @@ export class MapSQLGenerator extends BaseSQLGenerator {
         expression,
         alias: mapping.targetColumn
       });
+      globalLogger.debug(`[MapSQLGenerator] Column expression: ${expression} AS ${mapping.targetColumn}`);
     });
 
     // Handle unmapped source columns
@@ -1021,6 +1167,7 @@ export class MapSQLGenerator extends BaseSQLGenerator {
             expression: this.sanitizeIdentifier(sourceCol.name),
             alias: sourceCol.name
           });
+          globalLogger.debug(`[MapSQLGenerator] Preserved unmapped column: ${sourceCol.name}`);
         }
       });
     }
@@ -1034,6 +1181,8 @@ export class MapSQLGenerator extends BaseSQLGenerator {
     transformationRules: TransformationRule[],
     options: { useCoalesce?: boolean; parameterize?: boolean }
   ): string {
+    globalLogger.debug(`[MapSQLGenerator] buildColumnExpression for mapping ${mapping.sourceColumn} -> ${mapping.targetColumn}`);
+    
     // Base expression – use sanitized qualified identifier to handle column names with spaces
     let expression = this.sanitizeQualifiedIdentifier(mapping.sourceColumn);
 
@@ -1041,27 +1190,33 @@ export class MapSQLGenerator extends BaseSQLGenerator {
     if (mapping.dataTypeConversion) {
       const sourceCol = sourceColumns.find(c => c.name === mapping.sourceColumn.split('.').pop());
       if (sourceCol) {
+        const before = expression;
         expression = this.applyDataTypeConversion(
           expression,
           sourceCol.dataType,
           mapping.dataTypeConversion.to,
           mapping.dataTypeConversion.params
         );
+        globalLogger.debug(`[MapSQLGenerator] Applied data type conversion: ${before} -> ${expression}`);
       }
     }
 
     // Apply transformation if specified
     if (mapping.transformation) {
+      const before = expression;
       expression = this.applyTransformation(
         expression,
         mapping.transformation,
         sourceColumns
       );
+      globalLogger.debug(`[MapSQLGenerator] Applied transformation: ${before} -> ${expression}`);
     }
 
     // Apply COALESCE for NULL handling (if enabled)
     if (options.useCoalesce && mapping.defaultValue !== undefined) {
+      const before = expression;
       expression = `COALESCE(${expression}, ${this.sanitizeValue(mapping.defaultValue)})`;
+      globalLogger.debug(`[MapSQLGenerator] Applied COALESCE: ${before} -> ${expression}`);
     }
 
     // Apply transformation rules
@@ -1070,7 +1225,9 @@ export class MapSQLGenerator extends BaseSQLGenerator {
     );
     
     if (rules.length > 0) {
+      const before = expression;
       expression = this.applyTransformationRules(expression, rules);
+      globalLogger.debug(`[MapSQLGenerator] Applied ${rules.length} transformation rules: ${before} -> ${expression}`);
     }
 
     // Parameterize if requested
@@ -1273,64 +1430,68 @@ export class MapSQLGenerator extends BaseSQLGenerator {
   // ==================== VALIDATION AND OPTIMIZATION ====================
 
   private validateMappings(
-    sourceColumns: Array<{ name: string; dataType: PostgreSQLDataType }>,
-    mappings: SchemaMapping[],
-    errors: SQLGenerationError[],
-    warnings: string[]
-  ): void {
-    const sourceColumnNames = new Set(sourceColumns.map(c => c.name));
-    
-    mappings.forEach(mapping => {
-      // Extract the column name from qualified identifier
-      const sourceColumnSimple = mapping.sourceColumn.split('.').pop() || mapping.sourceColumn;
-      
-      // Check if source column exists
-      if (!sourceColumnNames.has(sourceColumnSimple)) {
+  sourceColumns: Array<{ name: string; dataType: PostgreSQLDataType }>,
+  mappings: SchemaMapping[],
+  errors: SQLGenerationError[],
+  warnings: string[]
+): void {
+  const sourceColumnNames = new Set(sourceColumns.map(c => c.name));
+
+  mappings.forEach(mapping => {
+    // Extract the column name from qualified identifier
+    const sourceColumnSimple = mapping.sourceColumn.split('.').pop() || mapping.sourceColumn;
+
+    // Skip existence check if the sourceColumn is an expression
+    if (!this.isExpression(mapping.sourceColumn) && !sourceColumnNames.has(sourceColumnSimple)) {
+      errors.push({
+        code: 'SOURCE_COLUMN_NOT_FOUND',
+        message: `Source column "${sourceColumnSimple}" not found`,
+        severity: 'ERROR',
+        field: 'sourceColumn'
+      });
+      globalLogger.warn(`[MapSQLGenerator] Source column not found: ${sourceColumnSimple}`);
+    }
+
+    // Validate data type conversions
+    if (mapping.dataTypeConversion) {
+      const sourceCol = sourceColumns.find(c => c.name === sourceColumnSimple);
+      if (sourceCol) {
+        const isCompatible = this.validateDataTypeCompatibility(
+          sourceCol.dataType,
+          mapping.dataTypeConversion.to
+        );
+
+        if (!isCompatible) {
+          warnings.push(`Data type conversion from ${sourceCol.dataType} to ${mapping.dataTypeConversion.to} may lose precision`);
+          globalLogger.warn(`[MapSQLGenerator] Incompatible type conversion: ${sourceCol.dataType} -> ${mapping.dataTypeConversion.to}`);
+        }
+      }
+    }
+
+    // Validate transformation syntax
+    if (mapping.transformation) {
+      const validation = this.validateExpression(mapping.transformation, sourceColumns);
+      if (!validation.valid) {
         errors.push({
-          code: 'SOURCE_COLUMN_NOT_FOUND',
-          message: `Source column "${sourceColumnSimple}" not found`,
+          code: 'INVALID_TRANSFORMATION',
+          message: `Invalid transformation for column "${mapping.targetColumn}": ${validation.errors[0]}`,
           severity: 'ERROR',
-          field: 'sourceColumn'
+          field: 'transformation'
         });
+        globalLogger.warn(`[MapSQLGenerator] Invalid transformation for ${mapping.targetColumn}: ${validation.errors[0]}`);
       }
-      
-      // Validate data type conversions
-      if (mapping.dataTypeConversion) {
-        const sourceCol = sourceColumns.find(c => c.name === sourceColumnSimple);
-        if (sourceCol) {
-          const isCompatible = this.validateDataTypeCompatibility(
-            sourceCol.dataType,
-            mapping.dataTypeConversion.to
-          );
-          
-          if (!isCompatible) {
-            warnings.push(`Data type conversion from ${sourceCol.dataType} to ${mapping.dataTypeConversion.to} may lose precision`);
-          }
-        }
-      }
-      
-      // Validate transformation syntax
-      if (mapping.transformation) {
-        const validation = this.validateExpression(mapping.transformation, sourceColumns);
-        if (!validation.valid) {
-          errors.push({
-            code: 'INVALID_TRANSFORMATION',
-            message: `Invalid transformation for column "${mapping.targetColumn}": ${validation.errors[0]}`,
-            severity: 'ERROR',
-            field: 'transformation'
-          });
-        }
-      }
-    });
-    
-    // Check for duplicate target columns
-    const targetColumns = mappings.map(m => m.targetColumn);
-    const duplicates = targetColumns.filter((col, index) => targetColumns.indexOf(col) !== index);
-    
-    duplicates.forEach(dup => {
-      warnings.push(`Duplicate target column: "${dup}"`);
-    });
-  }
+    }
+  });
+
+  // Check for duplicate target columns
+  const targetColumns = mappings.map(m => m.targetColumn);
+  const duplicates = targetColumns.filter((col, index) => targetColumns.indexOf(col) !== index);
+
+  duplicates.forEach(dup => {
+    warnings.push(`Duplicate target column: "${dup}"`);
+    globalLogger.warn(`[MapSQLGenerator] Duplicate target column: ${dup}`);
+  });
+}
 
   private validateExpression(
     expression: string,
@@ -1418,7 +1579,6 @@ export class MapSQLGenerator extends BaseSQLGenerator {
   }
 
   private transformToPostgreSQL(expression: string): string {
-    // Transform common SQL functions to PostgreSQL syntax
     return expression
       .replace(/\bISNULL\(/gi, 'COALESCE(')
       .replace(/\bLEN\(/gi, 'LENGTH(')
@@ -1430,7 +1590,6 @@ export class MapSQLGenerator extends BaseSQLGenerator {
   }
 
   private optimizeExpression(expression: string): string {
-    // Apply PostgreSQL-specific optimizations
     return expression
       .replace(/\s*=\s*NULL\b/gi, ' IS NULL')
       .replace(/\s*<>\s*NULL\b/gi, ' IS NOT NULL')
@@ -1513,90 +1672,130 @@ export class MapSQLGenerator extends BaseSQLGenerator {
   // ==================== HELPER METHODS ====================
 
   private extractSchemaMappings(
-    node: CanvasNode,
-    connection?: CanvasConnection
+    node: UnifiedCanvasNode,
+    connection?: UnifiedCanvasConnection
   ): SchemaMapping[] {
+    globalLogger.debug(`[MapSQLGenerator] extractSchemaMappings called for node ${node.id}`);
+    
     const mappings: SchemaMapping[] = [];
     
-    // From node metadata
-    if (node.metadata?.schemaMappings) {
+    // From node.metadata.configuration (MAP component)
+    const config = node.metadata?.configuration;
+    if (config && config.type === 'MAP') {
+      const mapConfig = (config as { type: 'MAP'; config: MapComponentConfiguration }).config;
+      if (mapConfig.transformations && Array.isArray(mapConfig.transformations)) {
+        globalLogger.debug(`[MapSQLGenerator] Found ${mapConfig.transformations.length} transformations in MAP configuration`);
+        for (const t of mapConfig.transformations) {
+          mappings.push({
+            sourceColumn: t.sourceField,
+            targetColumn: t.targetField,
+            transformation: t.expression !== t.sourceField ? t.expression : undefined,
+            dataTypeConversion: undefined,
+            isRequired: true,
+            defaultValue: t.defaultValue,
+          });
+        }
+      }
+    }
+    
+    // From node.metadata.schemaMappings (legacy)
+    if (node.metadata?.schemaMappings && Array.isArray(node.metadata.schemaMappings)) {
+      globalLogger.debug(`[MapSQLGenerator] Found ${node.metadata.schemaMappings.length} legacy schema mappings`);
       mappings.push(...node.metadata.schemaMappings);
     }
     
     // From connection
     if (connection?.dataFlow?.schemaMappings) {
+      globalLogger.debug(`[MapSQLGenerator] Found ${connection.dataFlow.schemaMappings.length} connection schema mappings`);
       mappings.push(...connection.dataFlow.schemaMappings);
     }
     
+    globalLogger.debug(`[MapSQLGenerator] Total extracted mappings: ${mappings.length}`);
     return mappings;
   }
 
   /**
    * Generate mapped columns with explicit type casting using output schema.
-   * This version is used by the older generateSelectStatement path.
-   * FIXED: conditional casting based on source type (simple heuristic)
    */
   private generateMappedColumns(
     mappings: SchemaMapping[],
     transformationRules: TransformationRule[],
-    node: UnifiedCanvasNode
+    node: UnifiedCanvasNode,
+    upstreamSchema: Array<{ name: string; dataType: PostgreSQLDataType }>
   ): string {
+    globalLogger.debug(`[MapSQLGenerator] generateMappedColumns called`, {
+      mappingsCount: mappings.length,
+      transformationRulesCount: transformationRules.length,
+      upstreamSchemaLength: upstreamSchema.length,
+      hasOutputSchema: !!node.metadata?.schemas?.output?.fields
+    });
+
     // Build a map of target column -> expected PostgreSQL type
-    const outputFields = node.metadata?.schemas?.output?.fields || [];
     const targetTypeMap = new Map<string, string>();
+    const outputFields = node.metadata?.schemas?.output?.fields || [];
     for (const field of outputFields) {
-      // Use local helper instead of external mapToPostgresType
       const pgType = this.mapDataTypeToPostgresType(field.type, field.length, field.precision, field.scale);
       targetTypeMap.set(field.name, pgType);
+      globalLogger.debug(`[MapSQLGenerator] Target column ${field.name} expects type ${pgType}`);
     }
+
+    // Helper to get source column type from a simple column name
+    const getSourceType = (expr: string): PostgreSQLDataType | null => {
+      const simpleName = expr.split('.').pop() || expr;
+      const sourceCol = upstreamSchema.find(c => c.name === simpleName);
+      if (sourceCol) {
+        globalLogger.debug(`[MapSQLGenerator] Source column ${simpleName} has type ${sourceCol.dataType}`);
+      }
+      return sourceCol ? sourceCol.dataType : null;
+    };
 
     const columns: string[] = [];
 
     for (const mapping of mappings) {
       let expression = this.sanitizeQualifiedIdentifier(mapping.sourceColumn);
+      globalLogger.debug(`[MapSQLGenerator] Processing mapping: ${mapping.sourceColumn} -> ${mapping.targetColumn}, initial expression: ${expression}`);
 
       // Apply transformation if present
       if (mapping.transformation) {
-        expression = mapping.transformation.replace('?', expression);
+        expression = this.replaceColumnPlaceholders(mapping.transformation, []);
+        globalLogger.debug(`[MapSQLGenerator] Applied transformation: ${mapping.transformation} -> ${expression}`);
       }
 
       // Apply default value handling (COALESCE)
       if (mapping.defaultValue && !mapping.transformation) {
         expression = `COALESCE(${expression}, ${this.sanitizeValue(mapping.defaultValue)})`;
+        globalLogger.debug(`[MapSQLGenerator] Applied COALESCE with default value ${mapping.defaultValue}`);
       }
 
       // Apply additional transformation rules (case, arithmetic, etc.)
       const rules = transformationRules.filter(r => r.params?.targetColumn === mapping.targetColumn);
       if (rules.length > 0) {
+        const before = expression;
         expression = this.applyTransformationRules(expression, rules);
+        globalLogger.debug(`[MapSQLGenerator] Applied ${rules.length} transformation rules: ${before} -> ${expression}`);
       }
 
-      // Conditional type cast – only if target type differs from source type (simple columns only)
+      // Conditional type cast – only if target type differs from source type
       const targetType = targetTypeMap.get(mapping.targetColumn);
       if (targetType && !expression.toLowerCase().includes('::')) {
-        // For simple column references we can infer source type from the column name.
-        // In this legacy method we don't have sourceColumns, so we use a heuristic:
-        // if the expression is a simple column name, we assume the source is TEXT (the most common)
-        // and cast only if target is not TEXT.
-        // This maintains backward compatibility and passes the test where string->TEXT should NOT cast.
-        const isSimpleColumn = /^[a-zA-Z_][a-zA-Z0-9_]*$/.test(mapping.sourceColumn);
-        if (isSimpleColumn && targetType.toLowerCase() !== 'text') {
+        const sourceType = getSourceType(mapping.sourceColumn);
+        if (sourceType && sourceType.toLowerCase() !== targetType.toLowerCase()) {
+          const before = expression;
           expression = `(${expression})::${targetType}`;
-        } else if (!isSimpleColumn && targetType.toLowerCase() !== 'text') {
-          // For complex expressions, we still cast if target is not TEXT (user may need it)
-          expression = `(${expression})::${targetType}`;
+          globalLogger.debug(`[MapSQLGenerator] Type cast applied: ${before} -> ${expression} (${sourceType} -> ${targetType})`);
+        } else {
+          globalLogger.debug(`[MapSQLGenerator] No type cast needed: source type ${sourceType}, target type ${targetType}`);
         }
       }
 
       columns.push(`${expression} AS ${this.sanitizeIdentifier(mapping.targetColumn)}`);
     }
 
-    return columns.join(', ');
+    const result = columns.join(', ');
+    globalLogger.debug(`[MapSQLGenerator] Final mapped columns: ${result.substring(0, 300)}...`);
+    return result;
   }
 
-  /**
-   * Map application DataType to PostgreSQL type string (local replacement for mapToPostgresType)
-   */
   private mapDataTypeToPostgresType(dataType: string, _length?: number, precision?: number, scale?: number): string {
     const type = dataType.toUpperCase();
     switch (type) {
@@ -1624,24 +1823,29 @@ export class MapSQLGenerator extends BaseSQLGenerator {
     }
   }
 
-  /**
-   * Build SELECT clause from SchemaMapping[] with type casting using output schema.
-   * This is the main method used by generateSQLFromCanvasMapping.
-   * FIXED: Conditional casting – only cast when source type differs from target type.
-   */
   private buildSelectClauseFromMappings(
     mappings: SchemaMapping[],
     sourceColumns: Array<{ name: string; dataType: PostgreSQLDataType }>,
     transformationRules: TransformationRule[],
     mapNode?: UnifiedCanvasNode
   ): string {
+    globalLogger.debug(`[MapSQLGenerator] buildSelectClauseFromMappings called`, {
+      mappingsCount: mappings.length,
+      sourceColumnsCount: sourceColumns.length,
+      transformationRulesCount: transformationRules.length,
+      hasMapNode: !!mapNode
+    });
+
     // Build target type map from output schema if available
     const targetTypeMap = new Map<string, string>();
     if (mapNode?.metadata?.schemas?.output?.fields) {
       for (const field of mapNode.metadata.schemas.output.fields) {
         const pgType = this.mapDataTypeToPostgresType(field.type, field.length, field.precision, field.scale);
         targetTypeMap.set(field.name, pgType);
+        globalLogger.debug(`[MapSQLGenerator] Target column ${field.name} expects type ${pgType} (from output schema)`);
       }
+    } else {
+      globalLogger.debug(`[MapSQLGenerator] No output schema found on map node, type casting will be limited`);
     }
 
     // Helper to get source column type from a simple column name
@@ -1660,44 +1864,56 @@ export class MapSQLGenerator extends BaseSQLGenerator {
 
     for (const mapping of mappings) {
       let expression = mapping.sourceColumn; // may be expression or column name
+      globalLogger.debug(`[MapSQLGenerator] Building column: source=${mapping.sourceColumn}, target=${mapping.targetColumn}`);
 
       // Apply transformation if present
       if (mapping.transformation) {
+        const before = expression;
         expression = this.replaceColumnPlaceholders(mapping.transformation, []);
+        globalLogger.debug(`[MapSQLGenerator] Applied transformation: ${before} -> ${expression}`);
       }
 
       // Apply default value (COALESCE)
       if (mapping.defaultValue !== undefined && !mapping.transformation) {
         expression = `COALESCE(${expression}, ${this.sanitizeValue(mapping.defaultValue)})`;
+        globalLogger.debug(`[MapSQLGenerator] Applied COALESCE with default ${mapping.defaultValue}`);
       }
 
       // Apply transformation rules (CASE, arithmetic, etc.)
       const rules = transformationRules.filter(r => r.params?.targetColumn === mapping.targetColumn);
       if (rules.length) {
+        const before = expression;
         expression = this.applyTransformationRules(expression, rules);
+        globalLogger.debug(`[MapSQLGenerator] Applied ${rules.length} transformation rules: ${before} -> ${expression}`);
       }
 
       // ----- Conditional type casting -----
       const targetType = targetTypeMap.get(mapping.targetColumn);
       if (targetType && !expression.toLowerCase().includes('::')) {
         const sourceType = isSimpleColumnRef(mapping.sourceColumn) ? getSourceType(mapping.sourceColumn) : null;
-        // Only cast if source type is known and differs from target type
         if (sourceType !== null) {
           const sourcePgTypeStr = sourceType.toLowerCase();
           const targetPgTypeStr = targetType.toLowerCase();
           if (sourcePgTypeStr !== targetPgTypeStr) {
+            const before = expression;
             expression = `(${expression})::${targetType}`;
+            globalLogger.debug(`[MapSQLGenerator] Type cast applied: ${before} -> ${expression} (${sourcePgTypeStr} -> ${targetPgTypeStr})`);
+          } else {
+            globalLogger.debug(`[MapSQLGenerator] No type cast needed: source type ${sourcePgTypeStr} matches target type ${targetPgTypeStr}`);
           }
         } else {
           // For complex expressions, we assume they already produce the correct type.
           // Do not add automatic cast – the expression must be written to yield the desired type.
+          globalLogger.debug(`[MapSQLGenerator] Skipping type cast for complex expression: ${expression}`);
         }
       }
 
       columns.push(`${expression} AS ${this.sanitizeIdentifier(mapping.targetColumn)}`);
     }
 
-    return columns.join(', ');
+    const result = columns.join(', ');
+    globalLogger.debug(`[MapSQLGenerator] Final SELECT clause: ${result.substring(0, 300)}...`);
+    return result;
   }
 
   private extractSourceDependencies(mappings: SchemaMapping[]): string[] {
@@ -1732,10 +1948,6 @@ export class MapSQLGenerator extends BaseSQLGenerator {
     return parameters;
   }
 
-  /**
-   * Determine the source table name for the generated SELECT.
-   * FIXED: Returns 'source_table' as default (instead of 'source') to match test expectations.
-   */
   private determineSourceTable(mappings: SchemaMapping[]): string {
     if (mappings.length === 0) {
       return 'source_table';
@@ -1749,7 +1961,7 @@ export class MapSQLGenerator extends BaseSQLGenerator {
       return parts[0];
     }
     
-    return 'source_table'; // was 'source'
+    return 'source_table';
   }
 
   private buildMappingSelect(
@@ -1884,7 +2096,14 @@ export class MapSQLGenerator extends BaseSQLGenerator {
     };
   }
 
-  private emptyFragment(fragmentType: string): GeneratedSQLFragment {
+  // ==================== FIXED: BaseSQLGenerator compliance ====================
+  // The base class expects an emptyFragment() method with no arguments.
+  // We provide that and keep the parameterized version as a private helper.
+  protected emptyFragment(): GeneratedSQLFragment {
+    return this.createEmptyFragment('empty');
+  }
+
+  private createEmptyFragment(fragmentType: string): GeneratedSQLFragment {
     return {
       sql: '',
       dependencies: [],
@@ -1899,7 +2118,8 @@ export class MapSQLGenerator extends BaseSQLGenerator {
     };
   }
 
-  private errorFragment(fragmentType: string, errors: SQLGenerationError[], warnings: string[] = []): GeneratedSQLFragment {
+  // errorFragment remains as is – it is not abstract in BaseSQLGenerator.
+  protected errorFragment(fragmentType: string, errors: SQLGenerationError[], warnings: string[] = []): GeneratedSQLFragment {
     return {
       sql: '',
       dependencies: [],
@@ -1916,9 +2136,6 @@ export class MapSQLGenerator extends BaseSQLGenerator {
 
   // ==================== CANVAS-SPECIFIC HELPER METHODS ====================
 
-  /**
-   * Generate SQL preview for canvas mapping (lightweight version)
-   */
   public generateSQLPreview(context: CanvasMappingContext): {
     sql: string;
     isValid: boolean;
@@ -1926,6 +2143,8 @@ export class MapSQLGenerator extends BaseSQLGenerator {
     warnings: string[];
     hasDefaultMappings: boolean;
   } {
+    globalLogger.debug(`[MapSQLGenerator] generateSQLPreview called for node ${context.nodeId}`);
+    
     const validation = this.validateCanvasMapping(context);
     
     if (!validation.isValid) {
@@ -1997,9 +2216,6 @@ FROM ${primarySourceTable.name}`;
     };
   }
 
-  /**
-   * Get mapping statistics for canvas UI
-   */
   public getMappingStatistics(context: CanvasMappingContext): {
     totalSourceColumns: number;
     totalTargetColumns: number;
@@ -2059,9 +2275,6 @@ FROM ${primarySourceTable.name}`;
     };
   }
 
-  /**
-   * Generate column mapping suggestions for canvas UI
-   */
   public generateMappingSuggestions(
     sourceColumns: string[],
     targetColumns: string[],
@@ -2124,9 +2337,6 @@ FROM ${primarySourceTable.name}`;
     return suggestions;
   }
 
-  /**
-   * Calculate similarity between two column names
-   */
   private calculateNameSimilarity(name1: string, name2: string): number {
     const lower1 = name1.toLowerCase();
     const lower2 = name2.toLowerCase();
@@ -2165,9 +2375,6 @@ FROM ${primarySourceTable.name}`;
     return 1 - (distance / maxLength);
   }
 
-  /**
-   * Calculate Levenshtein distance between two strings
-   */
   private levenshteinDistance(s1: string, s2: string): number {
     const m = s1.length;
     const n = s2.length;
@@ -2195,17 +2402,11 @@ FROM ${primarySourceTable.name}`;
 
   // ==================== NEW HELPER METHODS FOR FIXES ====================
 
-  /**
-   * Helper: find a source column from a wire
-   */
   private findSourceColumn(wire: Wire, sourceTables: TableDefinition[]): ColumnDefinition | undefined {
     const sourceTable = sourceTables.find(t => t.id === wire.sourceTableId);
     return sourceTable?.columns.find(c => c.id === wire.sourceColumnId);
   }
 
-  /**
-   * Replace {column_name} placeholders with actual sanitized column names
-   */
   private replaceColumnPlaceholders(expression: string, sourceTables: TableDefinition[]): string {
     let result = expression;
     const allColumns = sourceTables.flatMap(t => t.columns.map(c => c.name));
@@ -2218,10 +2419,6 @@ FROM ${primarySourceTable.name}`;
 
   // ==================== SANITIZATION ====================
 
-  /**
-   * Sanitize a qualified identifier (table.column) by quoting each part individually.
-   * This ensures that column names containing spaces are correctly quoted.
-   */
   private sanitizeQualifiedIdentifier(qualifiedName: string): string {
     const parts = qualifiedName.split('.');
     if (parts.length === 1) {
@@ -2236,6 +2433,13 @@ FROM ${primarySourceTable.name}`;
     return `${this.sanitizeIdentifier(tablePart)}.${this.sanitizeIdentifier(columnPart)}`;
   }
 
-  // Logger placeholder (optional, keep as is)
-  private logger?: { warn: (msg: string) => void; error: (msg: string, err?: any) => void; debug: (msg: string) => void };
+private isExpression(value: string): boolean {
+  // A simple column identifier may be:
+  // - unqualified: [a-zA-Z_][a-zA-Z0-9_]*
+  // - qualified:   table.[a-zA-Z_][a-zA-Z0-9_]*
+  // Anything else (operators, spaces, functions, literals) is an expression.
+  const simpleIdentifierPattern = /^[a-zA-Z_][a-zA-Z0-9_]*(\.[a-zA-Z_][a-zA-Z0-9_]*)?$/;
+  return !simpleIdentifierPattern.test(value);
+}
+
 }

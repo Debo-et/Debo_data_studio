@@ -1,5 +1,9 @@
 // src/generators/ExtractRegexSQLGenerator.ts
-import { BaseSQLGenerator, SQLGenerationContext, GeneratedSQLFragment } from './BaseSQLGenerator';
+import {
+  BaseSQLGenerator,
+  SQLGenerationContext,
+  GeneratedSQLFragment,
+} from './BaseSQLGenerator';
 import { UnifiedCanvasNode } from '../types/unified-pipeline.types';
 
 interface RegexExtractConfig {
@@ -10,124 +14,161 @@ interface RegexExtractConfig {
 }
 
 export class ExtractRegexSQLGenerator extends BaseSQLGenerator {
-  protected generateSelectStatement(context: SQLGenerationContext): GeneratedSQLFragment {
-    const { node } = context;
+  protected generateSelectStatement(
+    context: SQLGenerationContext
+  ): GeneratedSQLFragment {
+    const { node, connection, upstreamSchema } = context;
     const config = this.extractRegexConfig(node);
 
     if (!config) {
-      return this.fallbackSelect(node);
+      return this.fallbackSelect(context);
     }
 
-    // PostgreSQL: use regexp_matches to extract capturing groups
-    const expressions = config.targetColumns.map(tc => {
-      // Each target column corresponds to a capturing group
-      return `(regexp_matches(${this.sanitizeIdentifier(config.sourceColumn)}, '${this.escapeString(config.pattern)}', '${config.flags || ''}'))[${tc.group}] AS ${this.sanitizeIdentifier(tc.name)}`;
-    });
+    // Determine source reference (table or CTE alias from incoming connection)
+    const sourceRef = connection?.sourceNodeId
+      ? this.sanitizeIdentifier(connection.sourceNodeId)
+      : 'source_table';
 
-    const otherColumns = node.metadata?.schemas?.output?.fields
-      .filter(c => c.name !== config.sourceColumn)
-      .map(c => this.sanitizeIdentifier(c.name)) || [];
+    const selectParts: string[] = [];
 
-    const selectList = [...otherColumns, ...expressions].join(', ');
-    const sql = `SELECT ${selectList} FROM source_table`;
+    // Include all upstream columns except the one being extracted from
+    const upstreamCols = upstreamSchema || [];
+    for (const col of upstreamCols) {
+      if (col.name !== config.sourceColumn) {
+        selectParts.push(this.sanitizeIdentifier(col.name));
+      }
+    }
+
+    // Build regex extraction expressions for each target column
+    const escapedPattern = this.escapeString(config.pattern);
+    const flagsPart = config.flags ? `, '${this.escapeString(config.flags)}'` : '';
+
+    for (const target of config.targetColumns) {
+      // PostgreSQL: (regexp_match(column, pattern[, flags]))[group] AS alias
+      const expr = `(regexp_match(${this.sanitizeIdentifier(
+        config.sourceColumn
+      )}, '${escapedPattern}'${flagsPart}))[${target.group}]`;
+      selectParts.push(`${expr} AS ${this.sanitizeIdentifier(target.name)}`);
+    }
+
+    const selectClause = selectParts.join(', ');
+    const sql = `SELECT ${selectClause} FROM ${sourceRef}`;
 
     return {
       sql,
-      dependencies: ['source_table'],
+      dependencies: connection ? [connection.sourceNodeId] : [],
       parameters: new Map(),
       errors: [],
       warnings: [],
-      metadata: { generatedAt: new Date().toISOString(), fragmentType: 'extract_regex', lineCount: 1 }
+      metadata: {
+        generatedAt: new Date().toISOString(),
+        fragmentType: 'extract_regex',
+        lineCount: 1,
+      },
     };
   }
 
-  // Implement remaining abstract methods (all return empty fragments)
-  protected generateJoinConditions(_context: SQLGenerationContext): GeneratedSQLFragment {
+  // Implement remaining abstract methods (return empty fragments)
+  protected generateJoinConditions(
+    _context: SQLGenerationContext
+  ): GeneratedSQLFragment {
     return this.emptyFragment();
   }
 
-  protected generateWhereClause(_context: SQLGenerationContext): GeneratedSQLFragment {
+  protected generateWhereClause(
+    _context: SQLGenerationContext
+  ): GeneratedSQLFragment {
     return this.emptyFragment();
   }
 
-  protected generateHavingClause(_context: SQLGenerationContext): GeneratedSQLFragment {
+  protected generateHavingClause(
+    _context: SQLGenerationContext
+  ): GeneratedSQLFragment {
     return this.emptyFragment();
   }
 
-  protected generateOrderByClause(_context: SQLGenerationContext): GeneratedSQLFragment {
+  protected generateOrderByClause(
+    _context: SQLGenerationContext
+  ): GeneratedSQLFragment {
     return this.emptyFragment();
   }
 
-  protected generateGroupByClause(_context: SQLGenerationContext): GeneratedSQLFragment {
+  protected generateGroupByClause(
+    _context: SQLGenerationContext
+  ): GeneratedSQLFragment {
     return this.emptyFragment();
   }
 
-  // Helper to produce a default fragment when configuration is missing
-  private fallbackSelect(_node: UnifiedCanvasNode): GeneratedSQLFragment {
+  // Fallback select when configuration is missing
+  private fallbackSelect(context: SQLGenerationContext): GeneratedSQLFragment {
+    const { connection } = context;
+    const sourceRef = connection?.sourceNodeId
+      ? this.sanitizeIdentifier(connection.sourceNodeId)
+      : 'source_table';
+
     return {
-      sql: `SELECT * FROM source_table`,
-      dependencies: ['source_table'],
+      sql: `SELECT * FROM ${sourceRef}`,
+      dependencies: connection ? [connection.sourceNodeId] : [],
       parameters: new Map(),
-      errors: [{
-        code: 'MISSING_REGEX_CONFIG',
-        message: 'Regex extract configuration is missing or incomplete',
-        severity: 'ERROR',
-        suggestion: 'Ensure sourceColumn, pattern, and targetColumns are defined in node.configuration'
-      }],
+      errors: [
+        {
+          code: 'MISSING_REGEX_CONFIG',
+          message:
+            'Regex extract configuration is missing or incomplete',
+          severity: 'ERROR',
+          suggestion:
+            'Ensure sourceColumn, pattern, and targetColumns are defined in node.configuration',
+        },
+      ],
       warnings: [],
       metadata: {
         generatedAt: new Date().toISOString(),
         fragmentType: 'extract_regex_fallback',
-        lineCount: 1
-      }
+        lineCount: 1,
+      },
     };
   }
 
   // Extract and validate the regex configuration from the node
   private extractRegexConfig(node: UnifiedCanvasNode): RegexExtractConfig | null {
-    const config = node.metadata?.configuration?.config as any; // Use 'any' temporarily for runtime checks
+    // Try multiple possible locations for the configuration
+    let config: any = node.metadata?.extractRegexConfig;
+    if (!config) {
+      config = node.metadata?.configuration?.config;
+    }
+    if (!config && node.metadata?.configuration && typeof node.metadata.configuration === 'object') {
+      config = node.metadata.configuration;
+    }
+
     if (!config || typeof config !== 'object') return null;
 
     // Validate required fields
     if (
       typeof config.sourceColumn !== 'string' ||
-      typeof config.pattern !== 'string' ||
-      !Array.isArray(config.targetColumns) ||
-      config.targetColumns.length === 0
+      typeof config.regexPattern !== 'string' ||
+      !Array.isArray(config.outputColumns) ||
+      config.outputColumns.length === 0
     ) {
       return null;
     }
 
-    // Validate each target column
-    const validTargetColumns = config.targetColumns.every(
-      (tc: any) =>
-        typeof tc === 'object' &&
-        typeof tc.name === 'string' &&
-        typeof tc.group === 'number' &&
-        tc.group > 0
+    // Validate each output column (supports both 'group' and zero-based 'position')
+    const validTargetColumns = config.outputColumns.every(
+      (oc: any) =>
+        oc &&
+        typeof oc.name === 'string' &&
+        (oc.group !== undefined || oc.position !== undefined)
     );
-
     if (!validTargetColumns) return null;
 
     return {
       sourceColumn: config.sourceColumn,
-      pattern: config.pattern,
-      targetColumns: config.targetColumns.map((tc: any) => ({
-        name: tc.name,
-        group: tc.group
+      pattern: config.regexPattern,
+      targetColumns: config.outputColumns.map((oc: any) => ({
+        name: oc.name,
+        group: oc.group !== undefined ? oc.group : oc.position + 1, // position is 0-based
       })),
-      flags: typeof config.flags === 'string' ? config.flags : ''
-    };
-  }
-
-  private emptyFragment(): GeneratedSQLFragment {
-    return {
-      sql: '',
-      dependencies: [],
-      parameters: new Map(),
-      errors: [],
-      warnings: [],
-      metadata: { generatedAt: new Date().toISOString(), fragmentType: 'empty', lineCount: 0 }
+      flags: typeof config.flags === 'string' ? config.flags : '',
     };
   }
 }

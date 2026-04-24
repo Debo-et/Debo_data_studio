@@ -20,13 +20,12 @@ import {
 import { CanvasProvider } from './pages/CanvasContext';
 
 // Import Job Design Types
-import { JobDesignState } from './types/types';
+import { JobDesignState, RepositoryNode } from './types/types';
 
 // Import Database API Service
 import { DatabaseApiService } from './services/database-api.service';
 
 // Import Canvas Persistence Service (still used indirectly via Sidebar)
-import { canvasPersistence } from './services/canvas-persistence.service';
 
 // Lazy load components
 const Toolbar = React.lazy(() => import('./components/layout/Toolbar'));
@@ -433,7 +432,7 @@ const AppContent: React.FC = () => {
   const [appReady, setAppReady] = useState(false);
   const [currentJob, setCurrentJob] = useState<any | null>(null);
   const [showCanvas, setShowCanvas] = useState(false);
-  const [jobs, setJobs] = useState<any[]>([]);
+  const [, setJobs] = useState<any[]>([]);
   const [reactFlowKey, setReactFlowKey] = useState(0);
   
   // activeCanvasId is string | undefined
@@ -476,6 +475,8 @@ const AppContent: React.FC = () => {
       setSaveStatus('error');
     }
   }, []);
+
+  
 
   // Initialize app on mount (only database check)
   useEffect(() => {
@@ -556,39 +557,7 @@ const AppContent: React.FC = () => {
     console.log(`✅ Created job design for "${jobName}"`);
   }, []);
   
-  const handleJobDesignDelete = useCallback((jobId: string) => {
-    console.log('🗑️ Deleting job design:', jobId);
-    
-    setJobDesigns(prev => {
-      const newDesigns = { ...prev };
-      delete newDesigns[jobId];
-      
-      // Clear active design if it's the one being deleted
-      if (activeJobDesignId === jobId) {
-        setActiveJobDesignId(null);
-      }
-      
-      return newDesigns;
-    });
-    
-    console.log(`✅ Deleted job design: ${jobId}`);
-  }, [activeJobDesignId]);
   
-  const handleJobDesignSwitch = useCallback((jobId: string | null, design: JobDesignState | null) => {
-    console.log('🔄 Switching to job design:', jobId);
-    
-    setActiveJobDesignId(jobId);
-    
-    if (jobId && design) {
-      // Update local job designs state if design is provided
-      setJobDesigns(prev => ({
-        ...prev,
-        [jobId]: design
-      }));
-      
-      console.log(`✅ Switched to job design: ${jobId}`);
-    }
-  }, []);
   
   const handleJobDesignUpdate = useCallback((design: JobDesignState) => {
     const jobId = design.jobId;
@@ -612,43 +581,6 @@ const AppContent: React.FC = () => {
     console.log(`✅ Updated job design: ${jobId}`);
   }, []);
   
-  const handleJobDesignDuplicate = useCallback((sourceJobId: string, targetJobId: string, targetJobName: string) => {
-    console.log('📋 Duplicating job design:', sourceJobId, 'to', targetJobId);
-    
-    const sourceDesign = jobDesigns[sourceJobId];
-    if (!sourceDesign) {
-      console.error('Source job design not found:', sourceJobId);
-      return;
-    }
-    
-    // Create a deep copy of the design with new IDs for nodes
-    const duplicatedDesign: JobDesignState = {
-      ...sourceDesign,
-      jobId: targetJobId,
-      name: targetJobName,
-      createdAt: new Date().toISOString(),
-      lastModified: new Date().toISOString(),
-      nodes: sourceDesign.nodes ? sourceDesign.nodes.map(node => ({
-        ...node,
-        id: `${node.type || 'node'}-${Date.now()}-${Math.random().toString(36).substr(2, 9)}`
-      })) : [],
-      // Update connections to use new node IDs if needed
-      connections: sourceDesign.connections ? sourceDesign.connections.map(conn => ({
-        ...conn,
-        id: `conn-${Date.now()}-${Math.random().toString(36).substr(2, 9)}`
-      })) : []
-    };
-    
-    setJobDesigns(prev => ({
-      ...prev,
-      [targetJobId]: duplicatedDesign
-    }));
-    
-    // Switch to the new design
-    handleJobDesignSwitch(targetJobId, duplicatedDesign);
-    
-    console.log(`✅ Duplicated job design to "${targetJobName}"`);
-  }, [jobDesigns, handleJobDesignSwitch]);
 
   // ==================== JOB MANAGEMENT HANDLERS ====================
 
@@ -692,95 +624,63 @@ const AppContent: React.FC = () => {
     console.log(`✅ Created new job with design: ${jobName}`);
   }, [handleJobDesignCreate]);
 
-  // Handle loading job WITH its design
-  const handleLoadJob = useCallback((jobId: string) => {
-    const job = jobs.find(j => j.id === jobId);
-    if (job) {
+const handleNodeSelect = useCallback((node: RepositoryNode) => {
+  if (node.type === 'canvas') {
+    const canvasId = node.metadata?.canvasId;
+    if (canvasId) {
+      setActiveCanvasId(canvasId);
+      if (!showCanvas) setShowCanvas(true);
+    }
+  } else if (node.type === 'job') {
+    const canvasId = node.metadata?.canvasId;
+    if (canvasId) {
+      // Avoid unnecessary reload
+      if (currentJob?.id === node.id && activeCanvasId === canvasId && showCanvas) {
+        return;
+      }
+
+      // Build a minimal job object from sidebar node metadata
+      const job: any = {
+        id: node.id,
+        name: node.name,
+        createdAt: node.metadata?.createdAt || new Date().toISOString(),
+        lastModified: new Date().toISOString(),
+        state: 'draft',
+        nodes: [],
+        connections: [],
+        variables: []
+      };
+
+      // Upsert the job into the jobs list
+      setJobs(prev => {
+        const exists = prev.find(j => j.id === job.id);
+        if (!exists) {
+          return [...prev, job];
+        }
+        return prev.map(j => (j.id === job.id ? job : j));
+      });
+
       setCurrentJob(job);
+      setActiveCanvasId(canvasId);
       setShowCanvas(true);
-      setReactFlowKey(prev => prev + 1);
-      
-      // Load the job's design
-      const design = jobDesigns[jobId];
-      if (design) {
-        setActiveJobDesignId(jobId);
-        console.log(`📂 Loaded job with design: ${job.name}`);
-      } else {
-        // Create default design if none exists
-        const defaultDesign: JobDesignState = {
-          nodes: job.nodes || [],
-          edges: [],
-          connections: job.connections || [],
-          viewport: { x: 0, y: 0, zoom: 1 },
-          validationSummary: null,
-          sqlGeneration: {},
-          lastModified: new Date().toISOString(),
-          createdAt: new Date().toISOString(),
-          version: '1.0',
-          name: job.name,
-          jobId: job.id
-        };
-        
-        setJobDesigns(prev => ({
-          ...prev,
-          [jobId]: defaultDesign
-        }));
-        setActiveJobDesignId(jobId);
-        console.log(`📂 Created default design for job: ${job.name}`);
-      }
+    } else {
+      console.warn('Job node missing canvasId:', node);
     }
-  }, [jobs, jobDesigns]);
+  }
+}, [currentJob, activeCanvasId, showCanvas, setCurrentJob, setJobs, setActiveCanvasId, setShowCanvas]);
 
-  // Handle closing job AND its design
-  const handleCloseJob = useCallback(() => {
-    setCurrentJob(null);
-    setShowCanvas(false);
-    setActiveJobDesignId(null);
-    setActiveCanvasId(undefined);
-    console.log('📭 Closed current job and design');
-  }, []);
-
-  // Handle deleting job AND its design
-  const handleDeleteJob = useCallback((jobId: string) => {
-    if (!confirm(`Are you sure you want to delete this job and its design? This action cannot be undone.`)) {
-      return;
-    }
-    
-    setJobs(prev => prev.filter(job => job.id !== jobId));
-    
-    // Also delete the job design
-    handleJobDesignDelete(jobId);
-    
-    if (currentJob?.id === jobId) {
-      setCurrentJob(null);
-      setShowCanvas(false);
-      setActiveJobDesignId(null);
-      setActiveCanvasId(undefined);
-    }
-    
-    console.log(`🗑️ Deleted job and design: ${jobId}`);
-  }, [currentJob, handleJobDesignDelete]);
-
-  // === Handler for selecting a node in the sidebar (job or canvas) ===
-  const handleNodeSelect = useCallback((node: RepositoryNode) => {
-    if (node.type === 'canvas') {
-      const canvasId = node.metadata?.canvasId;
-      if (canvasId) {
-        setActiveCanvasId(canvasId);
-        // Ensure the canvas view is shown (if not already)
-        if (!showCanvas) setShowCanvas(true);
-      }
-    } else if (node.type === 'job') {
-      // Clear canvas selection when a job is selected
-      setActiveCanvasId(undefined);
-    }
-  }, [showCanvas]);
 
   // ==================== NEW: Canvas selection callback from Sidebar ====================
-  const handleCanvasSelect = useCallback((canvasId: string) => {
+const handleCanvasSelect = useCallback((canvasId: string | null) => {
+  if (canvasId) {
     setActiveCanvasId(canvasId);
     setShowCanvas(true);
-  }, []);
+  } else {
+    setActiveCanvasId(undefined);
+    setShowCanvas(false);
+    setCurrentJob(null);    // optional, but keeps state clean
+  }
+}, []);
 
   // ==================== CONSOLE FLOATING PANEL HANDLING ====================
   
@@ -1098,16 +998,12 @@ const AppContent: React.FC = () => {
       {/* Top Toolbar */}
       <div className="flex-none">
         <Suspense fallback={<div className="h-16 bg-gray-100 animate-pulse"></div>}>
-          <Toolbar 
-            currentJob={currentJob}
-            onCloseJob={handleCloseJob}
-            onLoadJob={handleLoadJob}
-            onDeleteJob={handleDeleteJob}
-            jobs={jobs}
-            onSaveDesign={handleSaveDesign}
-            saveStatus={saveStatus}
-            canSaveDesign={!!currentJob}
-          />
+<Toolbar 
+  currentJob={currentJob}
+  onSaveDesign={handleSaveDesign}
+  saveStatus={saveStatus}
+  canSaveDesign={!!currentJob}
+/>
         </Suspense>
       </div>
       
@@ -1117,17 +1013,12 @@ const AppContent: React.FC = () => {
         <div className="flex-none w-64 border-r border-gray-200">
           <Suspense fallback={<div className="h-full bg-gray-50 animate-pulse"></div>}>
             <Sidebar 
-              onCreateJob={handleCreateJob}
-              currentJob={currentJob}
-              onJobDesignCreate={handleJobDesignCreate}
-              onJobDesignDelete={handleJobDesignDelete}
-              onJobDesignSwitch={handleJobDesignSwitch}
-              onJobDesignDuplicate={handleJobDesignDuplicate}
-              activeJobDesignId={activeJobDesignId}
-              onNodeSelect={handleNodeSelect}
-              activeCanvasId={activeCanvasId}
-              onCanvasSelect={handleCanvasSelect}  // NEW: callback to load canvas
-            />
+  onCreateJob={handleCreateJob}
+  currentJob={currentJob}
+  onNodeSelect={handleNodeSelect}
+  activeCanvasId={activeCanvasId}
+  onCanvasSelect={handleCanvasSelect}
+/>
           </Suspense>
         </div>
         
@@ -1183,16 +1074,7 @@ const AppContent: React.FC = () => {
         {/* Right Panel */}
         <div className="flex-none w-80 border-l border-gray-200">
           <Suspense fallback={<div className="h-full bg-gray-50 animate-pulse"></div>}>
-            <RightPanel 
-              currentJob={currentJob}
-              onJobUpdate={(updates) => {
-                if (currentJob) {
-                  const updatedJob = { ...currentJob, ...updates };
-                  setCurrentJob(updatedJob);
-                  setJobs(prev => prev.map(job => job.id === currentJob.id ? updatedJob : job));
-                }
-              }}
-            />
+            <RightPanel />
           </Suspense>
         </div>
       </div>

@@ -747,6 +747,7 @@ export function mapComponentKeyToNodeType(key: string, role?: 'INPUT' | 'OUTPUT'
     case 'tCacheOut': return NodeType.CACHE_OUT;
     case 'tRecordMatching': return NodeType.RECORD_MATCHING;
     case 'tLookup': return NodeType.LOOKUP;
+    case 'tParseRecordSet': return NodeType.PARSE_RECORD_SET;
     default:
       console.warn(`Unknown component key: ${key}, defaulting to TRANSFORM`);
       return NodeType.TRANSFORM;

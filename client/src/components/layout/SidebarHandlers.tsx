@@ -155,14 +155,6 @@ export const handleDeleteNodeRequest = (
     return false;
   }
   
-  if (node.type === 'job' && currentJob?.id === node.id.replace('job-', '')) {
-    toast.error('Cannot delete active job. Please switch to another job first.', {
-      position: "bottom-right",
-      autoClose: 4000,
-    });
-    return false;
-  }
-  
   setNodeToDelete(node);
   setDeleteDialogOpen(true);
   return true;

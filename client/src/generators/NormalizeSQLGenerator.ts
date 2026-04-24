@@ -7,14 +7,11 @@ interface NormalizeConfig {
 }
 
 export class NormalizeSQLGenerator extends BaseSQLGenerator {
-  // Implement all required abstract methods
   protected generateSelectStatement(context: SQLGenerationContext): GeneratedSQLFragment {
     const { node } = context;
-    // Safely cast configuration; handle undefined
     const config = node.metadata?.configuration?.config as NormalizeConfig | undefined;
 
     if (!config?.arrayColumn) {
-      // Return a minimal fallback instead of calling missing method
       return {
         sql: `SELECT * FROM source_table`,
         dependencies: ['source_table'],
@@ -29,7 +26,6 @@ export class NormalizeSQLGenerator extends BaseSQLGenerator {
       .filter(c => c.name !== config.arrayColumn)
       .map(c => this.sanitizeIdentifier(c.name)) || [];
 
-    // Use unnest to normalize the array
     const sql = `SELECT ${otherColumns.join(', ')}, unnest(${this.sanitizeIdentifier(config.arrayColumn)}) AS ${this.sanitizeIdentifier(config.elementColumn)} FROM source_table`;
 
     return {
@@ -42,36 +38,19 @@ export class NormalizeSQLGenerator extends BaseSQLGenerator {
     };
   }
 
-  // Provide empty implementations for remaining clauses
   protected generateJoinConditions(_context: SQLGenerationContext): GeneratedSQLFragment {
     return this.emptyFragment();
   }
-
   protected generateWhereClause(_context: SQLGenerationContext): GeneratedSQLFragment {
     return this.emptyFragment();
   }
-
   protected generateHavingClause(_context: SQLGenerationContext): GeneratedSQLFragment {
     return this.emptyFragment();
   }
-
   protected generateOrderByClause(_context: SQLGenerationContext): GeneratedSQLFragment {
     return this.emptyFragment();
   }
-
   protected generateGroupByClause(_context: SQLGenerationContext): GeneratedSQLFragment {
     return this.emptyFragment();
-  }
-
-  // Helper to return an empty fragment (similar to SelectSQLGenerator)
-  private emptyFragment(): GeneratedSQLFragment {
-    return {
-      sql: '',
-      dependencies: [],
-      parameters: new Map(),
-      errors: [],
-      warnings: [],
-      metadata: { generatedAt: new Date().toISOString(), fragmentType: 'empty', lineCount: 0 }
-    };
   }
 }

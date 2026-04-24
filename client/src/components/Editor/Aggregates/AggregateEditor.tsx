@@ -21,7 +21,7 @@ import {
   AggregateComponentConfiguration,
   FieldSchema,
   DataType,
-} from '../../types/unified-pipeline.types';
+} from '../../../types/unified-pipeline.types';
 
 // ----------------------------------------------------------------------
 // Types

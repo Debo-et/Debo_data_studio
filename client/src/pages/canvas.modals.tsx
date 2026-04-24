@@ -42,6 +42,7 @@ import {
   PendingRoleSelection,
   CanvasNodeData,
   MapEditorPayload,
+  SimpleColumn,
 } from './canvas.types';
 
 // ----------------------------------------------------------------------
@@ -133,7 +134,7 @@ interface MapEditorModalProps {
   onNodeUpdate: (nodeId: string, updates: Partial<CanvasNodeData>) => void;
 }
 
-export const MapEditorModal: React.FC<MapEditorModalProps> = ({ isOpen, selectedNode, onClose, onNodeUpdate }) => {
+export const MapEditorModal: React.FC<MapEditorModalProps> = ({ isOpen, selectedNode, onClose }) => {
   if (!isOpen || !selectedNode) return null;
   const sourceTables = selectedNode.sourceTables || [];
   const targetTables = selectedNode.targetTables || [];
@@ -355,6 +356,12 @@ interface ActiveEditorRendererProps {
   onSaveDataMasking: (config: any) => void;
 }
 
+const normalizeColumns = (columns: SimpleColumn[]): Array<{ name: string; type: string; id?: string }> =>
+  columns.map(col => ({
+    ...col,
+    type: col.type || 'STRING',
+  }));
+  
 export const ActiveEditorRenderer: React.FC<ActiveEditorRendererProps> = ({
   editor,
   onClose,
@@ -392,17 +399,17 @@ export const ActiveEditorRenderer: React.FC<ActiveEditorRendererProps> = ({
   if (!editor) return null;
 
   switch (editor.type) {
-    case 'sort':
-      return (
-        <SortEditor
-          nodeId={editor.nodeId}
-          nodeMetadata={editor.nodeMetadata}
-          inputColumns={editor.inputColumns}
-          initialConfig={editor.initialConfig}
-          onClose={onClose}
-          onSave={onSaveSort}
-        />
-      );
+case 'sort':
+  return (
+    <SortEditor
+      nodeId={editor.nodeId}
+      nodeMetadata={editor.nodeMetadata}
+      inputColumns={normalizeColumns(editor.inputColumns)}
+      initialConfig={editor.initialConfig}
+      onClose={onClose}
+      onSave={onSaveSort}
+    />
+  );
     case 'replace':
       return (
         <ReplaceEditor
@@ -427,29 +434,29 @@ export const ActiveEditorRenderer: React.FC<ActiveEditorRendererProps> = ({
           onSave={onSaveJoin}
         />
       );
-    case 'filter':
-      return (
-        <FilterRowConfigModal
-          isOpen={true}
-          onClose={onClose}
-          nodeId={editor.nodeId}
-          nodeName={editor.nodeMetadata.name}
-          inputColumns={editor.inputColumns}
-          initialConfig={editor.initialConfig}
-          onSave={onSaveFilter}
-        />
-      );
-    case 'extractXML':
-      return (
-        <ExtractXMLFieldEditor
-          nodeId={editor.nodeId}
-          nodeName={editor.nodeMetadata.name}
-          inputColumns={editor.inputColumns}
-          initialConfig={editor.initialConfig}
-          onClose={onClose}
-          onSave={onSaveExtractXML}
-        />
-      );
+case 'filter':
+  return (
+    <FilterRowConfigModal
+      isOpen={true}
+      onClose={onClose}
+      nodeId={editor.nodeId}
+      nodeName={editor.nodeMetadata.name}
+      inputColumns={normalizeColumns(editor.inputColumns)}
+      initialConfig={editor.initialConfig}
+      onSave={onSaveFilter}
+    />
+  );
+case 'extractXML':
+  return (
+    <ExtractXMLFieldEditor
+      nodeId={editor.nodeId}
+      nodeName={editor.nodeMetadata.name}
+      inputColumns={normalizeColumns(editor.inputColumns)}
+      initialConfig={editor.initialConfig}
+      onClose={onClose}
+      onSave={onSaveExtractXML}
+    />
+  );
     case 'extractJSON':
       return (
         <ExtractJSONFieldsEditor
@@ -461,30 +468,30 @@ export const ActiveEditorRenderer: React.FC<ActiveEditorRendererProps> = ({
           onSave={onSaveExtractJSON}
         />
       );
-    case 'extractDelimited':
-      return (
-        <ExtractDelimitedFieldsConfigModal
-          isOpen={true}
-          onClose={onClose}
-          nodeId={editor.nodeId}
-          nodeName={editor.nodeMetadata.name}
-          inputColumns={editor.inputColumns}
-          initialConfig={editor.initialConfig}
-          onSave={onSaveExtractDelimited}
-        />
-      );
-    case 'convert':
-      return (
-        <ConvertTypeEditor
-          nodeId={editor.nodeId}
-          nodeMetadata={editor.nodeMetadata}
-          inputColumns={editor.inputColumns}
-          outputColumns={editor.outputColumns}
-          initialConfig={editor.initialConfig}
-          onClose={onClose}
-          onSave={onSaveConvert}
-        />
-      );
+case 'extractDelimited':
+  return (
+    <ExtractDelimitedFieldsConfigModal
+      isOpen={true}
+      onClose={onClose}
+      nodeId={editor.nodeId}
+      nodeName={editor.nodeMetadata.name}
+      inputColumns={normalizeColumns(editor.inputColumns)}
+      initialConfig={editor.initialConfig}
+      onSave={onSaveExtractDelimited}
+    />
+  );
+case 'convert':
+  return (
+    <ConvertTypeEditor
+      nodeId={editor.nodeId}
+      nodeMetadata={editor.nodeMetadata}
+      inputColumns={normalizeColumns(editor.inputColumns)}
+      outputColumns={normalizeColumns(editor.outputColumns)}
+      initialConfig={editor.initialConfig}
+      onClose={onClose}
+      onSave={onSaveConvert}
+    />
+  );
     case 'aggregate':
       return (
         <AggregateEditor
@@ -539,17 +546,16 @@ export const ActiveEditorRenderer: React.FC<ActiveEditorRendererProps> = ({
           onSave={onSaveReplicate}
         />
       );
-    case 'recordMatching':
-      return (
-        <RecordMatchingEditor
-          nodeId={editor.nodeId}
-          nodeMetadata={editor.nodeMetadata}
-          inputFields={editor.inputFields}
-          initialConfig={editor.initialConfig}
-          onClose={onClose}
-          onSave={onSaveRecordMatching}
-        />
-      );
+case 'recordMatching':
+  return (
+    <RecordMatchingEditor
+      nodeId={editor.nodeId}
+      inputFields={editor.inputFields}
+      initialConfig={editor.initialConfig}
+      onClose={onClose}
+      onSave={onSaveRecordMatching}
+    />
+  );
     case 'matchGroup':
       return (
         <MatchGroupEditor

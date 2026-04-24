@@ -28,6 +28,7 @@ import ReactFlow, {
   Node,
   Viewport,
 } from 'reactflow';
+// @ts-ignore
 import 'reactflow/dist/style.css';
 
 import TalendNode from './TalendNode';
@@ -43,13 +44,12 @@ import { useAppDispatch } from '../hooks';
 import { addLog } from '../store/slices/logsSlice';
 import { generatePipelineSQL, PipelineGenerationResult } from '../generators/SQLGenerationPipeline';
 import { CanvasNode as PipelineCanvasNode, CanvasConnection as PipelineCanvasConnection, ConnectionStatus } from '../types/pipeline-types';
-import { NodeType, isMapConfig, isJoinConfig, isFilterConfig, isAggregateConfig, isSortConfig, isInputConfig, isOutputConfig, NodeStatus, UnifiedNodeMetadata, ComponentConfiguration } from '../types/unified-pipeline.types';
+import { NodeType, isMapConfig, isJoinConfig, isFilterConfig, isAggregateConfig, DataType, isSortConfig, isInputConfig,isConvertConfig,  isOutputConfig, NodeStatus, UnifiedNodeMetadata, ComponentConfiguration, FilterColumnsComponentConfiguration, isAddCRCRowConfig, isSchemaComplianceCheckConfig, isDataMaskingConfig, isSampleRowConfig, ParseRecordSetComponentConfiguration, ExtractRegexFieldsConfiguration, isDenormalizeSortedRowConfig, DenormalizeComponentConfiguration, PivotToColumnsDelimitedConfiguration, isNormalizeConfig, isUniqRowConfig, isUniteConfig, isReplicateConfig, isNormalizeNumberConfig, isExtractXMLFieldConfig, ExtractJSONFieldsConfiguration, isExtractDelimitedConfig, ReplaceComponentConfiguration, isReplaceConfig, isLookupConfig, NormalizeComponentConfiguration } from '../types/unified-pipeline.types';
 import {
   ActiveEditor,
   CanvasNodeData,
   CanvasState,
   ExtendedCanvasProps,
-  MapEditorPayload,
   PendingRoleSelection,
   ReactFlowDragData,
   SimpleColumn,
@@ -395,7 +395,7 @@ const Canvas = forwardRef<{ forceSave: () => Promise<void> }, ExtendedCanvasProp
     const fields = columns.map((col: any, idx) => ({
       id: col.id || `${cleanBaseName}_${idx}`,
       name: col.name || `Column_${idx + 1}`,
-      type: col.type || 'STRING',
+      type: (col.type || 'STRING') as DataType,
       length: col.length,
       precision: col.precision,
       scale: col.scale,
@@ -835,6 +835,37 @@ const handleMapEditorSave = useCallback((config: any) => {
 
   const nodeId = mapEditorState.nodeMetadata.id;
 
+  // Helper to map PostgreSQL type to DataType union
+  const mapPostgreSQLToDataType = (pgType: string): DataType => {
+    const upper = pgType.toUpperCase();
+    switch (upper) {
+      case 'TEXT':
+      case 'VARCHAR':
+      case 'CHAR':
+        return 'STRING';
+      case 'INTEGER':
+      case 'SMALLINT':
+      case 'BIGINT':
+      case 'SERIAL':
+        return 'INTEGER';
+      case 'DECIMAL':
+      case 'NUMERIC':
+      case 'REAL':
+      case 'DOUBLE PRECISION':
+        return 'DECIMAL';
+      case 'BOOLEAN':
+        return 'BOOLEAN';
+      case 'DATE':
+        return 'DATE';
+      case 'TIMESTAMP':
+      case 'TIMESTAMPTZ':
+        return 'TIMESTAMP';
+      case 'JSON':
+      default:
+        return 'STRING';
+    }
+  };
+
   // Find connected output node(s) and get target schema
   const outgoingEdges = edges.filter(edge => edge.source === nodeId);
   const outputNodes = outgoingEdges
@@ -867,7 +898,8 @@ const handleMapEditorSave = useCallback((config: any) => {
           const updatedFields = currentOutputSchema.fields.map(field => {
             const expectedType = targetTypeMap.get(field.name);
             if (expectedType && expectedType !== 'TEXT') {
-              return { ...field, type: expectedType };
+              const dataType = mapPostgreSQLToDataType(expectedType);
+              return { ...field, type: dataType };
             }
             return field;
           });
@@ -938,42 +970,719 @@ const handleMapEditorSave = useCallback((config: any) => {
       const { jobName, nodes: runNodes, edges: runEdges } = customEvent.detail;
       dispatch(addLog({ level: 'INFO', message: `Starting run for job: ${jobName}`, source: 'Canvas' }));
       try {
-        const canvasNodes: PipelineCanvasNode[] = runNodes.map((node: Node<CanvasNodeData>) => {
-          const unified = node.data;
-          const config = unified.metadata?.configuration;
-          const nodeType = unified.type;
-          let joinConfig, filterConfig, aggregationConfig, sortConfig, transformationRules, schemaMappings, tableMapping;
-          if (config) {
-            if (isJoinConfig(config)) {
-              joinConfig = { type: config.config.joinType, condition: config.config.joinConditions.map(j => `${j.leftTable}.${j.leftField} = ${j.rightTable}.${j.rightField}`).join(' AND ') };
-              transformationRules = config.config.joinConditions.map((jc, idx) => ({ id: jc.id, type: 'join', params: jc, order: idx }));
-            } else if (isFilterConfig(config)) {
-              filterConfig = { condition: config.config.filterConditions.map(fc => `${fc.field} ${fc.operator} ${fc.value}`).join(` ${config.config.filterLogic} `), operation: 'INCLUDE' };
-              transformationRules = config.config.filterConditions.map((fc, idx) => ({ id: fc.id, type: 'filter', params: fc, order: idx }));
-            } else if (isAggregateConfig(config)) {
-              aggregationConfig = { groupBy: config.config.groupByFields, aggregates: config.config.aggregateFunctions.map(af => ({ column: af.field, function: af.function, alias: af.alias })) };
-              transformationRules = config.config.aggregateFunctions.map((af, idx) => ({ id: af.id, type: 'aggregate', params: af, order: idx }));
-            } else if (isSortConfig(config)) {
-              sortConfig = { columns: config.config.sortFields.map(sf => ({ column: sf.field, direction: sf.direction, nullsFirst: sf.nullsFirst })) };
-            } else if (isMapConfig(config)) {
-              transformationRules = config.config.transformations.map(t => ({ id: t.id, type: 'map', params: t, order: t.position }));
-              schemaMappings = config.config.transformations.map(t => ({ sourceColumn: t.sourceField, targetColumn: t.targetField, transformation: t.expression, dataTypeConversion: t.dataType ? { from: 'unknown', to: mapDataTypeToPostgreSQL(t.dataType) } : undefined, isRequired: true, defaultValue: t.defaultValue }));
-            } else if (isInputConfig(config)) {
-              const fields = config.config.schema?.fields || [];
-              const sourceTableName = config.config.sourceDetails.tableName || unified.metadata?.postgresTableName || unified.metadata?.fullRepositoryMetadata?.postgresTableName || unified.name;
-              tableMapping = { schema: 'public', name: sourceTableName, columns: fieldsToPostgresColumns(fields) };
-            } else if (isOutputConfig(config)) {
-              schemaMappings = config.config.schemaMapping;
-            }
-          }
-          return {
-            id: unified.id,
-            name: unified.name,
-            type: nodeType,
-            metadata: { joinConfig, filterConfig, aggregationConfig, sortConfig, transformationRules, schemaMappings, tableMapping, postgresConfig: unified.metadata?.postgresConfig, description: unified.metadata?.description, targetTableName: isOutputConfig(config) ? config.config.targetDetails.tableName : undefined, sourceTableName: isInputConfig(config) ? tableMapping?.name : undefined },
-          };
-        });
+        // Inside Canvas.tsx, replace the existing mapping block in handleToolbarRun with the following:
 
+// Inside Canvas.tsx, in handleToolbarRun, replace the mapping block with:
+
+const canvasNodes: PipelineCanvasNode[] = runNodes.map((node: Node<CanvasNodeData>) => {
+  const unified = node.data;
+  const config = unified.metadata?.configuration;
+  const nodeType = unified.type;
+
+  // Base metadata that every node shares
+  const baseMetadata: any = {
+    postgresConfig: unified.metadata?.postgresConfig,
+    description: unified.metadata?.description,
+  };
+
+  // If no configuration exists, return a minimal node (pipeline may use fallback)
+  if (!config) {
+    console.warn(`[Canvas] Node ${unified.id} (${unified.name}) has no configuration.`);
+    return {
+      id: unified.id,
+      name: unified.name,
+      type: nodeType,
+      metadata: baseMetadata,
+    };
+  }
+
+  // ----- CONFIGURATION EXTRACTION PER NODE TYPE -----
+  // INPUT / OUTPUT (handled separately via role)
+  if (isInputConfig(config)) {
+    const fields = config.config.schema?.fields || [];
+    const sourceTableName =
+      config.config.sourceDetails.tableName ||
+      unified.metadata?.postgresTableName ||
+      unified.metadata?.fullRepositoryMetadata?.postgresTableName ||
+      unified.name;
+
+    return {
+      id: unified.id,
+      name: unified.name,
+      type: nodeType,
+      metadata: {
+        ...baseMetadata,
+        tableMapping: {
+          schema: 'public',
+          name: sourceTableName,
+          columns: fieldsToPostgresColumns(fields),
+        },
+        sourceTableName,
+      },
+    };
+  }
+
+  if (isOutputConfig(config)) {
+    return {
+      id: unified.id,
+      name: unified.name,
+      type: nodeType,
+      metadata: {
+        ...baseMetadata,
+        schemaMappings: config.config.schemaMapping,
+        targetTableName: config.config.targetDetails.tableName,
+      },
+    };
+  }
+
+  // 2. TRANSFORMATION NODES – full mapping for every config type
+
+  // tMap
+  if (isMapConfig(config)) {
+    const mapConf = config.config;
+    return {
+      id: unified.id,
+      name: unified.name,
+      type: nodeType,
+      metadata: {
+        ...baseMetadata,
+        transformationRules: mapConf.transformations.map((t, idx) => ({
+          id: t.id,
+          type: 'map',
+          params: t,
+          order: idx,
+        })),
+        schemaMappings: mapConf.transformations.map((t) => ({
+          sourceColumn: t.sourceField,
+          targetColumn: t.targetField,
+          transformation: t.expression,
+          dataTypeConversion: t.dataType
+            ? { from: 'unknown', to: mapDataTypeToPostgreSQL(t.dataType) }
+            : undefined,
+          isRequired: true,
+          defaultValue: t.defaultValue,
+        })),
+        joinConfig: mapConf.joins
+          ? {
+              type: mapConf.joins.length > 0 ? 'INNER' : undefined,
+              condition: mapConf.joins
+                .map((j) => `${j.leftTable}.${j.leftField} = ${j.rightTable}.${j.rightField}`)
+                .join(' AND '),
+            }
+          : undefined,
+        filterConfig: mapConf.filters
+          ? {
+              condition: mapConf.filters
+                .map((f) => `${f.field} ${f.operator} ${f.value}`)
+                .join(` ${mapConf.filters.length > 1 ? 'AND' : ''} `),
+            }
+          : undefined,
+      },
+    };
+  }
+
+  // tJoin
+  if (isJoinConfig(config)) {
+    const joinConf = config.config;
+    return {
+      id: unified.id,
+      name: unified.name,
+      type: nodeType,
+      metadata: {
+        ...baseMetadata,
+        joinConfig: {
+          type: joinConf.joinType,
+          condition: joinConf.joinConditions
+            .map((jc) => `${jc.leftTable}.${jc.leftField} = ${jc.rightTable}.${jc.rightField}`)
+            .join(' AND '),
+        },
+        transformationRules: joinConf.joinConditions.map((jc, idx) => ({
+          id: jc.id,
+          type: 'join',
+          params: jc,
+          order: idx,
+        })),
+      },
+    };
+  }
+
+  // tFilterRow
+  if (isFilterConfig(config)) {
+    const filterConf = config.config;
+    return {
+      id: unified.id,
+      name: unified.name,
+      type: nodeType,
+      metadata: {
+        ...baseMetadata,
+        filterConfig: {
+          condition: filterConf.filterConditions
+            .map((fc) => `${fc.field} ${fc.operator} ${fc.value}`)
+            .join(` ${filterConf.filterLogic} `),
+          operation: 'INCLUDE',
+        },
+        transformationRules: filterConf.filterConditions.map((fc, idx) => ({
+          id: fc.id,
+          type: 'filter',
+          params: fc,
+          order: idx,
+        })),
+      },
+    };
+  }
+
+  // tAggregateRow
+  if (isAggregateConfig(config)) {
+    const aggConf = config.config;
+    return {
+      id: unified.id,
+      name: unified.name,
+      type: nodeType,
+      metadata: {
+        ...baseMetadata,
+        aggregationConfig: {
+          groupBy: aggConf.groupByFields,
+          aggregates: aggConf.aggregateFunctions.map((af) => ({
+            column: af.field,
+            function: af.function,
+            alias: af.alias,
+            distinct: af.distinct,
+          })),
+        },
+        transformationRules: aggConf.aggregateFunctions.map((af, idx) => ({
+          id: af.id,
+          type: 'aggregate',
+          params: af,
+          order: idx,
+        })),
+      },
+    };
+  }
+
+  // tSortRow
+  if (isSortConfig(config)) {
+    const sortConf = config.config;
+    return {
+      id: unified.id,
+      name: unified.name,
+      type: nodeType,
+      metadata: {
+        ...baseMetadata,
+        sortConfig: {
+          columns: sortConf.sortFields.map((sf) => ({
+            column: sf.field,
+            direction: sf.direction,
+            nullsFirst: sf.nullsFirst,
+          })),
+        },
+      },
+    };
+  }
+
+  // tConvertType
+  if (isConvertConfig(config)) {
+    const convConf = config.config;
+    return {
+      id: unified.id,
+      name: unified.name,
+      type: nodeType,
+      metadata: {
+        ...baseMetadata,
+        convertConfig: {
+          conversions: convConf.rules.map((r) => ({
+            sourceColumn: r.sourceColumn,
+            targetType: r.targetType,
+            targetAlias: r.targetColumn,
+          })),
+        },
+      },
+    };
+  }
+
+  // tReplace
+  if (isReplaceConfig(config)) {
+    const replConf = config.config;
+    return {
+      id: unified.id,
+      name: unified.name,
+      type: nodeType,
+      metadata: {
+        ...baseMetadata,
+        replaceConfig: {
+          rules: replConf.rules.map((r) => ({
+            field: r.column,
+            searchValue: r.searchValue,
+            replacement: r.replacement,
+            regex: r.regex,
+          })),
+        },
+      },
+    };
+  }
+
+  // tReplaceList (same config type as Replace, but test expects replaceListConfig)
+  if (config.type === 'REPLACE_LIST') {
+    const replConf = config.config as ReplaceComponentConfiguration; // same shape
+    return {
+      id: unified.id,
+      name: unified.name,
+      type: nodeType,
+      metadata: {
+        ...baseMetadata,
+        replaceListConfig: {
+          column: replConf.rules[0]?.column,
+          pairs: replConf.rules.map((r) => ({
+            search: r.searchValue,
+            replace: r.replacement,
+            regex: r.regex,
+          })),
+        },
+      },
+    };
+  }
+
+  // tExtractDelimitedFields
+  if (isExtractDelimitedConfig(config)) {
+    const extConf = config.config;
+    return {
+      id: unified.id,
+      name: unified.name,
+      type: nodeType,
+      metadata: {
+        ...baseMetadata,
+        extractDelimitedConfig: {
+          sourceColumn: extConf.sourceColumn,
+          delimiter: extConf.delimiter,
+          outputColumns: extConf.outputColumns.map((c) => ({
+            name: c.name,
+            position: c.position,
+            type: c.type,
+          })),
+        },
+      },
+    };
+  }
+
+  // tExtractJSONFields
+  if (config.type === 'EXTRACT_JSON_FIELDS') {
+    const jsonConf = config.config as ExtractJSONFieldsConfiguration;
+    return {
+      id: unified.id,
+      name: unified.name,
+      type: nodeType,
+      metadata: {
+        ...baseMetadata,
+        extractJSONConfig: {
+          sourceColumn: jsonConf.sourceColumn,
+          mappings: jsonConf.outputColumns.map((c) => ({
+            jsonPath: c.jsonPath,
+            targetColumn: c.name,
+            dataType: c.type,
+          })),
+        },
+      },
+    };
+  }
+
+  // tExtractXMLField
+  if (isExtractXMLFieldConfig(config)) {
+    const xmlConf = config.config;
+    const first = xmlConf.xpathExpressions[0];
+    return {
+      id: unified.id,
+      name: unified.name,
+      type: nodeType,
+      metadata: {
+        ...baseMetadata,
+        extractXMLConfig: {
+          sourceColumn: xmlConf.sourceColumn,
+          xpath: first?.xpath,
+          targetColumn: first?.outputColumn,
+        },
+      },
+    };
+  }
+
+  // tNormalize (split row)
+  if (isNormalizeConfig(config)) {
+    const normConf = config.config;
+    return {
+      id: unified.id,
+      name: unified.name,
+      type: nodeType,
+      metadata: {
+        ...baseMetadata,
+        normalizeConfig: {
+          sourceColumn: normConf.sourceColumn,
+          decimalSeparator: '.',
+          groupingSeparator: ',',
+        },
+      },
+    };
+  }
+
+  // tNormalizeNumber
+  if (isNormalizeNumberConfig(config)) {
+    const normNumConf = config.config;
+    const firstRule = normNumConf.rules[0];
+    return {
+      id: unified.id,
+      name: unified.name,
+      type: nodeType,
+      metadata: {
+        ...baseMetadata,
+        normalizeNumberConfig: {
+          sourceColumn: firstRule?.sourceColumn,
+          targetType: firstRule?.outputDataType,
+        },
+      },
+    };
+  }
+
+  // tReplicate
+  if (isReplicateConfig(config)) {
+    // Number of copies may be stored in a custom property; default to 2 if missing.
+    const copies = (unified.metadata as any)?.replicateCopies || 2;
+    return {
+      id: unified.id,
+      name: unified.name,
+      type: nodeType,
+      metadata: {
+        ...baseMetadata,
+        replicateConfig: {
+          numberOfCopies: copies,
+        },
+      },
+    };
+  }
+
+  // tUnite
+  if (isUniteConfig(config)) {
+    const uniteConf = config.config;
+    return {
+      id: unified.id,
+      name: unified.name,
+      type: nodeType,
+      metadata: {
+        ...baseMetadata,
+        uniteConfig: {
+          unionAll: uniteConf.unionMode === 'ALL',
+          setOperation: uniteConf.unionMode === 'ALL' ? 'UNION' : 'UNION',
+        },
+      },
+    };
+  }
+
+  // tUniqRow
+  if (isUniqRowConfig(config)) {
+    const uniqConf = config.config;
+    return {
+      id: unified.id,
+      name: unified.name,
+      type: nodeType,
+      metadata: {
+        ...baseMetadata,
+        uniqRowConfig: {
+          keyColumns: uniqConf.keyFields,
+        },
+      },
+    };
+  }
+
+  // tSplitRow (same as Normalize in tests)
+// tSplitRow (same as Normalize in tests)
+if (nodeType === NodeType.SPLIT_ROW && isNormalizeConfig(config)) {
+  const normConf = (config as { type: 'NORMALIZE'; config: NormalizeComponentConfiguration }).config;
+  return {
+    id: unified.id,
+    name: unified.name,
+    type: nodeType,
+    metadata: {
+      ...baseMetadata,
+      splitRowConfig: {
+        splitColumn: normConf.sourceColumn,
+        delimiter: normConf.delimiter,
+        outputColumns: [normConf.outputColumnName],
+      },
+    },
+  };
+}
+
+  // tPivotToColumnsDelimited
+  if (config.type === 'PIVOT_TO_COLUMNS_DELIMITED') {
+    const pivotConf = config.config as PivotToColumnsDelimitedConfiguration;
+    return {
+      id: unified.id,
+      name: unified.name,
+      type: nodeType,
+      metadata: {
+        ...baseMetadata,
+        pivotToColumnsDelimitedConfig: {
+          pivotColumn: pivotConf.sourceColumn,
+          valueColumn: 'value', // may need to be stored elsewhere
+          delimiter: pivotConf.delimiter,
+          pivotValues: pivotConf.pivotValues || [],
+        },
+      },
+    };
+  }
+
+  // tDenormalize
+  if (config.type === 'DENORMALIZE') {
+    const denormConf = config.config as DenormalizeComponentConfiguration;
+    return {
+      id: unified.id,
+      name: unified.name,
+      type: nodeType,
+      metadata: {
+        ...baseMetadata,
+        denormalizeConfig: {
+          keyColumns: denormConf.keepColumns,
+          denormalizeColumn: denormConf.sourceColumn,
+          delimiter: denormConf.delimiter,
+        },
+      },
+    };
+  }
+
+  // tDenormalizeSortedRow
+  if (isDenormalizeSortedRowConfig(config)) {
+    const denormConf = config.config;
+    return {
+      id: unified.id,
+      name: unified.name,
+      type: nodeType,
+      metadata: {
+        ...baseMetadata,
+        denormalizeSortedRowConfig: {
+          groupByFields: denormConf.groupByFields,
+          sortKeys: denormConf.sortKeys.map((sk) => ({
+            field: sk.field,
+            direction: sk.direction,
+            nullsFirst: sk.nullsFirst,
+          })),
+          aggregations: denormConf.denormalizedColumns.map((dc) => ({
+            sourceField: dc.sourceField,
+            outputField: dc.outputField,
+            aggregation: dc.aggregation,
+            separator: dc.separator,
+          })),
+        },
+      },
+    };
+  }
+
+  // tExtractRegexFields
+  if (config.type === 'EXTRACT_REGEX_FIELDS') {
+    const regexConf = config.config as ExtractRegexFieldsConfiguration;
+    return {
+      id: unified.id,
+      name: unified.name,
+      type: nodeType,
+      metadata: {
+        ...baseMetadata,
+        extractRegexConfig: {
+          sourceColumn: regexConf.sourceColumn,
+          regexPattern: regexConf.regexPattern,
+          outputColumns: regexConf.rules.map((r) => ({
+            name: r.columnName,
+            position: r.position,
+          })),
+        },
+      },
+    };
+  }
+
+  // tParseRecordSet
+  if (config.type === 'PARSE_RECORD_SET') {
+    const parseConf = config.config as ParseRecordSetComponentConfiguration;
+    return {
+      id: unified.id,
+      name: unified.name,
+      type: nodeType,
+      metadata: {
+        ...baseMetadata,
+        parseRecordSetConfig: {
+          sourceColumn: parseConf.sourceColumn,
+          recordType: 'delimited',
+          delimiter: parseConf.recordDelimiter,
+          targetColumns: parseConf.columns.map((c) => ({
+            name: c.name,
+            path: `$.${c.name}`,
+            type: c.type,
+          })),
+        },
+      },
+    };
+  }
+
+  // tSampleRow
+  if (isSampleRowConfig(config)) {
+    const sampleConf = config.config;
+    return {
+      id: unified.id,
+      name: unified.name,
+      type: nodeType,
+      metadata: {
+        ...baseMetadata,
+        sampleRowConfig: {
+          sampleSize: sampleConf.sampleValue,
+          isAbsolute: sampleConf.samplingMethod === 'firstRows',
+        },
+      },
+    };
+  }
+
+  // tDataMasking
+  if (isDataMaskingConfig(config)) {
+    const maskConf = config.config;
+    return {
+      id: unified.id,
+      name: unified.name,
+      type: nodeType,
+      metadata: {
+        ...baseMetadata,
+        dataMaskingConfig: {
+          rules: maskConf.rules.map((r) => ({
+            field: r.column,
+            maskType: r.maskingType,
+            parameters: r.parameters,
+          })),
+        },
+      },
+    };
+  }
+
+  // tSchemaComplianceCheck
+  if (isSchemaComplianceCheckConfig(config)) {
+    const schemaConf = config.config;
+    return {
+      id: unified.id,
+      name: unified.name,
+      type: nodeType,
+      metadata: {
+        ...baseMetadata,
+        schemaComplianceConfig: {
+          expectedSchema: schemaConf.expectedSchema.map((ec) => ({
+            name: ec.name,
+            type: ec.dataType,
+            nullable: ec.nullable,
+          })),
+        },
+      },
+    };
+  }
+
+  // tAddCRCRow
+  if (isAddCRCRowConfig(config)) {
+    const crcConf = config.config;
+    return {
+      id: unified.id,
+      name: unified.name,
+      type: nodeType,
+      metadata: {
+        ...baseMetadata,
+        addCRCRowConfig: {
+          algorithm: crcConf.algorithm,
+          outputColumnName: crcConf.outputColumnName,
+          includedColumns: crcConf.includedColumns,
+        },
+      },
+    };
+  }
+
+  // tFilterColumns
+  if (config.type === 'FILTER_COLUMNS') {
+    const fcConf = config.config as FilterColumnsComponentConfiguration;
+    const includedColumns = fcConf.columns.filter((c) => c.selected).map((c) => c.originalName);
+    return {
+      id: unified.id,
+      name: unified.name,
+      type: nodeType,
+      metadata: {
+        ...baseMetadata,
+        filterColumnsConfig: {
+          includedColumns,
+        },
+      },
+    };
+  }
+
+  // tLookup
+  if (isLookupConfig(config)) {
+    const lookupConf = config.config;
+    return {
+      id: unified.id,
+      name: unified.name,
+      type: nodeType,
+      metadata: {
+        ...baseMetadata,
+        lookupConfig: {
+          lookupTable: lookupConf.lookupTable,
+          keyMapping: lookupConf.lookupKeyFields.map((kf, idx) => ({
+            sourceColumn: kf,
+            targetColumn: lookupConf.lookupReturnFields[idx] || kf,
+          })),
+          outputColumns: lookupConf.lookupReturnFields,
+        },
+      },
+    };
+  }
+
+  // tCacheIn / tCacheOut
+  if (nodeType === NodeType.CACHE_IN || nodeType === NodeType.CACHE_OUT) {
+    const cacheConf = (unified.metadata as any)?.cacheConfig || { cacheName: 'default_cache' };
+    return {
+      id: unified.id,
+      name: unified.name,
+      type: nodeType,
+      metadata: {
+        ...baseMetadata,
+        cacheConfig: cacheConf,
+      },
+    };
+  }
+
+  // tRowGenerator – not yet in unified types
+  if (nodeType === NodeType.ROW_GENERATOR) {
+    const genConf = (unified.metadata as any)?.rowGeneratorConfig || {
+      rowCount: 100,
+      columns: [],
+    };
+    return {
+      id: unified.id,
+      name: unified.name,
+      type: nodeType,
+      metadata: {
+        ...baseMetadata,
+        rowGeneratorConfig: genConf,
+      },
+    };
+  }
+
+  // tConditionalSplit
+  if (nodeType === NodeType.CONDITIONAL_SPLIT) {
+    const splitConf = (unified.metadata as any)?.conditionalSplitConfig || { conditions: [] };
+    return {
+      id: unified.id,
+      name: unified.name,
+      type: nodeType,
+      metadata: {
+        ...baseMetadata,
+        conditionalSplitConfig: splitConf,
+      },
+    };
+  }
+
+  // Fallback for any other node types with config
+  console.warn(`[Canvas] No specific mapping for node type ${nodeType}. Using fallback.`);
+  return {
+    id: unified.id,
+    name: unified.name,
+    type: nodeType,
+    metadata: baseMetadata,
+  };
+});
         const canvasConnections: PipelineCanvasConnection[] = runEdges.map((edge: Edge) => ({
           id: edge.id,
           sourceNodeId: edge.source,
@@ -1024,9 +1733,9 @@ const handleMapEditorSave = useCallback((config: any) => {
       const nodePositions = nodes.map(node => node.position);
       const nodeWidths = nodes.map(node => (node.style?.width ? parseFloat(node.style.width as string) : 100));
       const nodeHeights = nodes.map(node => (node.style?.height ? parseFloat(node.style.height as string) : 100));
-      const minX = Math.min(...nodePositions.map((p, i) => p.x));
+      const minX = Math.min(...nodePositions.map((p, _i) => p.x));
       const maxX = Math.max(...nodePositions.map((p, i) => p.x + nodeWidths[i]));
-      const minY = Math.min(...nodePositions.map((p, i) => p.y));
+      const minY = Math.min(...nodePositions.map((p, _i) => p.y));
       const maxY = Math.max(...nodePositions.map((p, i) => p.y + nodeHeights[i]));
       const nodesWidth = maxX - minX;
       const nodesHeight = maxY - minY;

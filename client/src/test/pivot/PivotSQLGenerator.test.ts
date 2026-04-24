@@ -204,15 +204,4 @@ export class PivotSQLGenerator extends BaseSQLGenerator {
   private extractTableName(node: UnifiedCanvasNode): string {
     return node.name.toLowerCase().replace(/\s+/g, '_');
   }
-
-  private emptyFragment(): GeneratedSQLFragment {
-    return {
-      sql: '',
-      dependencies: [],
-      parameters: new Map(),
-      errors: [],
-      warnings: [],
-      metadata: { generatedAt: new Date().toISOString(), fragmentType: 'empty', lineCount: 0 }
-    };
-  }
 }

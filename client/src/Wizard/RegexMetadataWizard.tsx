@@ -23,6 +23,11 @@ import {
   RegexTestResult
 } from '../types/types';
 
+// Extended test result to carry error information
+interface TestResultWithError extends RegexTestResult {
+  error?: string;
+}
+
 const RegexMetadataWizard: React.FC<FileRegexMetadataWizardProps> = ({ 
   isOpen, 
   onClose, 
@@ -46,9 +51,13 @@ const RegexMetadataWizard: React.FC<FileRegexMetadataWizardProps> = ({
   });
 
   const [isLoading, setIsLoading] = useState(false);
-  const [error, setError] = useState<string | null>(null);
-  const [testResults, setTestResults] = useState<RegexTestResult[]>([]);
+  const [error, setError] = useState<string | null>(null);            // File-related errors
+  const [testResults, setTestResults] = useState<TestResultWithError[]>([]);
   const [activeTab, setActiveTab] = useState<'patterns' | 'test'>('patterns');
+
+  // Validation error states
+  const [fieldErrors, setFieldErrors] = useState<Record<string, string>>({});
+  const [patternErrors, setPatternErrors] = useState<Record<string, string>>({});
 
   const fileInputRef = useRef<HTMLInputElement>(null);
   const totalSteps = 4;
@@ -78,39 +87,44 @@ const RegexMetadataWizard: React.FC<FileRegexMetadataWizardProps> = ({
   const parseFile = async (file: File): Promise<string[]> => {
     const content = await file.text();
     const lines = content.split('\n').filter(line => line.trim().length > 0);
-    
-    // Return first 50 lines or all lines if fewer
     return lines.slice(0, 50);
   };
 
   // Test a single regex pattern against sample data
-  const testRegexPattern = (pattern: RegexPatternDefinition, sampleData: string[]): RegexTestResult => {
-    const flags = pattern.flags || getDefaultFlags();
-    const regex = new RegExp(pattern.pattern, flags);
-    const matches: Array<{ match: string; index: number; groups: string[] }> = [];
-    let totalMatches = 0;
+  const testRegexPattern = (pattern: RegexPatternDefinition, sampleData: string[]): TestResultWithError => {
+    try {
+      const flags = pattern.flags || getDefaultFlags();
+      const regex = new RegExp(pattern.pattern, flags);
+      const matches: Array<{ match: string; index: number; groups: string[] }> = [];
+      let totalMatches = 0;
 
-    sampleData.forEach((line, lineIndex) => {
-      const lineMatches = line.matchAll(regex);
-      for (const match of lineMatches) {
-        matches.push({
-          match: match[0],
-          index: lineIndex,
-          groups: match.slice(1)
-        });
-        totalMatches++;
-        
-        // Limit matches to prevent performance issues
-        if (totalMatches >= 100) break;
-      }
-      if (totalMatches >= 100) return;
-    });
+      sampleData.forEach((line, lineIndex) => {
+        const lineMatches = line.matchAll(regex);
+        for (const match of lineMatches) {
+          matches.push({
+            match: match[0],
+            index: lineIndex,
+            groups: match.slice(1)
+          });
+          totalMatches++;
+          if (totalMatches >= 100) break;
+        }
+        if (totalMatches >= 100) return;
+      });
 
-    return {
-      patternId: pattern.id,
-      matches: matches.slice(0, 20), // Show only first 20 matches
-      totalMatches
-    };
+      return {
+        patternId: pattern.id,
+        matches: matches.slice(0, 20),
+        totalMatches
+      };
+    } catch (e: any) {
+      return {
+        patternId: pattern.id,
+        matches: [],
+        totalMatches: 0,
+        error: e.message
+      };
+    }
   };
 
   // Test all patterns against sample data
@@ -120,7 +134,7 @@ const RegexMetadataWizard: React.FC<FileRegexMetadataWizardProps> = ({
       return;
     }
 
-    const results: RegexTestResult[] = formData.patterns.map(pattern => 
+    const results: TestResultWithError[] = formData.patterns.map(pattern => 
       testRegexPattern(pattern, formData.sampleData)
     );
 
@@ -142,7 +156,6 @@ const RegexMetadataWizard: React.FC<FileRegexMetadataWizardProps> = ({
     const file = event.target.files?.[0];
     if (!file) return;
 
-    // Validate file type
     const fileExtension = file.name.toLowerCase().slice(file.name.lastIndexOf('.'));
     
     if (!supportedExtensions.includes(fileExtension)) {
@@ -155,13 +168,11 @@ const RegexMetadataWizard: React.FC<FileRegexMetadataWizardProps> = ({
     
     try {
       const sampleData = await parseFile(file);
-      
       updateFormData({
         file,
         filePath: file.name,
         sampleData
       });
-      
     } catch (err: any) {
       setError(`Failed to process file: ${err.message}`);
     } finally {
@@ -193,21 +204,37 @@ const RegexMetadataWizard: React.FC<FileRegexMetadataWizardProps> = ({
     });
   };
 
-  // Update pattern field
+  // Update pattern field and clear any error for that pattern
   const updatePattern = (patternId: string, field: string, value: any) => {
     const newPatterns = formData.patterns.map(pattern => 
       pattern.id === patternId ? { ...pattern, [field]: value } : pattern
     );
     updateFormData({ patterns: newPatterns });
+    // Clear pattern error if it existed
+    if (patternErrors[patternId]) {
+      setPatternErrors(prev => {
+        const copy = { ...prev };
+        delete copy[patternId];
+        return copy;
+      });
+    }
   };
 
-  // Remove pattern
+  // Remove pattern and its error
   const removePattern = (patternId: string) => {
     const newPatterns = formData.patterns.filter(pattern => pattern.id !== patternId);
     updateFormData({ 
       patterns: newPatterns,
       totalPatterns: newPatterns.length
     });
+    // Remove associated error
+    if (patternErrors[patternId]) {
+      setPatternErrors(prev => {
+        const copy = { ...prev };
+        delete copy[patternId];
+        return copy;
+      });
+    }
   };
 
   // Test a single pattern
@@ -217,18 +244,26 @@ const RegexMetadataWizard: React.FC<FileRegexMetadataWizardProps> = ({
 
     const result = testRegexPattern(pattern, formData.sampleData);
     
+    if (result.error) {
+      setTestResults(prev => {
+        const filtered = prev.filter(r => r.patternId !== patternId);
+        return [...filtered, result];
+      });
+      setActiveTab('test');
+      return;
+    }
+    
     // Update pattern with match count and sample matches
     updatePattern(patternId, 'matchCount', result.totalMatches);
     updatePattern(patternId, 'sampleMatches', result.matches.slice(0, 5).map(m => m.match));
     
-    // Update test results
     setTestResults(prev => {
       const filtered = prev.filter(r => r.patternId !== patternId);
       return [...filtered, result];
     });
   };
 
-  // Add common pattern
+  // Add common pattern (validated patterns)
   const addCommonPattern = (commonPattern: { name: string; pattern: string }) => {
     const newPattern: RegexPatternDefinition = {
       id: `pattern-${Date.now()}`,
@@ -247,20 +282,123 @@ const RegexMetadataWizard: React.FC<FileRegexMetadataWizardProps> = ({
     });
   };
 
+  // ------------------------------------------------------------------
+  // Step navigation with validation
+  // ------------------------------------------------------------------
   const handleNext = () => {
-    if (currentStep < totalSteps) {
-      setCurrentStep(currentStep + 1);
+    // Clear previous step errors
+    setFieldErrors({});
+    setPatternErrors({});
+
+    if (currentStep === 1) {
+      // Name is required
+      const trimmedName = formData.name.trim();
+      if (!trimmedName) {
+        setFieldErrors({ name: 'Name is required' });
+        return;
+      }
+      // Persist trimmed name
+      updateFormData({ name: trimmedName });
     }
+    else if (currentStep === 2) {
+      // File must be selected (already enforced by disabled state, but extra check)
+      if (!formData.file) {
+        setFieldErrors({ file: 'Please select a file to continue' });
+        return;
+      }
+    }
+    else if (currentStep === 3) {
+      // Validate every pattern
+      const errors: Record<string, string> = {};
+      let hasError = false;
+      let trimmedPatterns = formData.patterns.map(pattern => {
+        const name = pattern.name.trim();
+        const patternStr = pattern.pattern.trim();
+        if (!name) {
+          errors[pattern.id] = 'Pattern name is required';
+          hasError = true;
+        } else if (!patternStr) {
+          errors[pattern.id] = 'Regex pattern is required';
+          hasError = true;
+        } else {
+          try {
+            new RegExp(patternStr, pattern.flags || getDefaultFlags());
+          } catch (e: any) {
+            errors[pattern.id] = 'Invalid regex: ' + e.message;
+            hasError = true;
+          }
+        }
+        return { ...pattern, name, pattern: patternStr };
+      });
+
+      if (hasError) {
+        setPatternErrors(errors);
+        setFieldErrors({ patterns: 'Please fix the errors in one or more patterns before continuing' });
+        return;
+      }
+      // Store cleaned patterns
+      updateFormData({ patterns: trimmedPatterns });
+    }
+
+    setCurrentStep(currentStep + 1);
   };
 
   const handleBack = () => {
     if (currentStep > 1) {
       setCurrentStep(currentStep - 1);
+      // Clear any validation errors when navigating back
+      setFieldErrors({});
+      setPatternErrors({});
     }
   };
 
+  // ------------------------------------------------------------------
+  // Final save with full validation
+  // ------------------------------------------------------------------
   const handleSave = () => {
-    onSave(formData);
+    // Re‑validate everything
+    const trimmedName = formData.name.trim();
+    if (!trimmedName) {
+      setFieldErrors({ name: 'Name is required' });
+      setCurrentStep(1);
+      return;
+    }
+
+    const errors: Record<string, string> = {};
+    let hasPatternError = false;
+    const validatedPatterns = formData.patterns.map(pattern => {
+      const name = pattern.name.trim();
+      const patternStr = pattern.pattern.trim();
+      if (!name) {
+        errors[pattern.id] = 'Pattern name is required';
+        hasPatternError = true;
+      } else if (!patternStr) {
+        errors[pattern.id] = 'Regex pattern is required';
+        hasPatternError = true;
+      } else {
+        try {
+          new RegExp(patternStr, pattern.flags || getDefaultFlags());
+        } catch (e: any) {
+          errors[pattern.id] = 'Invalid regex: ' + e.message;
+          hasPatternError = true;
+        }
+      }
+      return { ...pattern, name, pattern: patternStr };
+    });
+
+    if (hasPatternError) {
+      setPatternErrors(errors);
+      setCurrentStep(3);
+      return;
+    }
+
+    // All good – build clean final data
+    const finalData: FileRegexMetadataFormData = {
+      ...formData,
+      name: trimmedName,
+      patterns: validatedPatterns
+    };
+    onSave(finalData);
     handleClose();
   };
 
@@ -285,9 +423,13 @@ const RegexMetadataWizard: React.FC<FileRegexMetadataWizardProps> = ({
     });
     setTestResults([]);
     setError(null);
+    setFieldErrors({});
+    setPatternErrors({});
   };
 
-  // Render patterns table
+  // ------------------------------------------------------------------
+  // Render helpers
+  // ------------------------------------------------------------------
   const renderPatternsTable = () => {
     if (formData.patterns.length === 0) {
       return (
@@ -312,84 +454,89 @@ const RegexMetadataWizard: React.FC<FileRegexMetadataWizardProps> = ({
           <table className="w-full text-sm">
             <thead className="bg-gray-100 dark:bg-gray-800">
               <tr>
-                <th className="px-3 py-2 text-left font-medium text-gray-700 dark:text-gray-300">
-                  Name
-                </th>
-                <th className="px-3 py-2 text-left font-medium text-gray-700 dark:text-gray-300">
-                  Pattern
-                </th>
-                <th className="px-3 py-2 text-left font-medium text-gray-700 dark:text-gray-300">
-                  Field Type
-                </th>
-                <th className="px-3 py-2 text-left font-medium text-gray-700 dark:text-gray-300">
-                  Matches
-                </th>
-                <th className="px-3 py-2 text-left font-medium text-gray-700 dark:text-gray-300">
-                  Actions
-                </th>
+                <th className="px-3 py-2 text-left font-medium text-gray-700 dark:text-gray-300">Name</th>
+                <th className="px-3 py-2 text-left font-medium text-gray-700 dark:text-gray-300">Pattern</th>
+                <th className="px-3 py-2 text-left font-medium text-gray-700 dark:text-gray-300">Field Type</th>
+                <th className="px-3 py-2 text-left font-medium text-gray-700 dark:text-gray-300">Matches</th>
+                <th className="px-3 py-2 text-left font-medium text-gray-700 dark:text-gray-300">Actions</th>
               </tr>
             </thead>
             <tbody className="divide-y divide-gray-200 dark:divide-gray-600">
               {formData.patterns.map((pattern) => (
-                <tr key={pattern.id} className="hover:bg-gray-50 dark:hover:bg-gray-700">
-                  <td className="px-3 py-2">
-                    <input
-                      type="text"
-                      value={pattern.name}
-                      onChange={(e) => updatePattern(pattern.id, 'name', e.target.value)}
-                      className="w-full px-2 py-1 border border-gray-300 dark:border-gray-600 rounded focus:outline-none focus:ring-1 focus:ring-blue-500 dark:bg-gray-700 dark:text-white"
-                    />
-                  </td>
-                  <td className="px-3 py-2">
-                    <input
-                      type="text"
-                      value={pattern.pattern}
-                      onChange={(e) => updatePattern(pattern.id, 'pattern', e.target.value)}
-                      className="w-full px-2 py-1 border border-gray-300 dark:border-gray-600 rounded focus:outline-none focus:ring-1 focus:ring-blue-500 dark:bg-gray-700 dark:text-white font-mono text-sm"
-                      placeholder="Enter regex pattern"
-                    />
-                  </td>
-                  <td className="px-3 py-2">
-                    <select
-                      value={pattern.fieldType}
-                      onChange={(e) => updatePattern(pattern.id, 'fieldType', e.target.value)}
-                      className="w-full px-2 py-1 border border-gray-300 dark:border-gray-600 rounded focus:outline-none focus:ring-1 focus:ring-blue-500 dark:bg-gray-700 dark:text-white"
-                    >
-                      {fieldTypes.map(type => (
-                        <option key={type} value={type}>{type}</option>
-                      ))}
-                    </select>
-                  </td>
-                  <td className="px-3 py-2">
-                    <div className="flex items-center space-x-2">
-                      <span className={`text-xs px-2 py-1 rounded ${
-                        pattern.matchCount > 0 
-                          ? 'bg-green-100 dark:bg-green-900 text-green-800 dark:text-green-300'
-                          : 'bg-gray-100 dark:bg-gray-600 text-gray-700 dark:text-gray-300'
-                      }`}>
-                        {pattern.matchCount} matches
-                      </span>
+                <React.Fragment key={pattern.id}>
+                  <tr className="hover:bg-gray-50 dark:hover:bg-gray-700">
+                    <td className="px-3 py-2">
+                      <input
+                        type="text"
+                        value={pattern.name}
+                        onChange={(e) => updatePattern(pattern.id, 'name', e.target.value)}
+                        className={`w-full px-2 py-1 border rounded focus:outline-none focus:ring-1 focus:ring-blue-500 dark:bg-gray-700 dark:text-white ${
+                          patternErrors[pattern.id] ? 'border-red-500' : 'border-gray-300 dark:border-gray-600'
+                        }`}
+                      />
+                    </td>
+                    <td className="px-3 py-2">
+                      <input
+                        type="text"
+                        value={pattern.pattern}
+                        onChange={(e) => updatePattern(pattern.id, 'pattern', e.target.value)}
+                        className={`w-full px-2 py-1 border rounded focus:outline-none focus:ring-1 focus:ring-blue-500 dark:bg-gray-700 dark:text-white font-mono text-sm ${
+                          patternErrors[pattern.id] ? 'border-red-500' : 'border-gray-300 dark:border-gray-600'
+                        }`}
+                        placeholder="Enter regex pattern"
+                      />
+                    </td>
+                    <td className="px-3 py-2">
+                      <select
+                        value={pattern.fieldType}
+                        onChange={(e) => updatePattern(pattern.id, 'fieldType', e.target.value)}
+                        className="w-full px-2 py-1 border border-gray-300 dark:border-gray-600 rounded focus:outline-none focus:ring-1 focus:ring-blue-500 dark:bg-gray-700 dark:text-white"
+                      >
+                        {fieldTypes.map(type => (
+                          <option key={type} value={type}>{type}</option>
+                        ))}
+                      </select>
+                    </td>
+                    <td className="px-3 py-2">
+                      <div className="flex items-center space-x-2">
+                        <span className={`text-xs px-2 py-1 rounded ${
+                          pattern.matchCount > 0 
+                            ? 'bg-green-100 dark:bg-green-900 text-green-800 dark:text-green-300'
+                            : 'bg-gray-100 dark:bg-gray-600 text-gray-700 dark:text-gray-300'
+                        }`}>
+                          {pattern.matchCount} matches
+                        </span>
+                        <Button
+                          variant="ghost"
+                          size="sm"
+                          onClick={() => testPattern(pattern.id)}
+                          className="h-6 w-6 p-0"
+                        >
+                          <Play className="h-3 w-3" />
+                        </Button>
+                      </div>
+                    </td>
+                    <td className="px-3 py-2">
                       <Button
                         variant="ghost"
                         size="sm"
-                        onClick={() => testPattern(pattern.id)}
-                        className="h-6 w-6 p-0"
+                        onClick={() => removePattern(pattern.id)}
+                        className="h-6 w-6 p-0 text-red-600 hover:text-red-800"
                       >
-                        <Play className="h-3 w-3" />
+                        <Trash2 className="h-3 w-3" />
                       </Button>
-                    </div>
-                  </td>
-                  <td className="px-3 py-2">
-                    <Button
-                      variant="ghost"
-                      size="sm"
-                      onClick={() => removePattern(pattern.id)}
-                      className="h-6 w-6 p-0 text-red-600 hover:text-red-800"
-                    >
-                      <Trash2 className="h-3 w-3" />
-                    </Button>
-                  </td>
-                </tr>
+                    </td>
+                  </tr>
+                  {/* Pattern error row */}
+                  {patternErrors[pattern.id] && (
+                    <tr className="bg-red-50 dark:bg-red-900/20">
+                      <td colSpan={5} className="px-3 py-1 text-sm text-red-600 dark:text-red-400">
+                        <AlertCircle className="h-3 w-3 inline mr-1" />
+                        {patternErrors[pattern.id]}
+                      </td>
+                    </tr>
+                  )}
+                </React.Fragment>
               ))}
             </tbody>
           </table>
@@ -398,7 +545,6 @@ const RegexMetadataWizard: React.FC<FileRegexMetadataWizardProps> = ({
     );
   };
 
-  // Render test results
   const renderTestResults = () => {
     if (testResults.length === 0) {
       return (
@@ -426,23 +572,32 @@ const RegexMetadataWizard: React.FC<FileRegexMetadataWizardProps> = ({
                     <h5 className="font-medium text-gray-700 dark:text-gray-300">{pattern.name}</h5>
                     <p className="text-xs text-gray-500 dark:text-gray-400 font-mono">{pattern.pattern}</p>
                   </div>
-                  <span className={`text-xs px-2 py-1 rounded ${
-                    result.totalMatches > 0 
-                      ? 'bg-green-100 dark:bg-green-900 text-green-800 dark:text-green-300'
-                      : 'bg-red-100 dark:bg-red-900 text-red-800 dark:text-red-300'
-                  }`}>
-                    {result.totalMatches} total matches
-                  </span>
+                  {result.error ? (
+                    <span className="text-xs px-2 py-1 rounded bg-red-100 dark:bg-red-900 text-red-800 dark:text-red-300">
+                      Invalid pattern
+                    </span>
+                  ) : (
+                    <span className={`text-xs px-2 py-1 rounded ${
+                      result.totalMatches > 0 
+                        ? 'bg-green-100 dark:bg-green-900 text-green-800 dark:text-green-300'
+                        : 'bg-red-100 dark:bg-red-900 text-red-800 dark:text-red-300'
+                    }`}>
+                      {result.totalMatches} total matches
+                    </span>
+                  )}
                 </div>
               </div>
               <div className="p-3 max-h-48 overflow-y-auto">
-                {result.matches.length > 0 ? (
+                {result.error ? (
+                  <div className="text-center text-red-600 dark:text-red-400 py-4">
+                    <AlertCircle className="h-4 w-4 inline mr-1" />
+                    {result.error}
+                  </div>
+                ) : result.matches.length > 0 ? (
                   <div className="space-y-1">
                     {result.matches.slice(0, 10).map((match, index) => (
                       <div key={index} className="text-sm p-2 bg-blue-50 dark:bg-blue-900/20 rounded">
-                        <div className="font-mono text-blue-700 dark:text-blue-300">
-                          {match.match}
-                        </div>
+                        <div className="font-mono text-blue-700 dark:text-blue-300">{match.match}</div>
                         <div className="text-xs text-gray-500 dark:text-gray-400 mt-1">
                           Line {match.index + 1}
                         </div>
@@ -467,7 +622,6 @@ const RegexMetadataWizard: React.FC<FileRegexMetadataWizardProps> = ({
     );
   };
 
-  // Render sample data preview
   const renderSampleData = () => {
     if (formData.sampleData.length === 0) {
       return (
@@ -542,6 +696,7 @@ const RegexMetadataWizard: React.FC<FileRegexMetadataWizardProps> = ({
 
         {/* Content */}
         <div className="p-6 max-h-[60vh] overflow-y-auto">
+          {/* Step 1: General Properties */}
           {currentStep === 1 && (
             <div className="space-y-4">
               <h3 className="text-lg font-medium text-gray-900 dark:text-white">
@@ -559,10 +714,18 @@ const RegexMetadataWizard: React.FC<FileRegexMetadataWizardProps> = ({
                   <input
                     type="text"
                     value={formData.name}
-                    onChange={(e) => updateFormData({ name: e.target.value })}
-                    className="w-full px-3 py-2 border border-gray-300 dark:border-gray-600 rounded-md focus:outline-none focus:ring-2 focus:ring-blue-500 dark:bg-gray-700 dark:text-white"
+                    onChange={(e) => {
+                      updateFormData({ name: e.target.value });
+                      if (fieldErrors.name) setFieldErrors(prev => ({ ...prev, name: '' }));
+                    }}
+                    className={`w-full px-3 py-2 border rounded-md focus:outline-none focus:ring-2 focus:ring-blue-500 dark:bg-gray-700 dark:text-white ${
+                      fieldErrors.name ? 'border-red-500' : 'border-gray-300 dark:border-gray-600'
+                    }`}
                     placeholder="Enter metadata name"
                   />
+                  {fieldErrors.name && (
+                    <p className="text-sm text-red-600 dark:text-red-400 mt-1">{fieldErrors.name}</p>
+                  )}
                 </div>
                 
                 <div>
@@ -665,6 +828,7 @@ const RegexMetadataWizard: React.FC<FileRegexMetadataWizardProps> = ({
             </div>
           )}
 
+          {/* Step 2: File Selection */}
           {currentStep === 2 && (
             <div className="space-y-4">
               <h3 className="text-lg font-medium text-gray-900 dark:text-white">
@@ -675,7 +839,6 @@ const RegexMetadataWizard: React.FC<FileRegexMetadataWizardProps> = ({
               </p>
               
               <div className="space-y-4">
-                {/* Hidden file input */}
                 <input
                   type="file"
                   ref={fileInputRef}
@@ -715,6 +878,9 @@ const RegexMetadataWizard: React.FC<FileRegexMetadataWizardProps> = ({
                       ✓ File selected: {formData.file.name} ({(formData.file.size / 1024).toFixed(2)} KB)
                     </p>
                   )}
+                  {fieldErrors.file && (
+                    <p className="text-sm text-red-600 dark:text-red-400 mt-1">{fieldErrors.file}</p>
+                  )}
                 </div>
 
                 {error && (
@@ -734,6 +900,7 @@ const RegexMetadataWizard: React.FC<FileRegexMetadataWizardProps> = ({
             </div>
           )}
 
+          {/* Step 3: Patterns */}
           {currentStep === 3 && (
             <div className="space-y-6">
               <h3 className="text-lg font-medium text-gray-900 dark:text-white">
@@ -743,6 +910,13 @@ const RegexMetadataWizard: React.FC<FileRegexMetadataWizardProps> = ({
                 Define and test your regex patterns. You can add custom patterns or use common patterns.
               </p>
               
+              {fieldErrors.patterns && (
+                <div className="flex items-center space-x-2 p-3 bg-red-50 dark:bg-red-900/20 border border-red-200 dark:border-red-800 rounded-md">
+                  <AlertCircle className="h-4 w-4 text-red-600 dark:text-red-400" />
+                  <span className="text-sm text-red-600 dark:text-red-400">{fieldErrors.patterns}</span>
+                </div>
+              )}
+
               <div className="flex justify-between items-center">
                 <div className="flex space-x-2">
                   <Button
@@ -822,6 +996,7 @@ const RegexMetadataWizard: React.FC<FileRegexMetadataWizardProps> = ({
             </div>
           )}
 
+          {/* Step 4: Finish and Save */}
           {currentStep === 4 && (
             <div className="space-y-4">
               <h3 className="text-lg font-medium text-gray-900 dark:text-white">

@@ -13,7 +13,11 @@ import {
   AlertCircle,
   RefreshCw,
   Server,
-  Loader2
+  Loader2,
+  FolderOpen,
+  Grid3X3,
+  Search,
+  GitBranch
 } from 'lucide-react';
 import { Button } from '../components/ui/Button';
 import { Input } from '../components/ui/input';
@@ -57,7 +61,7 @@ interface EnhancedFormData {
   name: string;
   purpose: string;
   description: string;
-  dbType: DatabaseType | '';
+  dbType: string;
   connection: {
     dbname: string;
     host?: string;
@@ -77,8 +81,27 @@ interface EnhancedFormData {
   selectedConnectionId?: string;
 }
 
-// Database type definitions
-const SUPPORTED_DATABASES: Array<{ value: DatabaseType; label: string; defaultPort: string }> = [
+// Extended type to include connection field metadata and labels
+interface ConnectionRequirement {
+  needsHost: boolean;
+  needsPort: boolean;
+  needsAuth: boolean;
+  needsDatabaseName: boolean;
+  needsSchema: boolean;
+  connectionInfo: string;
+  labels?: {
+    host?: string;
+    port?: string;
+    dbname?: string;
+    user?: string;
+    password?: string;
+    schema?: string;
+  };
+}
+
+// -------------------------- SUPPORTED DATABASES --------------------------
+const SUPPORTED_DATABASES: Array<{ value: string; label: string; defaultPort: string }> = [
+  // Original relational
   { value: 'postgresql', label: 'PostgreSQL', defaultPort: '5432' },
   { value: 'postgres', label: 'PostgreSQL', defaultPort: '5432' },
   { value: 'mysql', label: 'MySQL', defaultPort: '3306' },
@@ -92,113 +115,236 @@ const SUPPORTED_DATABASES: Array<{ value: DatabaseType; label: string; defaultPo
   { value: 'netezza', label: 'Netezza', defaultPort: '5480' },
   { value: 'informix', label: 'Informix', defaultPort: '9088' },
   { value: 'firebird', label: 'Firebird', defaultPort: '3050' },
+  { value: 'greenplum', label: 'Greenplum', defaultPort: '5432' },
+  { value: 'teradata', label: 'Teradata', defaultPort: '1025' },
+  { value: 'vertica', label: 'Vertica', defaultPort: '5433' },
+  { value: 'paraccel', label: 'ParAccel', defaultPort: '5432' },
+  { value: 'mariadb', label: 'MariaDB', defaultPort: '3306' },
+  { value: 'postgresplus', label: 'Postgres Plus', defaultPort: '5432' },
+  { value: 'ingres', label: 'Ingres', defaultPort: '21064' },
+  { value: 'vectorwise', label: 'VectorWise', defaultPort: '21064' },
+  { value: 'sqlite', label: 'SQLite', defaultPort: '' },
+  { value: 'h2', label: 'H2', defaultPort: '' },
+  { value: 'hsqldb', label: 'HSQLDB', defaultPort: '' },
+  { value: 'javadb', label: 'JavaDB (Derby)', defaultPort: '' },
+  { value: 'maxdb', label: 'MaxDB', defaultPort: '7200' },
+  { value: 'msaccess', label: 'Microsoft Access', defaultPort: '' },
+  { value: 'interbase', label: 'Interbase', defaultPort: '3050' },
+  { value: 'sybaseiq', label: 'Sybase IQ', defaultPort: '2638' },
+
+  // ---- NoSQL & Big Data (newly added) ----
+  // Wide-column stores
+  { value: 'hbase', label: 'Apache HBase', defaultPort: '2181' },
+  { value: 'cassandra', label: 'Apache Cassandra', defaultPort: '9042' },
+  { value: 'maprdb', label: 'MapR-DB', defaultPort: '5181' },
+  // Document stores
+  { value: 'mongodb', label: 'MongoDB', defaultPort: '27017' },
+  { value: 'couchbase', label: 'Couchbase', defaultPort: '8091' },
+  { value: 'couchdb', label: 'CouchDB', defaultPort: '5984' },
+  { value: 'existdb', label: 'eXist-db', defaultPort: '8080' },
+  // Search & multi-model
+  { value: 'elasticsearch', label: 'Elasticsearch', defaultPort: '9200' },
+  { value: 'marklogic', label: 'MarkLogic', defaultPort: '8000' },
+  { value: 'neo4j', label: 'Neo4j', defaultPort: '7687' },
+  // Big Data / SQL-on-Hadoop
+  { value: 'hive', label: 'Apache Hive', defaultPort: '10000' },
+  { value: 'impala', label: 'Cloudera Impala', defaultPort: '21050' },
 ];
 
-const DATABASE_CONNECTION_REQUIREMENTS: Record<DatabaseType, { 
-  needsHost: boolean; 
-  needsPort: boolean; 
-  needsAuth: boolean; 
-  needsSchema: boolean;
-  connectionInfo: string;
-}> = {
-  'mysql': { 
-    needsHost: true, 
-    needsPort: true, 
-    needsAuth: true, 
+// -------------------------- ENTITY TERMINOLOGY --------------------------
+interface EntityTerminology {
+  singular: string;
+  plural: string;
+  icon: React.FC<React.ComponentProps<'svg'>>;
+}
+
+const getEntityTerminology = (dbType: string): EntityTerminology => {
+  switch (dbType) {
+    case 'mongodb':
+    case 'couchdb':
+    case 'couchbase':
+    case 'existdb':
+      return { singular: 'Collection', plural: 'Collections', icon: FolderOpen };
+    case 'hbase':
+    case 'cassandra':
+    case 'maprdb':
+      return { singular: 'Column Family', plural: 'Column Families', icon: Grid3X3 };
+    case 'elasticsearch':
+      return { singular: 'Index', plural: 'Indices', icon: Search };
+    case 'marklogic':
+      return { singular: 'Database', plural: 'Databases', icon: Database };
+    case 'neo4j':
+      return { singular: 'Label', plural: 'Labels', icon: GitBranch };
+    case 'hive':
+    case 'impala':
+      // SQL-on-Hadoop – still table‑based
+      return { singular: 'Table', plural: 'Tables', icon: Table };
+    default:
+      return { singular: 'Table', plural: 'Tables', icon: Table };
+  }
+};
+
+// -------------------------- CONNECTION REQUIREMENTS --------------------------
+const DATABASE_CONNECTION_REQUIREMENTS: Record<string, ConnectionRequirement> = {
+  // Original relational
+  'mysql': { needsHost: true, needsPort: true, needsAuth: true, needsDatabaseName: true, needsSchema: false, connectionInfo: 'MySQL connection parameters' },
+  'postgresql': { needsHost: true, needsPort: true, needsAuth: true, needsDatabaseName: true, needsSchema: true, connectionInfo: 'PostgreSQL connection parameters' },
+  'postgres': { needsHost: true, needsPort: true, needsAuth: true, needsDatabaseName: true, needsSchema: true, connectionInfo: 'PostgreSQL connection parameters' },
+  'oracle': { needsHost: true, needsPort: true, needsAuth: true, needsDatabaseName: true, needsSchema: true, connectionInfo: 'Oracle Database connection parameters' },
+  'sqlserver': { needsHost: true, needsPort: true, needsAuth: true, needsDatabaseName: true, needsSchema: true, connectionInfo: 'SQL Server connection parameters' },
+  'mssql': { needsHost: true, needsPort: true, needsAuth: true, needsDatabaseName: true, needsSchema: true, connectionInfo: 'SQL Server connection parameters' },
+  'db2': { needsHost: true, needsPort: true, needsAuth: true, needsDatabaseName: true, needsSchema: true, connectionInfo: 'IBM DB2 connection parameters' },
+  'sap-hana': { needsHost: true, needsPort: true, needsAuth: true, needsDatabaseName: true, needsSchema: true, connectionInfo: 'SAP HANA connection parameters' },
+  'hana': { needsHost: true, needsPort: true, needsAuth: true, needsDatabaseName: true, needsSchema: true, connectionInfo: 'SAP HANA connection parameters' },
+  'sybase': { needsHost: true, needsPort: true, needsAuth: true, needsDatabaseName: true, needsSchema: true, connectionInfo: 'Sybase connection parameters' },
+  'netezza': { needsHost: true, needsPort: true, needsAuth: true, needsDatabaseName: true, needsSchema: true, connectionInfo: 'Netezza connection parameters' },
+  'informix': { needsHost: true, needsPort: true, needsAuth: true, needsDatabaseName: true, needsSchema: true, connectionInfo: 'Informix connection parameters' },
+  'firebird': { needsHost: true, needsPort: true, needsAuth: true, needsDatabaseName: true, needsSchema: false, connectionInfo: 'Firebird connection parameters' },
+
+  // Previously added enterprise
+  'greenplum': { needsHost: true, needsPort: true, needsAuth: true, needsDatabaseName: true, needsSchema: true, connectionInfo: 'Greenplum connection parameters' },
+  'teradata': { needsHost: true, needsPort: true, needsAuth: true, needsDatabaseName: true, needsSchema: true, connectionInfo: 'Teradata connection parameters' },
+  'vertica': { needsHost: true, needsPort: true, needsAuth: true, needsDatabaseName: true, needsSchema: true, connectionInfo: 'Vertica connection parameters' },
+  'paraccel': { needsHost: true, needsPort: true, needsAuth: true, needsDatabaseName: true, needsSchema: true, connectionInfo: 'ParAccel connection parameters' },
+  'mariadb': { needsHost: true, needsPort: true, needsAuth: true, needsDatabaseName: true, needsSchema: false, connectionInfo: 'MariaDB connection parameters' },
+  'postgresplus': { needsHost: true, needsPort: true, needsAuth: true, needsDatabaseName: true, needsSchema: true, connectionInfo: 'Postgres Plus connection parameters' },
+  'ingres': { needsHost: true, needsPort: true, needsAuth: true, needsDatabaseName: true, needsSchema: true, connectionInfo: 'Ingres connection parameters' },
+  'vectorwise': { needsHost: true, needsPort: true, needsAuth: true, needsDatabaseName: true, needsSchema: true, connectionInfo: 'VectorWise connection parameters' },
+  'sqlite': { needsHost: false, needsPort: false, needsAuth: false, needsDatabaseName: false, needsSchema: false, connectionInfo: 'SQLite database file path' },
+  'h2': { needsHost: false, needsPort: false, needsAuth: false, needsDatabaseName: false, needsSchema: false, connectionInfo: 'H2 database path or URL' },
+  'hsqldb': { needsHost: false, needsPort: false, needsAuth: false, needsDatabaseName: false, needsSchema: false, connectionInfo: 'HSQLDB database path or URL' },
+  'javadb': { needsHost: false, needsPort: false, needsAuth: false, needsDatabaseName: false, needsSchema: false, connectionInfo: 'JavaDB (Derby) database path' },
+  'maxdb': { needsHost: true, needsPort: true, needsAuth: true, needsDatabaseName: true, needsSchema: true, connectionInfo: 'MaxDB connection parameters' },
+  'msaccess': { needsHost: false, needsPort: false, needsAuth: false, needsDatabaseName: false, needsSchema: false, connectionInfo: 'MS Access database file path' },
+  'interbase': { needsHost: true, needsPort: true, needsAuth: true, needsDatabaseName: true, needsSchema: false, connectionInfo: 'Interbase connection parameters' },
+  'sybaseiq': { needsHost: true, needsPort: true, needsAuth: true, needsDatabaseName: true, needsSchema: true, connectionInfo: 'Sybase IQ connection parameters' },
+
+  // ---- NoSQL & Big Data connection requirements ----
+  'mongodb': {
+    needsHost: true,
+    needsPort: true,
+    needsAuth: true,
+    needsDatabaseName: true,
+    needsSchema: true,          // reused as Auth Database
+    connectionInfo: 'MongoDB connection parameters',
+    labels: { dbname: 'Database', schema: 'Auth Database' }
+  },
+  'cassandra': {
+    needsHost: true,
+    needsPort: true,
+    needsAuth: true,
+    needsDatabaseName: true,    // keyspace
     needsSchema: false,
-    connectionInfo: 'MySQL connection parameters'
+    connectionInfo: 'Cassandra connection parameters',
+    labels: { dbname: 'Keyspace' }
   },
-  'postgresql': { 
-    needsHost: true, 
-    needsPort: true, 
-    needsAuth: true, 
-    needsSchema: true,
-    connectionInfo: 'PostgreSQL connection parameters'
-  },
-  'postgres': { 
-    needsHost: true, 
-    needsPort: true, 
-    needsAuth: true, 
-    needsSchema: true,
-    connectionInfo: 'PostgreSQL connection parameters'
-  },
-  'oracle': { 
-    needsHost: true, 
-    needsPort: true, 
-    needsAuth: true, 
-    needsSchema: true,
-    connectionInfo: 'Oracle Database connection parameters'
-  },
-  'sqlserver': { 
-    needsHost: true, 
-    needsPort: true, 
-    needsAuth: true, 
-    needsSchema: true,
-    connectionInfo: 'SQL Server connection parameters'
-  },
-  'mssql': { 
-    needsHost: true, 
-    needsPort: true, 
-    needsAuth: true, 
-    needsSchema: true,
-    connectionInfo: 'SQL Server connection parameters'
-  },
-  'db2': { 
-    needsHost: true, 
-    needsPort: true, 
-    needsAuth: true, 
-    needsSchema: true,
-    connectionInfo: 'IBM DB2 connection parameters'
-  },
-  'sap-hana': { 
-    needsHost: true, 
-    needsPort: true, 
-    needsAuth: true, 
-    needsSchema: true,
-    connectionInfo: 'SAP HANA connection parameters'
-  },
-  'hana': { 
-    needsHost: true, 
-    needsPort: true, 
-    needsAuth: true, 
-    needsSchema: true,
-    connectionInfo: 'SAP HANA connection parameters'
-  },
-  'sybase': { 
-    needsHost: true, 
-    needsPort: true, 
-    needsAuth: true, 
-    needsSchema: true,
-    connectionInfo: 'Sybase connection parameters'
-  },
-  'netezza': { 
-    needsHost: true, 
-    needsPort: true, 
-    needsAuth: true, 
-    needsSchema: true,
-    connectionInfo: 'Netezza connection parameters'
-  },
-  'informix': { 
-    needsHost: true, 
-    needsPort: true, 
-    needsAuth: true, 
-    needsSchema: true,
-    connectionInfo: 'Informix connection parameters'
-  },
-  'firebird': { 
-    needsHost: true, 
-    needsPort: true, 
-    needsAuth: true, 
+  'hbase': {
+    needsHost: true,            // Zookeeper quorum
+    needsPort: true,
+    needsAuth: false,
+    needsDatabaseName: true,    // namespace
     needsSchema: false,
-    connectionInfo: 'Firebird connection parameters'
+    connectionInfo: 'HBase connection parameters',
+    labels: { host: 'Zookeeper Quorum', dbname: 'Namespace', port: 'Client Port' }
+  },
+  'maprdb': {
+    needsHost: true,
+    needsPort: true,
+    needsAuth: false,
+    needsDatabaseName: true,
+    needsSchema: false,
+    connectionInfo: 'MapR-DB connection parameters',
+    labels: { dbname: 'Table Path' }
+  },
+  'couchbase': {
+    needsHost: true,
+    needsPort: true,
+    needsAuth: true,
+    needsDatabaseName: true,    // bucket
+    needsSchema: false,
+    connectionInfo: 'Couchbase connection parameters',
+    labels: { dbname: 'Bucket' }
+  },
+  'couchdb': {
+    needsHost: true,
+    needsPort: true,
+    needsAuth: true,
+    needsDatabaseName: true,
+    needsSchema: false,
+    connectionInfo: 'CouchDB connection parameters',
+  },
+  'existdb': {
+    needsHost: true,
+    needsPort: true,
+    needsAuth: true,
+    needsDatabaseName: true,    // collection
+    needsSchema: false,
+    connectionInfo: 'eXist-db connection parameters',
+    labels: { dbname: 'Collection' }
+  },
+  'elasticsearch': {
+    needsHost: true,
+    needsPort: true,
+    needsAuth: true,
+    needsDatabaseName: true,    // index name
+    needsSchema: false,
+    connectionInfo: 'Elasticsearch connection parameters',
+    labels: { dbname: 'Index Name' }
+  },
+  'marklogic': {
+    needsHost: true,
+    needsPort: true,
+    needsAuth: true,
+    needsDatabaseName: true,
+    needsSchema: false,
+    connectionInfo: 'MarkLogic connection parameters',
+  },
+  'neo4j': {
+    needsHost: true,
+    needsPort: true,
+    needsAuth: true,
+    needsDatabaseName: true,    // database name
+    needsSchema: false,
+    connectionInfo: 'Neo4j connection parameters',
+  },
+  'hive': {
+    needsHost: true,
+    needsPort: true,
+    needsAuth: true,
+    needsDatabaseName: true,
+    needsSchema: true,          // schema required
+    connectionInfo: 'Hive connection parameters',
+  },
+  'impala': {
+    needsHost: true,
+    needsPort: true,
+    needsAuth: true,
+    needsDatabaseName: true,
+    needsSchema: true,
+    connectionInfo: 'Impala connection parameters',
   },
 };
 
-// Get default connection requirements for when no database is selected
-const getDefaultConnectionRequirements = () => ({
+// -------------------------- HELPER: FIELD LABEL OVERRIDE --------------------------
+const getConnectionFieldLabel = (dbType: string, field: string): string => {
+  const req = DATABASE_CONNECTION_REQUIREMENTS[dbType];
+  const defaultLabels: Record<string, string> = {
+    host: 'Host',
+    port: 'Port',
+    dbname: 'Database Name',
+    user: 'Username',
+    password: 'Password',
+    schema: 'Schema',
+  };
+  return req?.labels?.[field as keyof typeof req.labels] || defaultLabels[field] || field;
+};
+
+// -------------------------- DEFAULT CONNECTION REQUIREMENTS --------------------------
+const getDefaultConnectionRequirements = (): ConnectionRequirement => ({
   needsHost: true,
   needsPort: true,
   needsAuth: true,
+  needsDatabaseName: true,
   needsSchema: false,
   connectionInfo: 'Database connection parameters'
 });
@@ -220,12 +366,11 @@ const DatabaseMetadataWizard: React.FC<DatabaseMetadataWizardProps> = ({
   const [isDisconnecting, setIsDisconnecting] = useState(false);
   const [, setDatabaseConfigured] = useState<boolean>(false);
 
-  // Initialize form data with no default database
   const [formData, setFormData] = useState<EnhancedFormData>({
     name: '',
     purpose: '',
     description: '',
-    dbType: '', // No default database type
+    dbType: '',
     connection: {
       dbname: '',
       host: '',
@@ -244,25 +389,24 @@ const DatabaseMetadataWizard: React.FC<DatabaseMetadataWizardProps> = ({
     selectedConnectionId: ''
   });
 
-  // Get active connections for the current database type
+  // -------------------------- DYNAMIC DATA --------------------------
+  const connectionRequirements = useMemo<ConnectionRequirement>(() => {
+    if (!formData.dbType) return getDefaultConnectionRequirements();
+    return DATABASE_CONNECTION_REQUIREMENTS[formData.dbType] || DATABASE_CONNECTION_REQUIREMENTS.postgresql;
+  }, [formData.dbType]);
+
+  const entityTerminology = useMemo(() => getEntityTerminology(formData.dbType), [formData.dbType]);
+
   const activeConnectionsForType = useMemo(() => {
     if (!formData.dbType) return [];
     return existingConnections.filter(conn => conn.dbType === formData.dbType);
   }, [existingConnections, formData.dbType]);
 
-  const connectionRequirements = useMemo(() => {
-    if (!formData.dbType) {
-      return getDefaultConnectionRequirements();
-    }
-    return DATABASE_CONNECTION_REQUIREMENTS[formData.dbType] || 
-           DATABASE_CONNECTION_REQUIREMENTS.postgresql;
-  }, [formData.dbType]);
-
-  // Initialize form based on selected connection
+  // -------------------------- INIT & CHANGE HANDLERS --------------------------
   const initializeFromConnection = useCallback((connection: ClientConnectionInfo) => {
     setFormData(prev => ({
       ...prev,
-      dbType: connection.dbType as DatabaseType,
+      dbType: connection.dbType as string,
       connection: {
         dbname: connection.config.dbname || '',
         host: connection.config.host,
@@ -281,7 +425,6 @@ const DatabaseMetadataWizard: React.FC<DatabaseMetadataWizardProps> = ({
     setDatabaseConfigured(true);
   }, []);
 
-  // Effect to update form when database type changes
   useEffect(() => {
     if (formData.dbType) {
       const defaultPort = SUPPORTED_DATABASES.find(db => db.value === formData.dbType)?.defaultPort || '';
@@ -300,50 +443,30 @@ const DatabaseMetadataWizard: React.FC<DatabaseMetadataWizardProps> = ({
     }
   }, [formData.dbType, connectionRequirements]);
 
-  // Get database display name
-  const getDatabaseDisplayName = useCallback((dbType: DatabaseType): string => {
-    return DatabaseApiService.getDatabaseDisplayName(dbType);
+  const getDatabaseDisplayName = useCallback((dbType: string): string => {
+    return DatabaseApiService.getDatabaseDisplayName(dbType as DatabaseType);
   }, []);
 
-  // Get connection config for API calls
   const getConnectionConfig = useCallback((): ClientDatabaseConfig => {
     const { connection } = formData;
     const config: ClientDatabaseConfig = {
       dbname: connection.dbname
     };
-
-    if (connection.host && connectionRequirements.needsHost) {
-      config.host = connection.host;
-    }
-    if (connection.port && connectionRequirements.needsPort) {
-      config.port = connection.port;
-    }
-    if (connection.user && connectionRequirements.needsAuth) {
-      config.user = connection.user;
-    }
-    if (connection.password && connectionRequirements.needsAuth) {
-      config.password = connection.password;
-    }
-    if (connection.schema && connectionRequirements.needsSchema) {
-      config.schema = connection.schema;
-    }
-
+    if (connection.host && connectionRequirements.needsHost) config.host = connection.host;
+    if (connection.port && connectionRequirements.needsPort) config.port = connection.port;
+    if (connection.user && connectionRequirements.needsAuth) config.user = connection.user;
+    if (connection.password && connectionRequirements.needsAuth) config.password = connection.password;
+    if (connection.schema && connectionRequirements.needsSchema) config.schema = connection.schema;
     return config;
   }, [formData.connection, connectionRequirements]);
 
-  // Validate connection parameters
   const validateConnectionParameters = useCallback((): boolean => {
     const { connection } = formData;
-    
-    if (formData.useExistingConnection && formData.selectedConnectionId) {
-      return true;
-    }
-
+    if (formData.useExistingConnection && formData.selectedConnectionId) return true;
     if (!formData.dbType) {
       setConnectionError('Please select a database type first');
       return false;
     }
-
     const errors = DatabaseApiService.validateConfig({
       dbname: connection.dbname,
       host: connection.host,
@@ -351,17 +474,34 @@ const DatabaseMetadataWizard: React.FC<DatabaseMetadataWizardProps> = ({
       user: connection.user,
       password: connection.password
     });
-
     if (errors.length > 0) {
       setConnectionError(errors[0]);
       return false;
     }
-
     setConnectionError('');
     return true;
   }, [formData]);
 
-  // Test connection and retrieve metadata
+  const getUserFriendlyErrorMessage = useCallback((error: Error, dbType: string): string => {
+    const errorMsg = error.message.toLowerCase();
+    const errorMapping: Record<string, string> = {
+      'connection refused': `Cannot connect to ${dbType} server. Check if the server is running and the host/port are correct.`,
+      'econnrefused': `Cannot connect to ${dbType} server. Check if the server is running and the host/port are correct.`,
+      'authentication failed': 'Authentication failed. Please check your username and password.',
+      'invalid password': 'Authentication failed. Please check your username and password.',
+      'database.*not exist': 'Database does not exist. Please check the database name.',
+      'timeout': 'Connection timeout. Check your network connection and server availability.',
+      'permission denied': 'Permission denied. Check your user privileges for the database.',
+      'access denied': 'Permission denied. Check your user privileges for the database.',
+      'driver': 'Database driver issue. Make sure the required database client is installed.'
+    };
+    for (const [key, message] of Object.entries(errorMapping)) {
+      if (errorMsg.includes(key)) return message;
+    }
+    return error.message;
+  }, []);
+
+  // -------------------------- CONNECTION & METADATA ACTIONS --------------------------
   const testConnection = useCallback(async () => {
     setIsFetchingMetadata(true);
     setConnectionStatus('testing');
@@ -370,50 +510,38 @@ const DatabaseMetadataWizard: React.FC<DatabaseMetadataWizardProps> = ({
     setDatabaseStats(null);
 
     try {
-      if (!validateConnectionParameters()) {
-        throw new Error(connectionError || 'Invalid connection parameters');
-      }
-
-      if (!formData.dbType) {
-        throw new Error('Database type is not selected');
-      }
+      if (!validateConnectionParameters()) throw new Error(connectionError || 'Invalid connection parameters');
+      if (!formData.dbType) throw new Error('Database type is not selected');
 
       const apiService = new DatabaseApiService();
       const config = getConnectionConfig();
       
       setConnectionError('Testing connection...');
       const testResult: ClientTestConnectionResult = await apiService.testConnection(
-        formData.dbType,
+        formData.dbType as DatabaseType,
         config
       );
-
-      if (!testResult.success) {
-        throw new Error(testResult.error || 'Connection test failed');
-      }
+      if (!testResult.success) throw new Error(testResult.error || 'Connection test failed');
 
       setConnectionError('Connecting to database...');
       const connectResult: ClientConnectResult = await apiService.connect(
-        formData.dbType,
+        formData.dbType as DatabaseType,
         config
       );
-
       if (!connectResult.success || !connectResult.connectionId) {
         throw new Error(connectResult.error || 'Failed to establish connection');
       }
 
       const connectionId = connectResult.connectionId;
 
-      setConnectionError('Retrieving table metadata...');
+      // Fetch tables / entities
+      setConnectionError('Retrieving metadata...');
       const tablesResult: ClientTableListResult = await apiService.getTables(connectionId, {
         includeViews: true,
         includeSystemTables: false
       });
+      if (!tablesResult.success) throw new Error(tablesResult.error || 'Failed to retrieve entities');
 
-      if (!tablesResult.success) {
-        throw new Error(tablesResult.error || 'Failed to retrieve tables');
-      }
-
-      // Transform tables to enhanced format
       const tablesWithColumns: EnhancedTableMetadata[] = tablesResult.tables.map(table => ({
         ...table,
         num_columns: table.columns.length
@@ -426,9 +554,8 @@ const DatabaseMetadataWizard: React.FC<DatabaseMetadataWizardProps> = ({
       
       const initialTableSelections: Record<string, TableSelection> = {};
       tablesWithColumns.forEach(table => {
-        // Use full table identifier including schema
-        const tableIdentifier = `${table.schemaname}.${table.tablename}`;
-        initialTableSelections[tableIdentifier] = {
+        const identifier = `${table.schemaname}.${table.tablename}`;
+        initialTableSelections[identifier] = {
           include: false,
           selectedColumns: table.columns.map(col => col.name)
         };
@@ -443,7 +570,7 @@ const DatabaseMetadataWizard: React.FC<DatabaseMetadataWizardProps> = ({
         lastTested: new Date().toISOString()
       }));
 
-      // Get database info for statistics
+      // Database stats (best effort)
       try {
         const dbInfo = await apiService.getDatabaseInfo(connectionId);
         if (dbInfo.success && dbInfo.info) {
@@ -473,42 +600,14 @@ const DatabaseMetadataWizard: React.FC<DatabaseMetadataWizardProps> = ({
       }));
       setIsConnectionHealthy(false);
       setDatabaseStats(null);
-      
       toast.error(`Connection failed: ${userFriendlyError}`);
     } finally {
       setIsFetchingMetadata(false);
     }
-  }, [formData, validateConnectionParameters, getConnectionConfig]);
+  }, [formData, validateConnectionParameters, getConnectionConfig, getUserFriendlyErrorMessage]);
 
-  // Get user-friendly error message
-  const getUserFriendlyErrorMessage = useCallback((error: Error, dbType: string): string => {
-    const errorMsg = error.message.toLowerCase();
-    
-    const errorMapping: Record<string, string> = {
-      'connection refused': `Cannot connect to ${dbType} server. Check if the server is running and the host/port are correct.`,
-      'econnrefused': `Cannot connect to ${dbType} server. Check if the server is running and the host/port are correct.`,
-      'authentication failed': 'Authentication failed. Please check your username and password.',
-      'invalid password': 'Authentication failed. Please check your username and password.',
-      'database.*not exist': 'Database does not exist. Please check the database name.',
-      'timeout': 'Connection timeout. Check your network connection and server availability.',
-      'permission denied': 'Permission denied. Check your user privileges for the database.',
-      'access denied': 'Permission denied. Check your user privileges for the database.',
-      'driver': 'Database driver issue. Make sure the required database client is installed.'
-    };
-
-    for (const [key, message] of Object.entries(errorMapping)) {
-      if (errorMsg.includes(key)) {
-        return message;
-      }
-    }
-    
-    return error.message;
-  }, []);
-
-  // Disconnect database
   const disconnectDatabase = useCallback(async (): Promise<void> => {
     if (!formData.connectionId || formData.useExistingConnection) return;
-
     setIsDisconnecting(true);
     try {
       const apiService = new DatabaseApiService();
@@ -536,7 +635,7 @@ const DatabaseMetadataWizard: React.FC<DatabaseMetadataWizardProps> = ({
     }
   }, [formData.connectionId, formData.useExistingConnection]);
 
-  // Step 1: Database Selection
+  // -------------------------- WIZARD STEPS --------------------------
   const Step1 = () => (
     <div className="space-y-6">
       <div>
@@ -545,20 +644,18 @@ const DatabaseMetadataWizard: React.FC<DatabaseMetadataWizardProps> = ({
           Choose the database system you want to configure. This selection determines the connection parameters and features available.
         </p>
       </div>
-
       <div className="space-y-4">
         <div>
           <Label htmlFor="dbType">Database Type *</Label>
           <Select
             value={formData.dbType}
-            onValueChange={(value: DatabaseType) => {
+            onValueChange={(value: string) => {
               setFormData(prev => ({ 
                 ...prev, 
                 dbType: value,
                 connectionId: undefined,
                 connectionTested: false,
                 useExistingConnection: false,
-                // Reset connection parameters when database type changes
                 connection: {
                   dbname: '',
                   host: '',
@@ -596,7 +693,6 @@ const DatabaseMetadataWizard: React.FC<DatabaseMetadataWizardProps> = ({
             Select your preferred database system. This cannot be changed later without reconfiguring the connection.
           </p>
         </div>
-
         {formData.dbType && (
           <div className="p-4 bg-blue-50 dark:bg-blue-900/20 border border-blue-200 dark:border-blue-800 rounded-lg">
             <div className="flex items-center space-x-2 text-blue-700 dark:text-blue-300">
@@ -614,7 +710,7 @@ const DatabaseMetadataWizard: React.FC<DatabaseMetadataWizardProps> = ({
     </div>
   );
 
-  // Step 2: General Properties
+  // Step 2: General Properties (unchanged, still generic)
   const Step2 = () => (
     <div className="space-y-6">
       <div>
@@ -623,7 +719,6 @@ const DatabaseMetadataWizard: React.FC<DatabaseMetadataWizardProps> = ({
           Define the basic information for your {formData.dbType ? getDatabaseDisplayName(formData.dbType) : 'database'} connection metadata.
         </p>
       </div>
-
       <div className="space-y-4">
         <div>
           <Label htmlFor="name">Name *</Label>
@@ -638,7 +733,6 @@ const DatabaseMetadataWizard: React.FC<DatabaseMetadataWizardProps> = ({
             A unique, descriptive name for this database connection metadata
           </p>
         </div>
-
         <div>
           <Label htmlFor="purpose">Purpose</Label>
           <Input
@@ -652,7 +746,6 @@ const DatabaseMetadataWizard: React.FC<DatabaseMetadataWizardProps> = ({
             Brief summary of the primary objective or use case
           </p>
         </div>
-
         <div>
           <Label htmlFor="description">Description</Label>
           <textarea
@@ -671,7 +764,7 @@ const DatabaseMetadataWizard: React.FC<DatabaseMetadataWizardProps> = ({
     </div>
   );
 
-  // Step 3: Database Connection
+  // Step 3: Connection – dynamically adapts field labels
   const Step3 = () => {
     if (!formData.dbType) {
       return (
@@ -685,18 +778,20 @@ const DatabaseMetadataWizard: React.FC<DatabaseMetadataWizardProps> = ({
           <div className="text-center py-8 text-gray-500">
             <AlertCircle className="h-8 w-8 mx-auto text-yellow-500" />
             <p className="mt-2">Database type not selected</p>
-            <Button
-              onClick={() => setCurrentStep(1)}
-              variant="outline"
-              size="sm"
-              className="mt-4"
-            >
+            <Button onClick={() => setCurrentStep(1)} variant="outline" size="sm" className="mt-4">
               Go Back to Database Selection
             </Button>
           </div>
         </div>
       );
     }
+
+    const hostLabel = getConnectionFieldLabel(formData.dbType, 'host');
+    const portLabel = getConnectionFieldLabel(formData.dbType, 'port');
+    const dbnameLabel = getConnectionFieldLabel(formData.dbType, 'dbname');
+    const userLabel = getConnectionFieldLabel(formData.dbType, 'user');
+    const passwordLabel = getConnectionFieldLabel(formData.dbType, 'password');
+    const schemaLabel = getConnectionFieldLabel(formData.dbType, 'schema');
 
     return (
       <div className="space-y-6">
@@ -743,9 +838,7 @@ const DatabaseMetadataWizard: React.FC<DatabaseMetadataWizardProps> = ({
                 value={formData.selectedConnectionId}
                 onValueChange={(value) => {
                   const connection = activeConnectionsForType.find(c => c.connectionId === value);
-                  if (connection) {
-                    initializeFromConnection(connection);
-                  }
+                  if (connection) initializeFromConnection(connection);
                 }}
               >
                 <SelectTrigger>
@@ -757,7 +850,7 @@ const DatabaseMetadataWizard: React.FC<DatabaseMetadataWizardProps> = ({
                       <div className="flex flex-col">
                         <span>{conn.config.dbname} @ {conn.config.host}:{conn.config.port}</span>
                         <span className="text-xs text-gray-500">
-                          {getDatabaseDisplayName(conn.dbType as DatabaseType)}
+                          {getDatabaseDisplayName(conn.dbType as string)}
                         </span>
                       </div>
                     </SelectItem>
@@ -772,7 +865,7 @@ const DatabaseMetadataWizard: React.FC<DatabaseMetadataWizardProps> = ({
           <div className="grid grid-cols-2 gap-4">
             {connectionRequirements.needsHost && (
               <div>
-                <Label htmlFor="host">Host *</Label>
+                <Label htmlFor="host">{hostLabel} *</Label>
                 <Input
                   id="host"
                   value={formData.connection.host || ''}
@@ -782,7 +875,7 @@ const DatabaseMetadataWizard: React.FC<DatabaseMetadataWizardProps> = ({
                     connectionId: undefined,
                     connectionTested: false
                   }))}
-                  placeholder="localhost"
+                  placeholder={hostLabel}
                   className="mt-1"
                 />
               </div>
@@ -790,7 +883,7 @@ const DatabaseMetadataWizard: React.FC<DatabaseMetadataWizardProps> = ({
 
             {connectionRequirements.needsPort && (
               <div>
-                <Label htmlFor="port">Port</Label>
+                <Label htmlFor="port">{portLabel}</Label>
                 <Input
                   id="port"
                   value={formData.connection.port || ''}
@@ -807,7 +900,7 @@ const DatabaseMetadataWizard: React.FC<DatabaseMetadataWizardProps> = ({
             )}
 
             <div className={connectionRequirements.needsHost && connectionRequirements.needsPort ? 'col-span-2' : ''}>
-              <Label htmlFor="database">Database Name *</Label>
+              <Label htmlFor="database">{dbnameLabel} *</Label>
               <Input
                 id="database"
                 value={formData.connection.dbname}
@@ -817,7 +910,7 @@ const DatabaseMetadataWizard: React.FC<DatabaseMetadataWizardProps> = ({
                   connectionId: undefined,
                   connectionTested: false
                 }))}
-                placeholder="my_database"
+                placeholder={dbnameLabel}
                 className="mt-1"
               />
             </div>
@@ -825,7 +918,7 @@ const DatabaseMetadataWizard: React.FC<DatabaseMetadataWizardProps> = ({
             {connectionRequirements.needsAuth && (
               <>
                 <div>
-                  <Label htmlFor="username">Username *</Label>
+                  <Label htmlFor="username">{userLabel} *</Label>
                   <Input
                     id="username"
                     value={formData.connection.user || ''}
@@ -835,13 +928,12 @@ const DatabaseMetadataWizard: React.FC<DatabaseMetadataWizardProps> = ({
                       connectionId: undefined,
                       connectionTested: false
                     }))}
-                    placeholder="username"
+                    placeholder={userLabel}
                     className="mt-1"
                   />
                 </div>
-
                 <div>
-                  <Label htmlFor="password">Password *</Label>
+                  <Label htmlFor="password">{passwordLabel} *</Label>
                   <Input
                     id="password"
                     type="password"
@@ -861,7 +953,7 @@ const DatabaseMetadataWizard: React.FC<DatabaseMetadataWizardProps> = ({
 
             {connectionRequirements.needsSchema && (
               <div className="col-span-2">
-                <Label htmlFor="schema">Schema</Label>
+                <Label htmlFor="schema">{schemaLabel}</Label>
                 <Input
                   id="schema"
                   value={formData.connection.schema || ''}
@@ -871,7 +963,7 @@ const DatabaseMetadataWizard: React.FC<DatabaseMetadataWizardProps> = ({
                     connectionId: undefined,
                     connectionTested: false
                   }))}
-                  placeholder="public"
+                  placeholder={schemaLabel}
                   className="mt-1"
                 />
               </div>
@@ -879,6 +971,7 @@ const DatabaseMetadataWizard: React.FC<DatabaseMetadataWizardProps> = ({
           </div>
         )}
 
+        {/* Connection test status & controls – unchanged */}
         <div className="flex items-center justify-between p-4 bg-gray-50 dark:bg-gray-800 rounded-lg">
           <div className="flex items-center space-x-3">
             <div className={`w-3 h-3 rounded-full ${
@@ -993,7 +1086,7 @@ const DatabaseMetadataWizard: React.FC<DatabaseMetadataWizardProps> = ({
               <div className="flex items-center space-x-2 text-green-700 dark:text-green-300">
                 <CheckCircle className="h-4 w-4" />
                 <span className="text-sm font-medium">
-                  Successfully connected and found {availableTables.length} tables
+                  Successfully connected and found {availableTables.length} {entityTerminology.plural.toLowerCase()}
                 </span>
               </div>
               <Badge variant="outline" className="text-xs">
@@ -1009,26 +1102,21 @@ const DatabaseMetadataWizard: React.FC<DatabaseMetadataWizardProps> = ({
     );
   };
 
-  // Step 4: Table Selection
+  // Step 4: Entity selection (dynamic labels & icons)
   const Step4 = () => {
     if (!formData.dbType || !formData.connectionTested) {
       return (
         <div className="space-y-6">
           <div>
-            <h3 className="text-lg font-medium">Table Selection</h3>
+            <h3 className="text-lg font-medium">{entityTerminology.singular} Selection</h3>
             <p className="text-sm text-gray-500">
-              Please configure and test the database connection first to load available tables.
+              Please configure and test the database connection first to load available {entityTerminology.plural.toLowerCase()}.
             </p>
           </div>
           <div className="text-center py-8 text-gray-500">
             <AlertCircle className="h-8 w-8 mx-auto text-yellow-500" />
             <p className="mt-2">Database connection not established</p>
-            <Button
-              onClick={() => setCurrentStep(3)}
-              variant="outline"
-              size="sm"
-              className="mt-4"
-            >
+            <Button onClick={() => setCurrentStep(3)} variant="outline" size="sm" className="mt-4">
               Go Back to Connection Configuration
             </Button>
           </div>
@@ -1039,9 +1127,9 @@ const DatabaseMetadataWizard: React.FC<DatabaseMetadataWizardProps> = ({
     return (
       <div className="space-y-6">
         <div>
-          <h3 className="text-lg font-medium">Table Selection</h3>
+          <h3 className="text-lg font-medium">{entityTerminology.singular} Selection</h3>
           <p className="text-sm text-gray-500">
-            Select the tables you want to include in your metadata configuration.
+            Select the {entityTerminology.plural.toLowerCase()} you want to include in your metadata configuration.
           </p>
         </div>
         
@@ -1049,12 +1137,8 @@ const DatabaseMetadataWizard: React.FC<DatabaseMetadataWizardProps> = ({
           <div className="text-center py-8 text-gray-500">
             <div className="space-y-2">
               <AlertCircle className="h-8 w-8 mx-auto text-yellow-500" />
-              <p>No tables available in the selected database/schema.</p>
-              <Button
-                onClick={() => setCurrentStep(3)}
-                variant="outline"
-                size="sm"
-              >
+              <p>No {entityTerminology.plural.toLowerCase()} available in the selected database/schema.</p>
+              <Button onClick={() => setCurrentStep(3)} variant="outline" size="sm">
                 Go Back to Connection
               </Button>
             </div>
@@ -1063,7 +1147,7 @@ const DatabaseMetadataWizard: React.FC<DatabaseMetadataWizardProps> = ({
           <div className="space-y-4">
             <div className="flex items-center justify-between">
               <span className="text-sm font-medium">
-                {availableTables.length} tables found in database
+                {availableTables.length} {entityTerminology.plural.toLowerCase()} found in database
               </span>
               <div className="space-x-2">
                 <Button
@@ -1115,6 +1199,7 @@ const DatabaseMetadataWizard: React.FC<DatabaseMetadataWizardProps> = ({
               <div className="p-4 space-y-2">
                 {availableTables.map((table) => {
                   const tableIdentifier = `${table.schemaname}.${table.tablename}`;
+                  const EntityIcon = entityTerminology.icon;
                   return (
                     <div
                       key={tableIdentifier}
@@ -1141,7 +1226,7 @@ const DatabaseMetadataWizard: React.FC<DatabaseMetadataWizardProps> = ({
                         }}
                         className="h-4 w-4 rounded border-gray-300 text-blue-600 focus:ring-blue-500"
                       />
-                      <Table className="h-4 w-4 text-gray-400" />
+                      <EntityIcon className="h-4 w-4 text-gray-400" />
                       <div className="flex-1 min-w-0">
                         <div className="flex items-center space-x-2">
                           <span className="text-sm font-medium truncate">
@@ -1150,14 +1235,14 @@ const DatabaseMetadataWizard: React.FC<DatabaseMetadataWizardProps> = ({
                           <Badge variant="outline" className="text-xs">
                             {table.tabletype}
                           </Badge>
-                          {table.schemaname !== 'public' && table.schemaname && (
+                          {table.schemaname && table.schemaname !== 'public' && (
                             <Badge variant="secondary" className="text-xs">
                               {table.schemaname}
                             </Badge>
                           )}
                         </div>
                         <div className="text-xs text-gray-500">
-                          {table.columns.length} columns • {table.tabletype}
+                          {table.columns.length} fields • {table.tabletype}
                         </div>
                       </div>
                     </div>
@@ -1170,7 +1255,7 @@ const DatabaseMetadataWizard: React.FC<DatabaseMetadataWizardProps> = ({
               <div className="p-3 bg-blue-50 dark:bg-blue-900/20 border border-blue-200 dark:border-blue-800 rounded-lg">
                 <div className="flex items-center justify-between">
                   <div className="text-sm text-blue-700 dark:text-blue-300">
-                    <strong>{formData.selectedTables.length} tables selected</strong>
+                    <strong>{formData.selectedTables.length} {entityTerminology.plural.toLowerCase()} selected</strong>
                     {formData.selectedTables.length > 0 && (
                       <div className="text-xs mt-1">
                         {formData.selectedTables.slice(0, 3).map(table => {
@@ -1193,7 +1278,7 @@ const DatabaseMetadataWizard: React.FC<DatabaseMetadataWizardProps> = ({
     );
   };
 
-  // Step 5: Schema Configuration
+  // Step 5: Schema / Field Configuration (adapted labels)
   const Step5 = () => {
     const selectedTables = availableTables.filter(
       table => formData.selectedTables.includes(`${table.schemaname}.${table.tablename}`)
@@ -1203,20 +1288,15 @@ const DatabaseMetadataWizard: React.FC<DatabaseMetadataWizardProps> = ({
       return (
         <div className="space-y-6">
           <div>
-            <h3 className="text-lg font-medium">Schema Configuration</h3>
+            <h3 className="text-lg font-medium">Field Configuration</h3>
             <p className="text-sm text-gray-500">
-              Please configure the database connection and select tables first.
+              Please configure the database connection and select {entityTerminology.plural.toLowerCase()} first.
             </p>
           </div>
           <div className="text-center py-8 text-gray-500">
             <AlertCircle className="h-8 w-8 mx-auto text-yellow-500" />
-            <p className="mt-2">Database connection not established or no tables selected</p>
-            <Button
-              onClick={() => setCurrentStep(3)}
-              variant="outline"
-              size="sm"
-              className="mt-4"
-            >
+            <p className="mt-2">Database connection not established or no {entityTerminology.plural.toLowerCase()} selected</p>
+            <Button onClick={() => setCurrentStep(3)} variant="outline" size="sm" className="mt-4">
               Go Back to Connection Configuration
             </Button>
           </div>
@@ -1227,9 +1307,9 @@ const DatabaseMetadataWizard: React.FC<DatabaseMetadataWizardProps> = ({
     return (
       <div className="space-y-6">
         <div>
-          <h3 className="text-lg font-medium">Schema Configuration</h3>
+          <h3 className="text-lg font-medium">Field Configuration</h3>
           <p className="text-sm text-gray-500">
-            Review and configure the schema inference for selected tables.
+            Review and configure the field inference for selected {entityTerminology.plural.toLowerCase()}.
           </p>
         </div>
 
@@ -1237,13 +1317,9 @@ const DatabaseMetadataWizard: React.FC<DatabaseMetadataWizardProps> = ({
           <div className="text-center py-8 text-gray-500">
             <div className="space-y-2">
               <AlertCircle className="h-8 w-8 mx-auto text-yellow-500" />
-              <p>No tables selected. Please select tables in the previous step.</p>
-              <Button
-                onClick={() => setCurrentStep(4)}
-                variant="outline"
-                size="sm"
-              >
-                Go Back to Table Selection
+              <p>No {entityTerminology.plural.toLowerCase()} selected. Please select them in the previous step.</p>
+              <Button onClick={() => setCurrentStep(4)} variant="outline" size="sm">
+                Go Back to {entityTerminology.singular} Selection
               </Button>
             </div>
           </div>
@@ -1269,7 +1345,7 @@ const DatabaseMetadataWizard: React.FC<DatabaseMetadataWizardProps> = ({
                       {table.schemaname}.{table.tablename}
                     </CardTitle>
                     <CardDescription>
-                      {table.tabletype} • {table.columns.length} columns
+                      {table.tabletype} • {table.columns.length} fields
                     </CardDescription>
                   </CardHeader>
                   <CardContent>
@@ -1308,7 +1384,7 @@ const DatabaseMetadataWizard: React.FC<DatabaseMetadataWizardProps> = ({
     );
   };
 
-  // Step 6: Configuration Summary
+  // Step 6: Summary – use entity terminology in card titles
   const Step6 = () => {
     const selectedTables = availableTables.filter(
       table => formData.selectedTables.includes(`${table.schemaname}.${table.tablename}`)
@@ -1326,12 +1402,7 @@ const DatabaseMetadataWizard: React.FC<DatabaseMetadataWizardProps> = ({
           <div className="text-center py-8 text-gray-500">
             <AlertCircle className="h-8 w-8 mx-auto text-yellow-500" />
             <p className="mt-2">Database type not selected</p>
-            <Button
-              onClick={() => setCurrentStep(1)}
-              variant="outline"
-              size="sm"
-              className="mt-4"
-            >
+            <Button onClick={() => setCurrentStep(1)} variant="outline" size="sm" className="mt-4">
               Go Back to Database Selection
             </Button>
           </div>
@@ -1389,7 +1460,7 @@ const DatabaseMetadataWizard: React.FC<DatabaseMetadataWizardProps> = ({
 
         <Card>
           <CardHeader>
-            <CardTitle>Selected Tables ({selectedTables.length})</CardTitle>
+            <CardTitle>Selected {entityTerminology.plural} ({selectedTables.length})</CardTitle>
           </CardHeader>
           <CardContent>
             <div className="space-y-2">
@@ -1403,7 +1474,7 @@ const DatabaseMetadataWizard: React.FC<DatabaseMetadataWizardProps> = ({
                       {table.schemaname}.{table.tablename}
                     </div>
                     <div className="text-xs text-gray-500">
-                      {table.columns.length} columns • {table.tabletype}
+                      {table.columns.length} fields • {table.tabletype}
                     </div>
                   </div>
                   <Badge variant="outline">
@@ -1434,38 +1505,28 @@ const DatabaseMetadataWizard: React.FC<DatabaseMetadataWizardProps> = ({
     { number: 1, title: 'Database Selection', component: Step1 },
     { number: 2, title: 'General Properties', component: Step2 },
     { number: 3, title: 'Database Connection', component: Step3 },
-    { number: 4, title: 'Table Selection', component: Step4 },
+    { number: 4, title: `${entityTerminology.singular} Selection`, component: Step4 },
     { number: 5, title: 'Schema Configuration', component: Step5 },
     { number: 6, title: 'Finish', component: Step6 }
   ];
 
   const canProceed = useCallback(() => {
     switch (currentStep) {
-      case 1:
-        return formData.dbType !== ''; // Database type must be selected
-      case 2:
-        return formData.name.trim() !== '' && formData.dbType !== '';
-      case 3:
-        return formData.connectionTested && isConnectionHealthy;
-      case 4:
-        return formData.selectedTables.length > 0;
-      case 5:
-        return true;
-      case 6:
-        return true;
-      default:
-        return false;
+      case 1: return formData.dbType !== '';
+      case 2: return formData.name.trim() !== '' && formData.dbType !== '';
+      case 3: return formData.connectionTested && isConnectionHealthy;
+      case 4: return formData.selectedTables.length > 0;
+      case 5: return true;
+      case 6: return true;
+      default: return false;
     }
   }, [currentStep, formData, isConnectionHealthy]);
 
   const handleSave = useCallback(async () => {
     try {
-      // Only disconnect if we created a new connection
       if (formData.connectionId && !formData.useExistingConnection) {
         await disconnectDatabase();
       }
-      
-      // Prepare data for saving
       const saveData = {
         name: formData.name,
         purpose: formData.purpose,
@@ -1478,9 +1539,8 @@ const DatabaseMetadataWizard: React.FC<DatabaseMetadataWizardProps> = ({
         connectionTested: formData.connectionTested,
         previewData: formData.previewData,
         connectionId: formData.connectionId,
-        tables: availableTables, // <-- ADDED: full table definitions
+        tables: availableTables,
       };
-      
       onSave(saveData);
       onClose();
       toast.success('Database metadata configuration saved successfully!');
@@ -1491,7 +1551,6 @@ const DatabaseMetadataWizard: React.FC<DatabaseMetadataWizardProps> = ({
 
   const handleClose = useCallback(async () => {
     try {
-      // Only disconnect if we created a new connection
       if (formData.connectionId && !formData.useExistingConnection) {
         await disconnectDatabase();
       }
@@ -1584,10 +1643,7 @@ const DatabaseMetadataWizard: React.FC<DatabaseMetadataWizardProps> = ({
             <div className="flex items-center space-x-3">
               {currentStep === steps.length ? (
                 <>
-                  <Button
-                    variant="outline"
-                    onClick={handleClose}
-                  >
+                  <Button variant="outline" onClick={handleClose}>
                     Cancel
                   </Button>
                   <Button

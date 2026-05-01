@@ -1,0 +1,5 @@
+Order#12345: $49.99 from IP 192.168.1.1 on 2025-03-15
+Error: Timeout on server 10.0.0.5 at 2025-03-16T14:30:00Z
+User agent: Mozilla/5.0 (Windows NT 10.0; Win64; x64) - no order
+IP 172.16.0.1 accessed at 2025-03-17, SSN 123-45-6789
+Order#98765: $1299.00, IP 10.0.0.2, date 2025-03-18, SSN 987-65-4321

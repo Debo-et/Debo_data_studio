@@ -1,0 +1,6 @@
+id,name,type,parent_id,position
+1,root,folder,,0
+2,Documents,folder,1,1
+3,Images,folder,1,2
+4,file1.txt,file,2,1
+5,photo.png,file,3,1

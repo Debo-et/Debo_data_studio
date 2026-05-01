@@ -1,0 +1,10 @@
+
+{
+  "nodes": [
+    {"id": 1, "name": "root", "type": "folder", "parent_id": null, "position": 0},
+    {"id": 2, "name": "Documents", "type": "folder", "parent_id": 1, "position": 1},
+    {"id": 3, "name": "Images", "type": "folder", "parent_id": 1, "position": 2},
+    {"id": 4, "name": "file1.txt", "type": "file", "parent_id": 2, "position": 1},
+    {"id": 5, "name": "photo.png", "type": "file", "parent_id": 3, "position": 1}
+  ]
+}

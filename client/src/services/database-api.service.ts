@@ -33,8 +33,14 @@ import {
 } from '../api/postgres-foreign-table';
 
 // ===========================================================================
-// Database API Service - WITH FOREIGN TABLE FUNCTIONALITY
+// Database API Service - WITH FULL MULTI-DATABASE SUPPORT (including NoSQL)
 // ===========================================================================
+// Supported databases:
+// Relational: sybase, sqlserver, sap-hana, postgresql, oracle, netezza, mysql,
+//             informix, firebird, db2, teradata, vertica, ingres, vectorwise,
+//             maxdb, access, sqlite, h2, hsqldb, javadb
+// NoSQL/Distributed: hbase, cassandra, maprdb, mongodb, couchbase, couchdb,
+//                    elasticsearch, marklogic, neo4j, exist, hive, impala
 
 export class DatabaseApiService {
   private api: any;
@@ -301,37 +307,85 @@ export class DatabaseApiService {
   }
 
   // ===========================================================================
-  // Query Execution
+  // Query Execution (Relational SQL)
   // ===========================================================================
 
   async executeQuery(
-  connectionId: string,
-  sql: string,
-  options?: ClientQueryExecutionOptions
-): Promise<ClientQueryExecutionResult> {
-  try {
-    console.log(`⚡ Executing query for connection ${connectionId}...`);
-    
-    const requestBody: any = { sql };
-    // ✅ Always include params, default to []
-    requestBody.params = options?.params || [];
-    
-    // Include other options
-    if (options?.maxRows) requestBody.maxRows = options.maxRows;
-    if (options?.timeout) requestBody.timeout = options.timeout;
+    connectionId: string,
+    sql: string,
+    options?: ClientQueryExecutionOptions
+  ): Promise<ClientQueryExecutionResult> {
+    try {
+      console.log(`⚡ Executing query for connection ${connectionId}...`);
+      
+      const requestBody: any = { sql };
+      // ✅ Always include params, default to []
+      requestBody.params = options?.params || [];
+      
+      // Include other options
+      if (options?.maxRows) requestBody.maxRows = options.maxRows;
+      if (options?.timeout) requestBody.timeout = options.timeout;
 
-    const response = await this.api.post(`/api/database/${connectionId}/query`, requestBody);
-    console.log(`✅ Query executed: ${response.data.rowCount || 0} rows affected`);
-    return response.data;
-  } catch (error: any) {
-    console.error('❌ Query execution failed:', error);
-    return {
-      result: null,
-      success: false,
-      error: this.getErrorMessage(error),
-    };
+      const response = await this.api.post(`/api/database/${connectionId}/query`, requestBody);
+      console.log(`✅ Query executed: ${response.data.rowCount || 0} rows affected`);
+      return response.data;
+    } catch (error: any) {
+      console.error('❌ Query execution failed:', error);
+      return {
+        result: null,
+        success: false,
+        error: this.getErrorMessage(error),
+      };
+    }
   }
-}
+
+  // ===========================================================================
+  // NoSQL / Command Execution (Generic)
+  // ===========================================================================
+
+  /**
+   * Execute a NoSQL command or database-specific operation.
+   * For MongoDB: command can be { find: "collection", filter: {...} }
+   * For Cassandra: command can be CQL string
+   * For Elasticsearch: command can be { index: "...", body: {...} }
+   * The backend will route based on dbType.
+   */
+  async executeCommand(
+    connectionId: string,
+    command: any,
+    options?: { timeout?: number }
+  ): Promise<{ success: boolean; result?: any; error?: string }> {
+    try {
+      console.log(`⚡ Executing NoSQL command for connection ${connectionId}...`);
+      const response = await this.api.post(`/api/database/${connectionId}/command`, {
+        command,
+        options
+      });
+      console.log(`✅ Command executed successfully`);
+      return { success: true, result: response.data };
+    } catch (error: any) {
+      console.error('❌ Command execution failed:', error);
+      return {
+        success: false,
+        error: this.getErrorMessage(error),
+      };
+    }
+  }
+
+  /**
+   * Get list of collections/tables for NoSQL databases.
+   * Works with MongoDB, Couchbase, Cassandra, etc.
+   */
+  async getNoSQLCollections(connectionId: string): Promise<{ success: boolean; collections?: string[]; error?: string }> {
+    try {
+      console.log(`📋 Getting NoSQL collections for connection ${connectionId}...`);
+      const response = await this.api.get(`/api/database/${connectionId}/collections`);
+      return response.data;
+    } catch (error: any) {
+      console.error('❌ Failed to get NoSQL collections:', error);
+      return { success: false, error: this.getErrorMessage(error) };
+    }
+  }
 
   async executeTransaction(
     connectionId: string,
@@ -371,7 +425,7 @@ export class DatabaseApiService {
   }
 
   // ===========================================================================
-  // FOREIGN TABLE OPERATIONS - UPDATED
+  // FOREIGN TABLE OPERATIONS (PostgreSQL-specific)
   // ===========================================================================
 
   /**
@@ -577,7 +631,7 @@ export class DatabaseApiService {
   }
 
   // ===========================================================================
-  // NEW: CASCADING DELETE METHODS
+  // CASCADING DELETE METHODS
   // ===========================================================================
 
   /**
@@ -977,21 +1031,22 @@ export class DatabaseApiService {
       }));
     }
   }
-/**
- * Delete a database metadata entry by its ID.
- * This removes the saved connection configuration from the backend.
- */
-async deleteDatabaseMetadata(metadataId: string): Promise<{ success: boolean; error?: string }> {
-  try {
-    console.log(`🗑️ Deleting database metadata entry ${metadataId}...`);
-    const response = await this.api.delete(`/api/database/metadata/${metadataId}`);
-    console.log(`✅ Metadata entry deleted:`, response.data);
-    return response.data;
-  } catch (error: any) {
-    console.error('❌ Failed to delete database metadata:', error);
-    return { success: false, error: this.getErrorMessage(error) };
+
+  /**
+   * Delete a database metadata entry by its ID.
+   * This removes the saved connection configuration from the backend.
+   */
+  async deleteDatabaseMetadata(metadataId: string): Promise<{ success: boolean; error?: string }> {
+    try {
+      console.log(`🗑️ Deleting database metadata entry ${metadataId}...`);
+      const response = await this.api.delete(`/api/database/metadata/${metadataId}`);
+      console.log(`✅ Metadata entry deleted:`, response.data);
+      return response.data;
+    } catch (error: any) {
+      console.error('❌ Failed to delete database metadata:', error);
+      return { success: false, error: this.getErrorMessage(error) };
+    }
   }
-}
 
   async clearAllConnections(): Promise<ClientDisconnectResult> {
     try {
@@ -1335,8 +1390,13 @@ async deleteDatabaseMetadata(metadataId: string): Promise<{ success: boolean; er
     return 'TEXT';
   }
 
+  // ===========================================================================
+  // ENHANCED STATIC METHODS FOR ALL DATABASES
+  // ===========================================================================
+
   static getDatabaseDisplayName(dbType: DatabaseType): string {
-    const names: Record<DatabaseType, string> = {
+    const names: Record<string, string> = {
+      // Relational
       mysql: 'MySQL',
       postgresql: 'PostgreSQL',
       postgres: 'PostgreSQL',
@@ -1346,26 +1406,55 @@ async deleteDatabaseMetadata(metadataId: string): Promise<{ success: boolean; er
       db2: 'IBM DB2',
       'sap-hana': 'SAP HANA',
       hana: 'SAP HANA',
-      sybase: 'Sybase',
+      sybase: 'Sybase ASE',
       netezza: 'Netezza',
       informix: 'Informix',
       firebird: 'Firebird',
+      teradata: 'Teradata',
+      vertica: 'Vertica',
+      ingres: 'Ingres',
+      vectorwise: 'VectorWise',
+      maxdb: 'MaxDB',
+      access: 'Microsoft Access',
+      sqlite: 'SQLite',
+      h2: 'H2 Database',
+      hsqldb: 'HSQLDB',
+      javadb: 'JavaDB (Apache Derby)',
+      // NoSQL / Distributed
+      hbase: 'Apache HBase',
+      cassandra: 'Apache Cassandra',
+      maprdb: 'MapR Database',
+      mongodb: 'MongoDB',
+      couchbase: 'Couchbase',
+      couchdb: 'CouchDB',
+      elasticsearch: 'Elasticsearch',
+      marklogic: 'MarkLogic',
+      neo4j: 'Neo4j',
+      exist: 'eXist-db',
+      hive: 'Apache Hive',
+      impala: 'Cloudera Impala',
     };
     return names[dbType] || dbType;
   }
 
-  static validateConfig(config: ClientDatabaseConfig): string[] {
+  static validateConfig(config: ClientDatabaseConfig, dbType?: DatabaseType): string[] {
     const errors: string[] = [];
-    
-    if (!config.dbname?.trim()) {
-      errors.push('Database name is required');
-    }
     
     if (!config.host?.trim()) {
       errors.push('Host is required');
     }
     
-    if (!config.user?.trim()) {
+    // Some NoSQL databases don't require database name
+    const noSQLTypes = ['hbase', 'cassandra', 'maprdb', 'mongodb', 'couchbase', 'couchdb', 'elasticsearch', 'marklogic', 'neo4j', 'exist'];
+    const isNoSQL = dbType ? noSQLTypes.includes(dbType) : false;
+    
+    if (!isNoSQL && !config.dbname?.trim()) {
+      errors.push('Database name is required');
+    }
+    
+    // User/password may be optional for some databases
+    const requiresAuth = dbType ? !['sqlite', 'h2', 'hsqldb', 'access'].includes(dbType) : true;
+    if (requiresAuth && !config.user?.trim()) {
       errors.push('Username is required');
     }
     
@@ -1374,6 +1463,50 @@ async deleteDatabaseMetadata(metadataId: string): Promise<{ success: boolean; er
     }
     
     return errors;
+  }
+
+  static createDefaultConfig(dbType: DatabaseType): ClientDatabaseConfig {
+    const defaults: Record<string, ClientDatabaseConfig> = {
+      // Relational
+      mysql: { host: 'localhost', port: '3306', dbname: '', user: '', password: '' },
+      postgresql: this.createLocalPostgresConfig(),
+      postgres: this.createLocalPostgresConfig(),
+      oracle: { host: 'localhost', port: '1521', dbname: 'ORCL', user: '', password: '' },
+      sqlserver: { host: 'localhost', port: '1433', dbname: 'master', user: '', password: '' },
+      mssql: { host: 'localhost', port: '1433', dbname: 'master', user: '', password: '' },
+      db2: { host: 'localhost', port: '50000', dbname: '', user: '', password: '' },
+      'sap-hana': { host: 'localhost', port: '30015', dbname: '', user: '', password: '' },
+      hana: { host: 'localhost', port: '30015', dbname: '', user: '', password: '' },
+      sybase: { host: 'localhost', port: '5000', dbname: '', user: '', password: '' },
+      netezza: { host: 'localhost', port: '5480', dbname: '', user: '', password: '' },
+      informix: { host: 'localhost', port: '9088', dbname: '', user: '', password: '' },
+      firebird: { host: 'localhost', port: '3050', dbname: '', user: '', password: '' },
+      teradata: { host: 'localhost', port: '1025', dbname: '', user: '', password: '' },
+      vertica: { host: 'localhost', port: '5433', dbname: '', user: '', password: '' },
+      ingres: { host: 'localhost', port: '21064', dbname: '', user: '', password: '' },
+      vectorwise: { host: 'localhost', port: '5432', dbname: '', user: '', password: '' },
+      maxdb: { host: 'localhost', port: '7210', dbname: '', user: '', password: '' },
+      access: { host: 'localhost', port: '', dbname: '', user: '', password: '' },
+      sqlite: { host: 'localhost', port: '', dbname: '', user: '', password: '' },
+      h2: { host: 'localhost', port: '9092', dbname: '', user: '', password: '' },
+      hsqldb: { host: 'localhost', port: '9001', dbname: '', user: '', password: '' },
+      javadb: { host: 'localhost', port: '1527', dbname: '', user: '', password: '' },
+      // NoSQL / Distributed
+      hbase: { host: 'localhost', port: '2181', dbname: '', user: '', password: '' },
+      cassandra: { host: 'localhost', port: '9042', dbname: '', user: '', password: '' },
+      maprdb: { host: 'localhost', port: '5678', dbname: '', user: '', password: '' },
+      mongodb: { host: 'localhost', port: '27017', dbname: '', user: '', password: '' },
+      couchbase: { host: 'localhost', port: '8091', dbname: '', user: '', password: '' },
+      couchdb: { host: 'localhost', port: '5984', dbname: '', user: '', password: '' },
+      elasticsearch: { host: 'localhost', port: '9200', dbname: '', user: '', password: '' },
+      marklogic: { host: 'localhost', port: '8000', dbname: '', user: '', password: '' },
+      neo4j: { host: 'localhost', port: '7687', dbname: 'neo4j', user: '', password: '' },
+      exist: { host: 'localhost', port: '8080', dbname: '', user: '', password: '' },
+      hive: { host: 'localhost', port: '10000', dbname: 'default', user: '', password: '' },
+      impala: { host: 'localhost', port: '21050', dbname: 'default', user: '', password: '' },
+    };
+    
+    return { ...defaults[dbType] };
   }
 
   static createLocalPostgresConfig(): ClientDatabaseConfig {
@@ -1409,30 +1542,10 @@ async deleteDatabaseMetadata(metadataId: string): Promise<{ success: boolean; er
       schema: 'public'
     };
   }
-
-  static createDefaultConfig(dbType: DatabaseType): ClientDatabaseConfig {
-    const defaults: Record<DatabaseType, ClientDatabaseConfig> = {
-      mysql: { host: 'localhost', port: '3306', dbname: '', user: '', password: '' },
-      postgresql: DatabaseApiService.createLocalPostgresConfig(),
-      postgres: DatabaseApiService.createLocalPostgresConfig(),
-      oracle: { host: 'localhost', port: '1521', dbname: 'ORCL', user: '', password: '' },
-      sqlserver: { host: 'localhost', port: '1433', dbname: 'master', user: '', password: '' },
-      mssql: { host: 'localhost', port: '1433', dbname: 'master', user: '', password: '' },
-      db2: { host: 'localhost', port: '50000', dbname: '', user: '', password: '' },
-      'sap-hana': { host: 'localhost', port: '30015', dbname: '', user: '', password: '' },
-      hana: { host: 'localhost', port: '30015', dbname: '', user: '', password: '' },
-      sybase: { host: 'localhost', port: '5000', dbname: '', user: '', password: '' },
-      netezza: { host: 'localhost', port: '5480', dbname: '', user: '', password: '' },
-      informix: { host: 'localhost', port: '9088', dbname: '', user: '', password: '' },
-      firebird: { host: 'localhost', port: '3050', dbname: '', user: '', password: '' },
-    };
-    
-    return { ...defaults[dbType] };
-  }
 }
 
 // ===========================================================================
-// React Hook for Database Operations - WITH FOREIGN TABLE SUPPORT
+// React Hook for Database Operations - WITH FULL DATABASE SUPPORT
 // ===========================================================================
 
 import { useState, useCallback, useEffect } from 'react';
@@ -1528,7 +1641,7 @@ export function useDatabaseOperations(options?: UseDatabaseOperationsOptions) {
   }, [apiService]);
 
   // ===========================================================================
-  // FOREIGN TABLE OPERATIONS
+  // FOREIGN TABLE OPERATIONS (unchanged)
   // ===========================================================================
 
   const createForeignServer = useCallback(async (
@@ -1723,7 +1836,7 @@ export function useDatabaseOperations(options?: UseDatabaseOperationsOptions) {
   }, [apiService]);
 
   // ===========================================================================
-  // NEW: CASCADING DELETE HOOKS
+  // CASCADING DELETE HOOKS
   // ===========================================================================
 
   const dropForeignTableCascade = useCallback(async (
@@ -1765,7 +1878,6 @@ export function useDatabaseOperations(options?: UseDatabaseOperationsOptions) {
     }
   }, [apiService]);
 
-  
   // ===========================================================================
   // CONNECTION OPERATIONS
   // ===========================================================================
@@ -1886,6 +1998,46 @@ export function useDatabaseOperations(options?: UseDatabaseOperationsOptions) {
       const errorMsg = err instanceof Error ? err.message : 'Query execution failed';
       setError(errorMsg);
       return { result: null, success: false, error: errorMsg };
+    } finally {
+      setLoading(false);
+    }
+  }, [apiService]);
+
+  // ===========================================================================
+  // NEW: NoSQL / Command Execution Hooks
+  // ===========================================================================
+
+  const executeCommand = useCallback(async (
+    connectionId: string,
+    command: any,
+    options?: { timeout?: number }
+  ) => {
+    setLoading(true);
+    setError(null);
+    try {
+      console.log(`⚡ Executing NoSQL command for ${connectionId}...`);
+      const result = await apiService.executeCommand(connectionId, command, options);
+      return result;
+    } catch (err: any) {
+      const errorMsg = err instanceof Error ? err.message : 'Command execution failed';
+      setError(errorMsg);
+      return { success: false, error: errorMsg };
+    } finally {
+      setLoading(false);
+    }
+  }, [apiService]);
+
+  const getNoSQLCollections = useCallback(async (connectionId: string) => {
+    setLoading(true);
+    setError(null);
+    try {
+      console.log(`📋 Getting NoSQL collections for ${connectionId}...`);
+      const result = await apiService.getNoSQLCollections(connectionId);
+      return result;
+    } catch (err: any) {
+      const errorMsg = err instanceof Error ? err.message : 'Failed to get collections';
+      setError(errorMsg);
+      return { success: false, error: errorMsg };
     } finally {
       setLoading(false);
     }
@@ -2014,16 +2166,20 @@ export function useDatabaseOperations(options?: UseDatabaseOperationsOptions) {
     refreshForeignTables,
     getForeignTableColumns,
     
-    // NEW Cascading Delete Operations
+    // Cascading Delete Operations
     dropForeignTableCascade,
     dropForeignServerIfUnused,
     
-    // Schema Operations
+    // Schema & Database Info
     getTables,
     getDatabaseInfo,
     
-    // Query Operations
+    // Query Operations (SQL)
     executeQuery,
+    
+    // NoSQL / Command Operations (NEW)
+    executeCommand,
+    getNoSQLCollections,
     
     // PostgreSQL Operations
     testPostgresStatus,
@@ -2047,7 +2203,6 @@ export function useDatabaseOperations(options?: UseDatabaseOperationsOptions) {
     apiService,
   };
 }
-
 
 // ===========================================================================
 // Export Default Instance

@@ -320,8 +320,10 @@ export interface FileSchemaMetadataFormData {
   name: string;
   purpose: string;
   description: string;
-  file: File | null;
+  file: File | null;          // schema file
   filePath: string;
+  dataFile: File | null;      // new
+  dataFilePath: string;       // new
   schemaType: 'database' | 'json' | 'avro' | 'protobuf' | 'custom';
   fields: SchemaFieldDefinition[];
   totalFields: number;

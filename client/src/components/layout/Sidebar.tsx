@@ -9,13 +9,15 @@ import XMLMetadataWizard from '../../Wizard/XMLMetadataWizard';
 import DelimitedFileMetadataWizard from '../../Wizard/DelimitedFileMetadataWizard';
 import PositionalFileMetadataWizard from '../../Wizard/PositionalFileMetadataWizard';
 import FileSchemaMetadataWizard from '../../Wizard/FileSchemaMetadataWizard';
-import JsonAvroParquetMetadataWizard from '../../Wizard/JsonAvroParquetMetadataWizard';
+import JsonMetadataWizard from '../../Wizard/JsonMetadataWizard';
 import RegexMetadataWizard from '../../Wizard/RegexMetadataWizard';
 import LDIFMetadataWizard from '../../Wizard/LDIFMetadataWizard';
 import WebServiceMetadataWizard from '../../Wizard/WebServiceMetadataWizard';
 import DatabaseMetadataWizard from '../../Wizard/DatabaseMetadataWizard';
 import SAPConnectionWizard from '../../Wizard/SAPConnectionWizard';
 import LDAPConnectionWizard from '../../Wizard/LDAPConnectionWizard';
+import AvroMetadataWizard from '../../Wizard/AvroMetadataWizard';
+import ParquetMetadataWizard from '../../Wizard/ParquetMetadataWizard';
 
 // Import React components from Wizard
 import ContextMenu from '../../Wizard/ContextMenu';
@@ -58,6 +60,7 @@ import {
 import { canvasPersistence } from '../../services/canvas-persistence.service';
 import FTPConnectionWizard from '@/Wizard/FTPConnectionWizard';
 import SalesforceConnectionWizard, { SalesforceConnectionFormData } from '@/Wizard/SalesforceConnectionWizard';
+import { ConvertWorkerMessage, WorkerResponse } from '@/types/converterTypes';
 
 // ============================================================================
 // 🛡️ MODULE-LEVEL CACHE – survives component remounts
@@ -439,6 +442,8 @@ const RepositorySidebar: React.FC<EnhancedRepositorySidebarProps> = ({
   const [ftpWizardOpen, setFtpWizardOpen] = useState(false);
   const [ldapWizardOpen, setLdapWizardOpen] = useState(false);
   const [salesforceWizardOpen, setSalesforceWizardOpen] = useState(false);
+  const [avroWizardOpen, setAvroWizardOpen] = useState(false);
+const [parquetWizardOpen, setParquetWizardOpen] = useState(false);
 
   const contextMenuRef = useRef<HTMLDivElement>(null);
   const jobDesignContextMenuRef = useRef<HTMLDivElement>(null);
@@ -1400,7 +1405,15 @@ const handleOpenLDAPWizard = useCallback(() => {
   setContextMenu(null);
 }, []);
 
+const handleOpenAvroWizard = useCallback(() => {
+  setAvroWizardOpen(true);
+  setContextMenu(null);
+}, []);
 
+const handleOpenParquetWizard = useCallback(() => {
+  setParquetWizardOpen(true);
+  setContextMenu(null);
+}, []);
   // ==================== CREATE CANVAS FROM JOB ====================
   
   // ==================== WIZARD SAVE HANDLERS (WITH FOREIGN TABLE CREATION) ====================
@@ -1654,6 +1667,8 @@ const handleOpenLDAPWizard = useCallback(() => {
       toast.error(`❌ ${error.message}`);
     }
   }, [apiService, isConnected, testConnection]);
+
+  
 
 // Utility function to send errors to Consul (implement as needed)
 const reportErrorToConsul = (error: any) => {
@@ -1915,38 +1930,164 @@ const handleSavePositionalMetadata = useCallback(async (metadata: any) => {
     }
   }, [apiService, isConnected, testConnection]);
 
-  // JSON/Avro/Parquet
-  const handleSaveJsonAvroParquetMetadata = useCallback(async (metadata: any) => {
+const handleSaveJsonAvroParquetMetadata = useCallback(async (metadata: any) => {
   if (!apiService) {
     toast.error('❌ API service not available');
     return;
   }
+
   try {
+    // Ensure a PostgreSQL connection is available
     if (!isConnected && !(await testConnection())) {
       toast.error('❌ No active PostgreSQL connection');
       return;
     }
+
     const connectionId = await getActivePostgresConnectionId(apiService);
-    if (!connectionId) throw new Error('No PostgreSQL connection');
+    if (!connectionId) {
+      toast.error('❌ No PostgreSQL connection found');
+      return;
+    }
 
     if (!metadata.file) {
       toast.error('❌ No file provided');
       return;
     }
 
-    const format = metadata.format || 'json'; // json/avro/parquet
-    // ✅ FIXED: arguments now (file, endpoint, additionalFormData)
-    const csvPath = await convertFileViaBackend(
-      metadata.file,
-      '/api/convert/structured',
-      { format }
+    const format: 'json' | 'avro' | 'parquet' = metadata.format || 'json';
+
+    // ──────────────────────────────────────────────────────────────
+    // 🚀 Avro – handled by backend to avoid browser‑side crypto issues
+    // ──────────────────────────────────────────────────────────────
+    if (format === 'avro') {
+      console.log('🔄 [Avro] Delegating conversion to backend');
+
+      // Convert via backend
+      const csvPath = await convertFileViaBackend(
+        metadata.file,
+        '/api/convert/avro',
+        {
+          columns: JSON.stringify(metadata.schema || []),
+        }
+      );
+
+      console.log('✅ [Avro] Converted to CSV at:', csvPath);
+
+      const columns = (metadata.schema || []).map((col: any) => ({
+        name: col.name,
+        type: col.type,
+        nullable: true,
+      }));
+
+      if (columns.length === 0) {
+        toast.error('❌ No columns defined');
+        return;
+      }
+
+      const options = { format: 'avro' };
+
+      const result = await apiService.createForeignTableViaBackend(
+        connectionId,
+        metadata.name,
+        columns,
+        'json-avro-parquet',
+        csvPath,
+        options
+      );
+
+      if (!result.success) {
+        throw new Error(result.error || 'Foreign table creation failed');
+      }
+
+      // Persist metadata
+      metadata.postgresTableName = result.tableName || metadata.name;
+
+      await apiService.insertDataSourceMetadata(connectionId, {
+        name: metadata.name,
+        type: 'avro',
+        filePath: csvPath,
+        foreignTableName: result.tableName || metadata.name,
+        options,
+      });
+
+      // Notify sidebar tree
+      window.dispatchEvent(
+        new CustomEvent('metadata-created', {
+          detail: { metadata, type: 'avro', folderId: 'file-json-avro-parquet' },
+        })
+      );
+
+      toast.success(`✅ AVRO table "${metadata.name}" created`);
+      return; // Early exit – worker is not used
+    }
+
+    // ──────────────────────────────────────────────────────────────
+    // JSON & Parquet – use the existing client‑side Web Worker
+    // ──────────────────────────────────────────────────────────────
+    console.log('🔄 [JSON/Parquet] Starting client‑side conversion');
+
+    const worker = new Worker(
+      new URL('../../workers/formatConverter.worker.ts', import.meta.url),
+      { type: 'module' }
     );
 
+    // Wait for the worker to convert the file to a CSV string
+    const csvString: string = await new Promise((resolve, reject) => {
+      worker.onmessage = (msg: MessageEvent<WorkerResponse>) => {
+        if (msg.data.success && msg.data.csvString) {
+          resolve(msg.data.csvString);
+        } else {
+          // 🔍 Log the actual worker error to the console for debugging
+          console.error('[Sidebar] Worker conversion error:', msg.data.error);
+          reject(new Error(msg.data.error || 'Conversion failed'));
+        }
+        worker.terminate();
+      };
+
+      worker.onerror = (err) => {
+        reject(err);
+        worker.terminate();
+      };
+
+      // Read file as ArrayBuffer and send to worker
+      metadata.file.arrayBuffer().then((buffer: ArrayBuffer) => {
+        const message: ConvertWorkerMessage = {
+          type: 'convert',
+          payload: {
+            fileType: format,
+            buffer,
+            selectedColumns: metadata.schema?.map((col: any) => col.name),
+          },
+        };
+        worker.postMessage(message);
+      }).catch(reject);
+    });
+
+    // Upload converted CSV to the backend
+    const csvBlob = new Blob([csvString], { type: 'text/csv' });
+    const fileName = metadata.file.name.replace(/\.[^/.]+$/, '.csv');
+    const formData = new FormData();
+    formData.append('file', csvBlob, fileName);
+
+    const uploadRes = await fetch('http://localhost:3000/api/upload-csv', {
+      method: 'POST',
+      body: formData,
+    });
+
+    if (!uploadRes.ok) {
+      const errorText = await uploadRes.text();
+      throw new Error(`CSV upload failed (${uploadRes.status}): ${errorText}`);
+    }
+
+    const { filePath } = await uploadRes.json();
+
+    // Prepare columns
     const columns = (metadata.schema || []).map((col: any) => ({
       name: col.name,
       type: col.type,
       nullable: true,
     }));
+
     if (columns.length === 0) {
       toast.error('❌ No columns defined');
       return;
@@ -1954,39 +2095,48 @@ const handleSavePositionalMetadata = useCallback(async (metadata: any) => {
 
     const options = { format };
 
+    // Create foreign table
     const result = await apiService.createForeignTableViaBackend(
       connectionId,
       metadata.name,
       columns,
-      'json-avro-parquet', // this maps to fdw_multiformat
-      csvPath,
+      'json-avro-parquet',
+      filePath,
       options
     );
-    if (!result.success) throw new Error(result.error);
 
+    if (!result.success) {
+      throw new Error(result.error || 'Foreign table creation failed');
+    }
+
+    // Persist metadata
     metadata.postgresTableName = result.tableName || metadata.name;
 
     await apiService.insertDataSourceMetadata(connectionId, {
       name: metadata.name,
       type: format,
-      filePath: csvPath,
+      filePath,
       foreignTableName: result.tableName || metadata.name,
       options,
     });
 
+    // Notify sidebar tree
     window.dispatchEvent(
       new CustomEvent('metadata-created', {
         detail: { metadata, type: format, folderId: 'file-json-avro-parquet' },
       })
     );
+
     toast.success(`✅ ${format.toUpperCase()} table "${metadata.name}" created`);
   } catch (error: any) {
-    toast.error(`❌ ${error.message}`);
+    console.error('❌ [JSON/Avro/Parquet] Error:', error);
+    toast.error(`❌ ${error.message || 'Could not create table'}`);
   }
 }, [apiService, isConnected, testConnection, convertFileViaBackend]);
 
+
   // Regex
-  const handleSaveRegexMetadata = useCallback(async (metadata: any) => {
+const handleSaveRegexMetadata = useCallback(async (metadata: any) => {
   if (!apiService) {
     toast.error('❌ API service not available');
     return;
@@ -2004,28 +2154,54 @@ const handleSavePositionalMetadata = useCallback(async (metadata: any) => {
       return;
     }
 
-    // ✅ FIXED: arguments now (file, endpoint, additionalFormData)
+    // 1. Extract the regex pattern and flags from the wizard data
+    let patternStr = '';
+    let flagsStr = '';
+    if (Array.isArray(metadata.patterns) && metadata.patterns.length > 0) {
+      patternStr = metadata.patterns[0].pattern;
+      flagsStr = metadata.patterns[0].flags || '';
+    } else if (typeof metadata.pattern === 'string') {
+      patternStr = metadata.pattern;
+      flagsStr = metadata.flags || '';
+    }
+    if (!patternStr) {
+      toast.error('❌ No valid regex pattern found.');
+      return;
+    }
+
+    // 2. Convert the file via backend
     const csvPath = await convertFileViaBackend(
       metadata.file,
       '/api/convert/regex',
       {
-        pattern: metadata.pattern,
-        flags: metadata.flags || '',
-        columns: JSON.stringify(metadata.columns || []), // optional column names
+        pattern: patternStr,
+        flags: flagsStr,
+        columns: JSON.stringify(metadata.columns || []), // pass any columns if present
       }
     );
 
-    const columns = (metadata.columns || []).map((col: any) => ({
-      name: col.name,
-      type: col.type || 'text',
-      nullable: true,
-    }));
-    if (columns.length === 0) {
-      toast.error('❌ No columns defined');
-      return;
+    // 3. Build column definitions for the foreign table
+    let columns: any[];
+    if (metadata.columns && metadata.columns.length > 0) {
+      // Use explicit columns from wizard (if added later)
+      columns = metadata.columns.map((col: any) => ({
+        name: col.name,
+        type: col.type || 'text',
+        nullable: true,
+      }));
+    } else {
+      // No explicit columns – auto‑generate based on the pattern name
+      const patternName = metadata.patterns?.[0]?.name || 'match';
+      // If the pattern has no capturing groups, the CSV will be empty.
+      // Warn the user but still proceed with a single column placeholder.
+      toast.warn(
+        '⚠️ No columns defined. Using pattern name as column. Ensure your regex contains capturing groups.',
+        { autoClose: 8000 }
+      );
+      columns = [{ name: patternName.replace(/[^a-zA-Z0-9_]/g, '_'), type: 'text', nullable: true }];
     }
 
-    const options = { pattern: metadata.pattern, flags: metadata.flags };
+    const options = { pattern: patternStr, flags: flagsStr };
 
     const result = await apiService.createForeignTableViaBackend(
       connectionId,
@@ -2057,6 +2233,8 @@ const handleSavePositionalMetadata = useCallback(async (metadata: any) => {
     toast.error(`❌ ${error.message}`);
   }
 }, [apiService, isConnected, testConnection, convertFileViaBackend]);
+
+
   // LDIF
   const handleSaveLDIFMetadata = useCallback(async (metadata: any) => {
   if (!apiService) {
@@ -2158,6 +2336,19 @@ const handleSaveLDAPConnection = useCallback(async (data: LDAPConnectionFormData
   }));
   toast.success(`✅ LDAP connection "${data.name}" created`);
 }, []);
+
+
+const handleSaveAvroMetadata = useCallback((metadata: any) => {
+  // Force the format so the unified handler takes the Avro branch
+  metadata.format = 'avro';
+  handleSaveJsonAvroParquetMetadata(metadata);
+}, [handleSaveJsonAvroParquetMetadata]);
+
+const handleSaveParquetMetadata = useCallback((metadata: any) => {
+  // Force the format so the unified handler takes the Parquet branch
+  metadata.format = 'parquet';
+  handleSaveJsonAvroParquetMetadata(metadata);
+}, [handleSaveJsonAvroParquetMetadata]);
 
 function createDatabaseTableNode(
   tableDef: any,
@@ -3460,7 +3651,7 @@ useEffect(() => {
         onSave={handleSaveFileSchemaMetadata}
       />
 
-      <JsonAvroParquetMetadataWizard
+      <JsonMetadataWizard
         isOpen={jsonAvroParquetWizardOpen}
         onClose={() => setJsonAvroParquetWizardOpen(false)}
         onSave={handleSaveJsonAvroParquetMetadata}
@@ -3515,6 +3706,19 @@ useEffect(() => {
   onClose={() => setLdapWizardOpen(false)}
   onSave={handleSaveLDAPConnection}
 />
+
+<AvroMetadataWizard
+  isOpen={avroWizardOpen}
+  onClose={() => setAvroWizardOpen(false)}
+  onSave={handleSaveAvroMetadata}
+/>
+
+<ParquetMetadataWizard
+  isOpen={parquetWizardOpen}
+  onClose={() => setParquetWizardOpen(false)}
+  onSave={handleSaveParquetMetadata}
+/>
+
 
       <Layout.ToastContainerWrapper />
     </>

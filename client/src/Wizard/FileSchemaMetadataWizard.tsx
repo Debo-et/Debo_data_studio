@@ -12,7 +12,8 @@ import {
   AlertCircle,
   FileText,
   Plus,
-  Trash2
+  Trash2,
+  FileSpreadsheet
 } from 'lucide-react';
 import {
   FileSchemaMetadataFormData,
@@ -30,8 +31,10 @@ const FileSchemaMetadataWizard: React.FC<FileSchemaMetadataWizardProps> = ({
     name: '',
     purpose: '',
     description: '',
-    file: null,
-    filePath: '',
+    file: null,          // schema file
+    filePath: '',        // schema file name/path
+    dataFile: null,      // data file
+    dataFilePath: '',    // data file name/path
     schemaType: 'custom',
     fields: [],
     totalFields: 0,
@@ -42,31 +45,30 @@ const FileSchemaMetadataWizard: React.FC<FileSchemaMetadataWizardProps> = ({
   const [isLoading, setIsLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
-  const fileInputRef = useRef<HTMLInputElement>(null);
+  const schemaFileInputRef = useRef<HTMLInputElement>(null);
+  const dataFileInputRef = useRef<HTMLInputElement>(null);
   const totalSteps = 4;
 
   // Supported schema file extensions
-  const supportedExtensions = ['.sql', '.ddl', '.json', '.avsc', '.proto', '.xsd', '.yaml', '.yml'];
+  const supportedSchemaExtensions = ['.sql', '.ddl', '.json', '.avsc', '.proto', '.xsd', '.yaml', '.yml'];
+  // Supported data file extensions
+  const supportedDataExtensions = ['.csv', '.tsv', '.json', '.txt', '.parquet'];
 
-  // Parse schema file based on type
+  // --------------------------------------------------------------------------
+  // Schema parsing functions (unchanged from original)
+  // --------------------------------------------------------------------------
   const parseSchemaFile = (content: string, schemaType: string): SchemaFieldDefinition[] => {
-    
     try {
       switch (schemaType) {
         case 'database':
-          // Parse SQL/DDL files
           return parseSQLSchema(content);
         case 'json':
-          // Parse JSON Schema
           return parseJSONSchema(content);
         case 'avro':
-          // Parse Avro Schema
           return parseAvroSchema(content);
         case 'protobuf':
-          // Parse Protobuf Schema
           return parseProtobufSchema(content);
         default:
-          // For custom or unknown types, try to extract field information
           return parseGenericSchema(content);
       }
     } catch (err) {
@@ -75,13 +77,11 @@ const FileSchemaMetadataWizard: React.FC<FileSchemaMetadataWizardProps> = ({
     }
   };
 
-  // Parse SQL/DDL schema
   const parseSQLSchema = (content: string): SchemaFieldDefinition[] => {
     const fields: SchemaFieldDefinition[] = [];
     const lines = content.split('\n');
     
     lines.forEach(line => {
-      // Simple pattern matching for CREATE TABLE and column definitions
       const columnMatch = line.match(/(\w+)\s+(\w+)(?:\((\d+)(?:,\s*(\d+))?\))?(\s+NOT NULL)?/i);
       if (columnMatch) {
         const [, name, type, length, scale, nullable] = columnMatch;
@@ -100,7 +100,6 @@ const FileSchemaMetadataWizard: React.FC<FileSchemaMetadataWizardProps> = ({
     return fields;
   };
 
-  // Parse JSON Schema
   const parseJSONSchema = (content: string): SchemaFieldDefinition[] => {
     const fields: SchemaFieldDefinition[] = [];
     
@@ -125,7 +124,6 @@ const FileSchemaMetadataWizard: React.FC<FileSchemaMetadataWizardProps> = ({
     return fields;
   };
 
-  // Parse Avro Schema
   const parseAvroSchema = (content: string): SchemaFieldDefinition[] => {
     const fields: SchemaFieldDefinition[] = [];
     
@@ -152,7 +150,6 @@ const FileSchemaMetadataWizard: React.FC<FileSchemaMetadataWizardProps> = ({
     return fields;
   };
 
-  // Parse Protobuf Schema
   const parseProtobufSchema = (content: string): SchemaFieldDefinition[] => {
     const fields: SchemaFieldDefinition[] = [];
     const lines = content.split('\n');
@@ -164,7 +161,7 @@ const FileSchemaMetadataWizard: React.FC<FileSchemaMetadataWizardProps> = ({
         fields.push({
           name: name.trim(),
           type: mapProtobufTypeToSQL(type),
-          nullable: true, // Protobuf 3 has no required fields
+          nullable: true,
           description: `Field ${name} of type ${type}`,
           constraints: repeated ? ['repeated'] : []
         });
@@ -174,7 +171,6 @@ const FileSchemaMetadataWizard: React.FC<FileSchemaMetadataWizardProps> = ({
     return fields;
   };
 
-  // Generic schema parser
   const parseGenericSchema = (content: string): SchemaFieldDefinition[] => {
     const fields: SchemaFieldDefinition[] = [];
     const lines = content.split('\n');
@@ -183,7 +179,6 @@ const FileSchemaMetadataWizard: React.FC<FileSchemaMetadataWizardProps> = ({
     lines.forEach(line => {
       const trimmed = line.trim();
       if (trimmed && !trimmed.startsWith('//') && !trimmed.startsWith('--') && !trimmed.startsWith('#')) {
-        // Try to extract field-like patterns
         const words = trimmed.split(/\s+/).filter(word => word.length > 0);
         if (words.length >= 2) {
           fields.push({
@@ -246,16 +241,17 @@ const FileSchemaMetadataWizard: React.FC<FileSchemaMetadataWizardProps> = ({
     return typeMap[protoType] || 'VARCHAR';
   };
 
-  // Handle file selection and parsing
-  const handleFileSelect = (event: React.ChangeEvent<HTMLInputElement>) => {
+  // --------------------------------------------------------------------------
+  // File selection handlers
+  // --------------------------------------------------------------------------
+  const handleSchemaFileSelect = (event: React.ChangeEvent<HTMLInputElement>) => {
     const file = event.target.files?.[0];
     if (!file) return;
 
-    // Validate file type
     const fileExtension = file.name.toLowerCase().slice(file.name.lastIndexOf('.'));
     
-    if (!supportedExtensions.includes(fileExtension)) {
-      setError(`Please select a supported schema file: ${supportedExtensions.join(', ')}`);
+    if (!supportedSchemaExtensions.includes(fileExtension)) {
+      setError(`Please select a supported schema file: ${supportedSchemaExtensions.join(', ')}`);
       return;
     }
 
@@ -268,17 +264,14 @@ const FileSchemaMetadataWizard: React.FC<FileSchemaMetadataWizardProps> = ({
       try {
         const content = e.target?.result as string;
         
-        // Infer schema type from file extension
         let schemaType: 'database' | 'json' | 'avro' | 'protobuf' | 'custom' = 'custom';
         if (['.sql', '.ddl'].includes(fileExtension)) schemaType = 'database';
         else if (fileExtension === '.json') schemaType = 'json';
         else if (fileExtension === '.avsc') schemaType = 'avro';
         else if (fileExtension === '.proto') schemaType = 'protobuf';
         
-        // Parse the schema file
         const fields = parseSchemaFile(content, schemaType);
         
-        // Update form data
         updateFormData({
           file,
           filePath: file.name,
@@ -295,26 +288,48 @@ const FileSchemaMetadataWizard: React.FC<FileSchemaMetadataWizardProps> = ({
     };
 
     reader.onerror = () => {
-      setError('Failed to read file. The file may be corrupted or in an unsupported format.');
+      setError('Failed to read schema file. The file may be corrupted or in an unsupported format.');
       setIsLoading(false);
     };
 
     reader.readAsText(file);
   };
 
-  // Update form data
+  const handleDataFileSelect = (event: React.ChangeEvent<HTMLInputElement>) => {
+    const file = event.target.files?.[0];
+    if (!file) return;
+
+    const fileExtension = file.name.toLowerCase().slice(file.name.lastIndexOf('.'));
+    if (!supportedDataExtensions.includes(fileExtension)) {
+      setError(`Please select a supported data file: ${supportedDataExtensions.join(', ')}`);
+      return;
+    }
+
+    setError(null);
+    updateFormData({
+      dataFile: file,
+      dataFilePath: file.name
+    });
+
+    // Optional: read first few bytes for preview (currently unused)
+    const reader = new FileReader();
+    reader.onload = () => {};
+    reader.readAsText(file.slice(0, 500));
+  };
+
+  // --------------------------------------------------------------------------
+  // Form data management
+  // --------------------------------------------------------------------------
   const updateFormData = (updates: Partial<FileSchemaMetadataFormData>) => {
     setFormData(prev => ({ ...prev, ...updates }));
   };
 
-  // Update field
   const updateField = (index: number, field: string, value: any) => {
     const newFields = [...formData.fields];
     newFields[index] = { ...newFields[index], [field]: value };
     updateFormData({ fields: newFields });
   };
 
-  // Add new field
   const addField = () => {
     const newField: SchemaFieldDefinition = {
       name: `field_${formData.fields.length + 1}`,
@@ -330,7 +345,6 @@ const FileSchemaMetadataWizard: React.FC<FileSchemaMetadataWizardProps> = ({
     });
   };
 
-  // Remove field
   const removeField = (index: number) => {
     const newFields = formData.fields.filter((_, i) => i !== index);
     updateFormData({ 
@@ -339,14 +353,24 @@ const FileSchemaMetadataWizard: React.FC<FileSchemaMetadataWizardProps> = ({
     });
   };
 
+  // --------------------------------------------------------------------------
+  // Step navigation
+  // --------------------------------------------------------------------------
+  const isStep2Valid = formData.file && formData.dataFile;
+
   const handleNext = () => {
     if (currentStep < totalSteps) {
+      if (currentStep === 2 && !isStep2Valid) {
+        setError('Both schema and data files are required.');
+        return;
+      }
       setCurrentStep(currentStep + 1);
     }
   };
 
   const handleBack = () => {
     if (currentStep > 1) {
+      setError(null);
       setCurrentStep(currentStep - 1);
     }
   };
@@ -366,6 +390,8 @@ const FileSchemaMetadataWizard: React.FC<FileSchemaMetadataWizardProps> = ({
       description: '',
       file: null,
       filePath: '',
+      dataFile: null,
+      dataFilePath: '',
       schemaType: 'custom',
       fields: [],
       totalFields: 0,
@@ -382,7 +408,9 @@ const FileSchemaMetadataWizard: React.FC<FileSchemaMetadataWizardProps> = ({
     'TIME', 'TIMESTAMP', 'BINARY', 'BLOB', 'CLOB', 'JSON'
   ];
 
-  // Render fields table
+  // --------------------------------------------------------------------------
+  // Render helpers
+  // --------------------------------------------------------------------------
   const renderFieldsTable = () => {
     if (formData.fields.length === 0) {
       return (
@@ -406,21 +434,11 @@ const FileSchemaMetadataWizard: React.FC<FileSchemaMetadataWizardProps> = ({
           <table className="w-full text-sm">
             <thead className="bg-gray-100 dark:bg-gray-800">
               <tr>
-                <th className="px-3 py-2 text-left font-medium text-gray-700 dark:text-gray-300">
-                  Field Name
-                </th>
-                <th className="px-3 py-2 text-left font-medium text-gray-700 dark:text-gray-300">
-                  Data Type
-                </th>
-                <th className="px-3 py-2 text-left font-medium text-gray-700 dark:text-gray-300">
-                  Length
-                </th>
-                <th className="px-3 py-2 text-left font-medium text-gray-700 dark:text-gray-300">
-                  Nullable
-                </th>
-                <th className="px-3 py-2 text-left font-medium text-gray-700 dark:text-gray-300">
-                  Actions
-                </th>
+                <th className="px-3 py-2 text-left font-medium text-gray-700 dark:text-gray-300">Field Name</th>
+                <th className="px-3 py-2 text-left font-medium text-gray-700 dark:text-gray-300">Data Type</th>
+                <th className="px-3 py-2 text-left font-medium text-gray-700 dark:text-gray-300">Length</th>
+                <th className="px-3 py-2 text-left font-medium text-gray-700 dark:text-gray-300">Nullable</th>
+                <th className="px-3 py-2 text-left font-medium text-gray-700 dark:text-gray-300">Actions</th>
               </tr>
             </thead>
             <tbody className="divide-y divide-gray-200 dark:divide-gray-600">
@@ -481,6 +499,204 @@ const FileSchemaMetadataWizard: React.FC<FileSchemaMetadataWizardProps> = ({
     );
   };
 
+  const renderStep2 = () => (
+    <div className="space-y-4">
+      <h3 className="text-lg font-medium text-gray-900 dark:text-white">
+        Schema & Data File Selection
+      </h3>
+      <p className="text-sm text-gray-600 dark:text-gray-400">
+        Select the schema file (structure definition) and the corresponding data file (sample dataset). Both are required.
+      </p>
+      
+      <div className="space-y-6">
+        {/* Schema File Input */}
+        <div>
+          <label className="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-1">
+            Schema File *
+          </label>
+          <div className="flex space-x-2">
+            <input
+              type="text"
+              value={formData.filePath}
+              readOnly
+              className="flex-1 px-3 py-2 border border-gray-300 dark:border-gray-600 rounded-md focus:outline-none focus:ring-2 focus:ring-blue-500 dark:bg-gray-700 dark:text-white bg-gray-50 dark:bg-gray-600"
+              placeholder="No schema file selected"
+            />
+            <Button
+              type="button"
+              variant="outline"
+              onClick={() => schemaFileInputRef.current?.click()}
+              disabled={isLoading}
+            >
+              {isLoading ? (
+                <div className="animate-spin rounded-full h-4 w-4 border-b-2 border-current mr-2" />
+              ) : (
+                <Upload className="h-4 w-4 mr-2" />
+              )}
+              {isLoading ? 'Parsing...' : 'Browse'}
+            </Button>
+          </div>
+          <input
+            type="file"
+            ref={schemaFileInputRef}
+            onChange={handleSchemaFileSelect}
+            accept={supportedSchemaExtensions.join(',')}
+            className="hidden"
+          />
+          {formData.file && (
+            <p className="text-sm text-green-600 dark:text-green-400 mt-1">
+              ✓ Schema: {formData.file.name} ({(formData.file.size / 1024).toFixed(2)} KB)
+            </p>
+          )}
+        </div>
+
+        {/* Data File Input */}
+        <div>
+          <label className="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-1">
+            Data File *
+          </label>
+          <div className="flex space-x-2">
+            <input
+              type="text"
+              value={formData.dataFilePath}
+              readOnly
+              className="flex-1 px-3 py-2 border border-gray-300 dark:border-gray-600 rounded-md focus:outline-none focus:ring-2 focus:ring-blue-500 dark:bg-gray-700 dark:text-white bg-gray-50 dark:bg-gray-600"
+              placeholder="No data file selected"
+            />
+            <Button
+              type="button"
+              variant="outline"
+              onClick={() => dataFileInputRef.current?.click()}
+            >
+              <FileSpreadsheet className="h-4 w-4 mr-2" />
+              Browse
+            </Button>
+          </div>
+          <input
+            type="file"
+            ref={dataFileInputRef}
+            onChange={handleDataFileSelect}
+            accept={supportedDataExtensions.join(',')}
+            className="hidden"
+          />
+          {formData.dataFile && (
+            <p className="text-sm text-green-600 dark:text-green-400 mt-1">
+              ✓ Data: {formData.dataFile.name} ({(formData.dataFile.size / 1024).toFixed(2)} KB)
+            </p>
+          )}
+        </div>
+
+        {error && (
+          <div className="flex items-center space-x-2 p-3 bg-red-50 dark:bg-red-900/20 border border-red-200 dark:border-red-800 rounded-md">
+            <AlertCircle className="h-4 w-4 text-red-600 dark:text-red-400" />
+            <span className="text-sm text-red-600 dark:text-red-400">{error}</span>
+          </div>
+        )}
+
+        {formData.fields.length > 0 && !error && (
+          <div className="bg-green-50 dark:bg-green-900/20 border border-green-200 dark:border-green-800 rounded-md p-3">
+            <div className="flex items-center space-x-2 text-green-800 dark:text-green-300">
+              <Database className="h-4 w-4" />
+              <span className="font-medium">Schema parsed successfully!</span>
+            </div>
+            <p className="text-sm text-green-700 dark:text-green-400 mt-1">
+              Schema Type: <strong>{formData.schemaType}</strong> | 
+              Fields: <strong>{formData.fields.length}</strong>
+            </p>
+          </div>
+        )}
+      </div>
+    </div>
+  );
+
+  const renderStep4 = () => (
+    <div className="space-y-4">
+      <h3 className="text-lg font-medium text-gray-900 dark:text-white">
+        Finish and Save
+      </h3>
+      <p className="text-sm text-gray-600 dark:text-gray-400">
+        Review your schema metadata configuration and click Finish to save it to the Repository.
+      </p>
+      
+      <div className="bg-green-50 dark:bg-green-900/20 border border-green-200 dark:border-green-800 rounded-md p-4">
+        <div className="flex items-center space-x-2 text-green-800 dark:text-green-300">
+          <CheckCircle className="h-5 w-5" />
+          <span className="font-medium">Ready to save</span>
+        </div>
+        <p className="text-sm text-green-700 dark:text-green-400 mt-1">
+          Your schema metadata configuration is complete and ready to be saved to the repository.
+        </p>
+      </div>
+      
+      <div className="grid grid-cols-2 gap-6">
+        <div className="space-y-4">
+          <h4 className="font-medium text-gray-900 dark:text-white">Configuration Summary</h4>
+          <div className="space-y-3 text-sm">
+            <div className="flex justify-between">
+              <span className="text-gray-500 dark:text-gray-400">Name:</span>
+              <span className="text-gray-900 dark:text-white font-medium">{formData.name || 'Not specified'}</span>
+            </div>
+            <div className="flex justify-between">
+              <span className="text-gray-500 dark:text-gray-400">Schema File:</span>
+              <span className="text-gray-900 dark:text-white">{formData.filePath || 'None'}</span>
+            </div>
+            <div className="flex justify-between">
+              <span className="text-gray-500 dark:text-gray-400">Data File:</span>
+              <span className="text-gray-900 dark:text-white">{formData.dataFilePath || 'None'}</span>
+            </div>
+            <div className="flex justify-between">
+              <span className="text-gray-500 dark:text-gray-400">Schema Type:</span>
+              <span className="text-gray-900 dark:text-white">{formData.schemaType}</span>
+            </div>
+            <div className="flex justify-between">
+              <span className="text-gray-500 dark:text-gray-400">Total Fields:</span>
+              <span className="text-gray-900 dark:text-white">{formData.fields.length}</span>
+            </div>
+            <div className="flex justify-between">
+              <span className="text-gray-500 dark:text-gray-400">Version:</span>
+              <span className="text-gray-900 dark:text-white">{formData.version}</span>
+            </div>
+            <div className="flex justify-between">
+              <span className="text-gray-500 dark:text-gray-400">Encoding:</span>
+              <span className="text-gray-900 dark:text-white">{formData.encoding}</span>
+            </div>
+          </div>
+        </div>
+
+        {formData.fields.length > 0 && (
+          <div className="space-y-3">
+            <h4 className="font-medium text-gray-900 dark:text-white">Fields Summary</h4>
+            <div className="border border-gray-200 dark:border-gray-600 rounded-md p-3 max-h-48 overflow-y-auto">
+              <div className="space-y-2 text-sm">
+                {formData.fields.slice(0, 10).map((field, index) => (
+                  <div key={index} className="flex justify-between items-center py-1 border-b border-gray-100 dark:border-gray-700 last:border-b-0">
+                    <div>
+                      <span className="text-gray-600 dark:text-gray-400 font-medium">{field.name}</span>
+                      <span className="text-gray-900 dark:text-white text-xs bg-blue-100 dark:bg-blue-900 px-2 py-1 rounded ml-2">
+                        {field.type}
+                      </span>
+                    </div>
+                    <span className={`text-xs px-2 py-1 rounded ${field.nullable ? 'bg-green-100 dark:bg-green-900 text-green-800 dark:text-green-300' : 'bg-red-100 dark:bg-red-900 text-red-800 dark:text-red-300'}`}>
+                      {field.nullable ? 'NULL' : 'NOT NULL'}
+                    </span>
+                  </div>
+                ))}
+                {formData.fields.length > 10 && (
+                  <div className="text-center text-gray-500 dark:text-gray-400 text-xs">
+                    ... and {formData.fields.length - 10} more fields
+                  </div>
+                )}
+              </div>
+            </div>
+          </div>
+        )}
+      </div>
+    </div>
+  );
+
+  // --------------------------------------------------------------------------
+  // Main render
+  // --------------------------------------------------------------------------
   if (!isOpen) return null;
 
   return (
@@ -605,80 +821,7 @@ const FileSchemaMetadataWizard: React.FC<FileSchemaMetadataWizardProps> = ({
             </div>
           )}
 
-          {currentStep === 2 && (
-            <div className="space-y-4">
-              <h3 className="text-lg font-medium text-gray-900 dark:text-white">
-                Schema File Selection
-              </h3>
-              <p className="text-sm text-gray-600 dark:text-gray-400">
-                Select a schema file to parse. Supported formats: {supportedExtensions.join(', ')}
-              </p>
-              
-              <div className="space-y-4">
-                {/* Hidden file input */}
-                <input
-                  type="file"
-                  ref={fileInputRef}
-                  onChange={handleFileSelect}
-                  accept={supportedExtensions.join(',')}
-                  className="hidden"
-                />
-                
-                <div>
-                  <label className="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-1">
-                    Schema File *
-                  </label>
-                  <div className="flex space-x-2">
-                    <input
-                      type="text"
-                      value={formData.filePath}
-                      readOnly
-                      className="flex-1 px-3 py-2 border border-gray-300 dark:border-gray-600 rounded-md focus:outline-none focus:ring-2 focus:ring-blue-500 dark:bg-gray-700 dark:text-white bg-gray-50 dark:bg-gray-600"
-                      placeholder="No file selected"
-                    />
-                    <Button
-                      type="button"
-                      variant="outline"
-                      onClick={() => fileInputRef.current?.click()}
-                      disabled={isLoading}
-                    >
-                      {isLoading ? (
-                        <div className="animate-spin rounded-full h-4 w-4 border-b-2 border-current mr-2" />
-                      ) : (
-                        <Upload className="h-4 w-4 mr-2" />
-                      )}
-                      {isLoading ? 'Parsing...' : 'Browse'}
-                    </Button>
-                  </div>
-                  {formData.file && (
-                    <p className="text-sm text-green-600 dark:text-green-400 mt-1">
-                      ✓ File selected: {formData.file.name} ({(formData.file.size / 1024).toFixed(2)} KB)
-                    </p>
-                  )}
-                </div>
-
-                {error && (
-                  <div className="flex items-center space-x-2 p-3 bg-red-50 dark:bg-red-900/20 border border-red-200 dark:border-red-800 rounded-md">
-                    <AlertCircle className="h-4 w-4 text-red-600 dark:text-red-400" />
-                    <span className="text-sm text-red-600 dark:text-red-400">{error}</span>
-                  </div>
-                )}
-
-                {formData.fields.length > 0 && (
-                  <div className="bg-green-50 dark:bg-green-900/20 border border-green-200 dark:border-green-800 rounded-md p-3">
-                    <div className="flex items-center space-x-2 text-green-800 dark:text-green-300">
-                      <Database className="h-4 w-4" />
-                      <span className="font-medium">Schema parsed successfully!</span>
-                    </div>
-                    <p className="text-sm text-green-700 dark:text-green-400 mt-1">
-                      Schema Type: <strong>{formData.schemaType}</strong> | 
-                      Fields: <strong>{formData.fields.length}</strong>
-                    </p>
-                  </div>
-                )}
-              </div>
-            </div>
-          )}
+          {currentStep === 2 && renderStep2()}
 
           {currentStep === 3 && (
             <div className="space-y-4">
@@ -723,86 +866,7 @@ const FileSchemaMetadataWizard: React.FC<FileSchemaMetadataWizardProps> = ({
             </div>
           )}
 
-          {currentStep === 4 && (
-            <div className="space-y-4">
-              <h3 className="text-lg font-medium text-gray-900 dark:text-white">
-                Finish and Save
-              </h3>
-              <p className="text-sm text-gray-600 dark:text-gray-400">
-                Review your schema metadata configuration and click Finish to save it to the Repository.
-              </p>
-              
-              <div className="bg-green-50 dark:bg-green-900/20 border border-green-200 dark:border-green-800 rounded-md p-4">
-                <div className="flex items-center space-x-2 text-green-800 dark:text-green-300">
-                  <CheckCircle className="h-5 w-5" />
-                  <span className="font-medium">Ready to save</span>
-                </div>
-                <p className="text-sm text-green-700 dark:text-green-400 mt-1">
-                  Your schema metadata configuration is complete and ready to be saved to the repository.
-                </p>
-              </div>
-              
-              <div className="grid grid-cols-2 gap-6">
-                <div className="space-y-4">
-                  <h4 className="font-medium text-gray-900 dark:text-white">Configuration Summary</h4>
-                  <div className="space-y-3 text-sm">
-                    <div className="flex justify-between">
-                      <span className="text-gray-500 dark:text-gray-400">Name:</span>
-                      <span className="text-gray-900 dark:text-white font-medium">{formData.name || 'Not specified'}</span>
-                    </div>
-                    <div className="flex justify-between">
-                      <span className="text-gray-500 dark:text-gray-400">File:</span>
-                      <span className="text-gray-900 dark:text-white">{formData.filePath || 'No file selected'}</span>
-                    </div>
-                    <div className="flex justify-between">
-                      <span className="text-gray-500 dark:text-gray-400">Schema Type:</span>
-                      <span className="text-gray-900 dark:text-white">{formData.schemaType}</span>
-                    </div>
-                    <div className="flex justify-between">
-                      <span className="text-gray-500 dark:text-gray-400">Total Fields:</span>
-                      <span className="text-gray-900 dark:text-white">{formData.fields.length}</span>
-                    </div>
-                    <div className="flex justify-between">
-                      <span className="text-gray-500 dark:text-gray-400">Version:</span>
-                      <span className="text-gray-900 dark:text-white">{formData.version}</span>
-                    </div>
-                    <div className="flex justify-between">
-                      <span className="text-gray-500 dark:text-gray-400">Encoding:</span>
-                      <span className="text-gray-900 dark:text-white">{formData.encoding}</span>
-                    </div>
-                  </div>
-                </div>
-
-                {formData.fields.length > 0 && (
-                  <div className="space-y-3">
-                    <h4 className="font-medium text-gray-900 dark:text-white">Fields Summary</h4>
-                    <div className="border border-gray-200 dark:border-gray-600 rounded-md p-3 max-h-48 overflow-y-auto">
-                      <div className="space-y-2 text-sm">
-                        {formData.fields.slice(0, 10).map((field, index) => (
-                          <div key={index} className="flex justify-between items-center py-1 border-b border-gray-100 dark:border-gray-700 last:border-b-0">
-                            <div>
-                              <span className="text-gray-600 dark:text-gray-400 font-medium">{field.name}</span>
-                              <span className="text-gray-900 dark:text-white text-xs bg-blue-100 dark:bg-blue-900 px-2 py-1 rounded ml-2">
-                                {field.type}
-                              </span>
-                            </div>
-                            <span className={`text-xs px-2 py-1 rounded ${field.nullable ? 'bg-green-100 dark:bg-green-900 text-green-800 dark:text-green-300' : 'bg-red-100 dark:bg-red-900 text-red-800 dark:text-red-300'}`}>
-                              {field.nullable ? 'NULL' : 'NOT NULL'}
-                            </span>
-                          </div>
-                        ))}
-                        {formData.fields.length > 10 && (
-                          <div className="text-center text-gray-500 dark:text-gray-400 text-xs">
-                            ... and {formData.fields.length - 10} more fields
-                          </div>
-                        )}
-                      </div>
-                    </div>
-                  </div>
-                )}
-              </div>
-            </div>
-          )}
+          {currentStep === 4 && renderStep4()}
         </div>
 
         {/* Footer */}
@@ -822,7 +886,7 @@ const FileSchemaMetadataWizard: React.FC<FileSchemaMetadataWizardProps> = ({
             {currentStep < totalSteps ? (
               <Button 
                 onClick={handleNext}
-                disabled={(currentStep === 2 && !formData.file) || (currentStep === 3 && formData.fields.length === 0)}
+                disabled={(currentStep === 2 && !isStep2Valid) || (currentStep === 3 && formData.fields.length === 0)}
               >
                 Next
                 <ArrowRight className="h-4 w-4 ml-2" />

@@ -4,10 +4,10 @@ import { CorsOptions } from 'cors';
 
 const corsOptions: CorsOptions = {
   origin: (origin, callback) => {
-    // Allow requests with no origin (like mobile apps, curl, postman)
+    // Allow requests with no origin (like mobile apps, curl, Postman)
     if (!origin) return callback(null, true);
-    
-    // Allow all local development origins
+
+    // List of allowed origins for local development
     const allowedOrigins = [
       'http://localhost:3000',
       'http://localhost:3001',
@@ -16,26 +16,25 @@ const corsOptions: CorsOptions = {
       'http://0.0.0.0:3000',
       'http://0.0.0.0:3001',
     ];
-    
+
     if (allowedOrigins.includes(origin)) {
       callback(null, true);
     } else {
+      console.warn(`CORS blocked request from origin: ${origin}`);
       callback(new Error('Not allowed by CORS'));
     }
   },
-  credentials: true,
-  optionsSuccessStatus: 200,
+  credentials: false,               // Keep false unless you need cookies / authentication headers
+  optionsSuccessStatus: 200,        // For old browsers
   methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS', 'PATCH'],
   allowedHeaders: [
     'Content-Type',
     'Authorization',
     'Accept',
-    'Origin',
     'X-Requested-With',
     'X-Request-ID',
     'X-CSRF-Token',
-    'Access-Control-Allow-Headers',
-    'Access-Control-Allow-Origin',
+    // 'Origin' is automatically sent by the browser – do NOT add it here
   ],
   exposedHeaders: [
     'Content-Length',

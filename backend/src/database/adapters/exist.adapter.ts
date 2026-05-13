@@ -17,6 +17,7 @@ import exist, { Connection as ExistClient, NodeExistOptions, ExistResult } from 
 
 // -------- ExistDB Connection Wrapper --------
 export class ExistConnection implements DatabaseConnection {
+  public connected = false;          // <-- required by DatabaseConnection interface
   private client: ExistClient | null = null;
   private config: {
     host: string;
@@ -48,12 +49,14 @@ export class ExistConnection implements DatabaseConnection {
     this.client = exist.connect(options);
     // Test connection: a simple query will authenticate and validate
     await this.client.resources.list('/db');
+    this.connected = true;            // <-- set after successful connect
   }
 
   async disconnect(): Promise<void> {
     // No persistent connection to release; drop references
     this.client = null;
     this.config = null;
+    this.connected = false;           // <-- reset on disconnect
   }
 
   getClient(): ExistClient | null {
@@ -145,7 +148,7 @@ class ExistInspector {
           columns: [],
           comment: '',
           rowCount: 0,
-          size: 0,
+          size: '0',               // string type, as required by TableInfo
           originalData: null,
         },
       ];
@@ -172,7 +175,7 @@ class ExistInspector {
         columns: [],
         comment: '',
         rowCount: docCount,
-        size: size,
+        size: size.toString(),     // convert number to string
         originalData: { child, childPath: child },
       });
     }
@@ -257,7 +260,10 @@ class ExistInspector {
       return {
         success: true,
         rows,
-        fields: rows.length > 0 ? Object.keys(rows[0]) : [],
+        // Fix: map string keys to {name, type} objects
+        fields: rows.length > 0
+          ? Object.keys(rows[0]).map(k => ({ name: k, type: 'any' as string }))
+          : [],
         rowCount: rows.length,
         executionTime: Date.now() - start,
       };
@@ -316,7 +322,7 @@ export class ExistAdapter implements IBaseDatabaseInspector {
     return tempInspector.testConnection();
   }
 
-  async getTables(_connection: DatabaseConnection, options?: InspectionOptions): Promise<TableInfo[]> {
+  async getTables(_connection: DatabaseConnection, _options?: InspectionOptions): Promise<TableInfo[]> {
     if (!this.inspector) throw new Error('Inspector not initialized. Call connect() first.');
     return this.inspector.getTables();
   }
@@ -389,7 +395,7 @@ export class ExistAdapter implements IBaseDatabaseInspector {
     }
   }
 
-  async getIndexes(_connection: DatabaseConnection, tableName?: string): Promise<any[]> {
+  async getIndexes(_connection: DatabaseConnection, _tableName?: string): Promise<any[]> {
     if (!this.inspector) throw new Error('Inspector not initialized.');
     // Retrieve index definitions using ft:get-indexes()
     const client = this.connectionInstance?.getClient();

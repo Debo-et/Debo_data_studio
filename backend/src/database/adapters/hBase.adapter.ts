@@ -1,347 +1,783 @@
-// backend/src/database/adapters/hbase.adapter.ts
-
-import { IBaseDatabaseInspector } from '../inspection/base-inspector';
-import {
-  DatabaseConnection,
-  QueryResult,
-  TableInfo,
-  ColumnMetadata,
-  DatabaseConfig,
-  InspectionOptions,
-  QueryExecutionOptions,
-  DatabaseVersionInfo
-} from '../types/inspection.types';
-
-// ------------------------------------------------------------------
-// Import the hypothetical HBase inspector (to be implemented)
-// ------------------------------------------------------------------
-import { HBaseSchemaInspector, HBaseConnection } from '../inspection/hBase-inspector';
-
 /**
- * Apache HBase Adapter
- * Implements IBaseDatabaseInspector for HBase, mapping its data model
- * (tables → column families, no SQL, namespaces as schemas) to the
- * common interface.
+ * Apache HBase Schema Inspector with Query Execution
+ * REST API based implementation for HBase, following the design pattern of PostgreSQL inspector.
+ * Supports namespace/schema abstraction, table metadata, column families, and data scanning.
+ * Optimized for DatabaseMetadataWizard integration.
  */
-export class HBaseAdapter implements IBaseDatabaseInspector {
-  private inspector: HBaseSchemaInspector | null = null;
-  private connectionInstance: HBaseConnection | null = null;
 
-  /**
-   * Connect to HBase via the configured ZooKeeper quorum.
-   *
-   * The config object expects:
-   * - dbname        → unused (HBase doesn’t have a default “database”)
-   * - host          → ZooKeeper quorum (string, default 'localhost')
-   * - port          → ZooKeeper client port (string/number, default '2181')
-   * - user / password → if security enabled (e.g., Kerberos/Simple)
-   * - schema        → initial namespace (default: 'default')
-   * Additional HBase‑specific options can be passed via the inspector.
-   */
-  async connect(config: DatabaseConfig): Promise<DatabaseConnection> {
-    try {
-      this.inspector = new HBaseSchemaInspector({
-        zookeeperQuorum: config.host || 'localhost',
-        zookeeperPort: Number(config.port) || 2181,
-        user: config.user,
-        password: config.password,
-        namespace: config.schema || 'default', // HBase namespace
-        // Extra configuration (if any) can be spread here
-      });
+import axios, { AxiosInstance, AxiosRequestConfig, AxiosError } from 'axios';
 
-      await this.inspector.getConnection().connect();
-      this.connectionInstance = this.inspector.getConnection();
+// ============================================================================
+// Configuration & Core Types
+// ============================================================================
 
-      return this.connectionInstance as unknown as DatabaseConnection;
-    } catch (error) {
-      throw new Error(
-        `Failed to connect to HBase: ${error instanceof Error ? error.message : String(error)}`
-      );
-    }
+/** HBase connection configuration (REST Gateway) */
+interface HBaseConfig {
+  restUrl?: string;          // e.g., http://localhost:8080
+  namespace?: string;        // default namespace (schema equivalent)
+  username?: string;         // optional basic auth
+  password?: string;
+  timeout?: number;          // request timeout in ms (default 30000)
+  maxRetries?: number;
+  retryDelay?: number;
+}
+
+/** Column family / column information */
+interface ColumnInfo {
+  name: string;              // family name (or family:qualifier if needed)
+  type: string;              // 'column family' or actual type info
+  nullable?: boolean;
+  default?: string;
+  comment?: string;          // optional description
+  isIdentity?: boolean;
+  length?: number;
+  precision?: number;
+  scale?: number;
+  // HBase specific extensions
+  maxVersions?: number;
+  compression?: string;
+  ttl?: number;
+  blockCache?: boolean;
+  // Extra fields used by the adapter
+  ordinalPosition?: number;   // <-- NEW: used by adapter for column ordering
+  dataType?: string;          // <-- NEW: used by adapter as a second type field
+}
+
+/** Table metadata (identical structure to PostgreSQL inspector's TableInfo) */
+class TableInfo {
+  public tabletype: string = 'table';   // 'table' or 'view' (always table for HBase)
+  public comment?: string;
+  public rowCount?: number;
+  public size?: string;                 // optional size info from HBase
+
+  constructor(
+    public schemaname: string,          // namespace
+    public tablename: string,
+    public columns: ColumnInfo[] = [],
+    public next: TableInfo | null = null
+  ) {}
+
+  get num_columns(): number {
+    return this.columns.length;
   }
 
-  /**
-   * Disconnect from the HBase cluster.
-   */
-  async disconnect(_connection: DatabaseConnection): Promise<void> {
-    try {
-      if (this.connectionInstance) {
-        await this.connectionInstance.disconnect();
-      }
-      this.inspector = null;
-      this.connectionInstance = null;
-    } catch (error) {
-      console.error('Error disconnecting from HBase:', error);
-    }
+  get column_names(): string[] {
+    return this.columns.map(col => col.name);
   }
 
-  /**
-   * Test the connection by fetching the HBase version.
-   */
-  async testConnection(
-    config: DatabaseConfig
-  ): Promise<{ success: boolean; version?: string; error?: string }> {
-    let testInspector: HBaseSchemaInspector | null = null;
-    try {
-      testInspector = new HBaseSchemaInspector({
-        zookeeperQuorum: config.host || 'localhost',
-        zookeeperPort: Number(config.port) || 2181,
-        user: config.user,
-        password: config.password,
-        namespace: config.schema || 'default',
-      });
-
-      const result = await testInspector.testConnection();
-      return result;
-    } catch (error) {
-      return {
-        success: false,
-        error: error instanceof Error ? error.message : String(error),
-      };
-    } finally {
-      if (testInspector) {
-        try {
-          await testInspector.getConnection().disconnect();
-        } catch (_) {
-          /* ignore */
-        }
-      }
-    }
+  get column_types(): string[] {
+    return this.columns.map(col => col.type);
   }
 
-  /**
-   * Retrieve all tables in the current (or specified) namespace.
-   * Each column family is represented as a ColumnMetadata row.
-   */
-  async getTables(
-    _connection: DatabaseConnection,
-    options?: InspectionOptions
-  ): Promise<TableInfo[]> {
-    if (!this.inspector) {
-      throw new Error('Inspector not initialized. Call connect() first.');
-    }
-
-    try {
-      // Switch namespace if requested
-      if (options?.schema) {
-        this.inspector.setNamespace(options.schema);
-      }
-
-      const tables = await this.inspector.getTables();
-      return tables.map((table) => ({
-        schemaname: table.schemaname ?? options?.schema ?? 'default',
-        tablename: table.tablename,
-        tabletype: 'TABLE', // HBase does not have views
-        columns: (table.columns || []).map((col, idx) => ({
-          name: col.name, // Column family name
-          type: col.type || 'columnfamily',
-          dataType: col.dataType || col.type || 'columnfamily',
-          nullable: true,
-          comment: col.comment,
-          length: col.length,
-          precision: col.precision,
-          scale: col.scale,
-          ordinalPosition: col.ordinalPosition ?? idx + 1,
-        } as ColumnMetadata)),
-        comment: table.comment,
-        rowCount: table.rowCount, // May be undefined (expensive to compute)
-        size: table.size,
-        originalData: table,
-      }));
-    } catch (error) {
-      throw new Error(
-        `Failed to get tables from HBase: ${error instanceof Error ? error.message : String(error)}`
-      );
-    }
+  getColumn(name: string): ColumnInfo | undefined {
+    return this.columns.find(col => col.name === name);
   }
 
-  /**
-   * getTableColumns is a pass‑through because getTables already includes columns.
-   */
-  async getTableColumns(
-    _connection: DatabaseConnection,
-    tables: TableInfo[]
-  ): Promise<TableInfo[]> {
-    return tables;
-  }
-
-  /**
-   * Retrieve HBase version and cluster information.
-   */
-  async getDatabaseInfo(_connection: DatabaseConnection): Promise<DatabaseVersionInfo> {
-    if (!this.inspector) {
-      throw new Error('Inspector not initialized. Call connect() first.');
-    }
-
-    try {
-      const info = await this.inspector.getDatabaseInfo();
-      return {
-        version: info.version,
-        name: info.name,
-        encoding: undefined, // Not applicable
-        collation: undefined, // Not applicable
-      };
-    } catch (error) {
-      throw new Error(
-        `Failed to get HBase info: ${error instanceof Error ? error.message : String(error)}`
-      );
-    }
-  }
-
-  /**
-   * Execute a HBase operation expressed as a JSON command.
-   *
-   * The `sql` parameter must be a JSON string describing the action:
-   * {
-   *   "table": "my_table",
-   *   "action": "get" | "scan" | "put" | "delete" | "count" | "list",
-   *   ...other parameters per action
-   * }
-   *
-   * Examples:
-   * - get: { "table":"t", "action":"get", "rowKey":"row1" }
-   * - scan: { "table":"t", "action":"scan", "startRow":"", "stopRow":"", "limit":10 }
-   * - put: { "table":"t", "action":"put", "rowKey":"r1", "columns":{ "cf:qual":"value" } }
-   * - delete: { "table":"t", "action":"delete", "rowKey":"r1" }
-   *
-   * Returns a QueryResult with rows as arrays of key‑value objects.
-   */
-  async executeQuery(
-    _connection: DatabaseConnection,
-    sql: string,
-    options?: QueryExecutionOptions
-  ): Promise<QueryResult> {
-    if (!this.inspector) {
-      throw new Error('Inspector not initialized. Call connect() first.');
-    }
-
-    try {
-      const command = JSON.parse(sql);
-      const tableName = command.table;
-      if (!tableName) throw new Error('Missing "table" in HBase command');
-
-      const maxRows = options?.maxRows ?? 1000;
-      let rows: any[] = [];
-
-      switch (command.action) {
-        case 'get': {
-          const rowKey = command.rowKey;
-          if (!rowKey) throw new Error('"rowKey" required for get');
-          const result = await this.inspector.getRow(tableName, rowKey);
-          rows = result ? [result] : [];
-          break;
-        }
-        case 'scan': {
-          const scanner = await this.inspector.scanTable(tableName, {
-            startRow: command.startRow,
-            stopRow: command.stopRow,
-            limit: Math.min(command.limit || maxRows, maxRows),
-          });
-          rows = scanner;
-          break;
-        }
-        case 'put': {
-          const { rowKey, columns } = command;
-          if (!rowKey || !columns) throw new Error('"rowKey" and "columns" are required for put');
-          await this.inspector.putRow(tableName, rowKey, columns);
-          rows = [{ success: true }];
-          break;
-        }
-        case 'delete': {
-          const rowKey = command.rowKey;
-          if (!rowKey) throw new Error('"rowKey" required for delete');
-          await this.inspector.deleteRow(tableName, rowKey);
-          rows = [{ success: true }];
-          break;
-        }
-        case 'count': {
-          const count = await this.inspector.getRowCount(tableName);
-          rows = [{ count }];
-          break;
-        }
-        default:
-          throw new Error(`Unsupported HBase action: ${command.action}`);
-      }
-
-      return {
-        success: true,
-        rows,
-        fields: rows.length > 0 ? Object.keys(rows[0]) : [],
-        rowCount: rows.length,
-      };
-    } catch (error) {
-      return {
-        success: false,
-        error: error instanceof Error ? error.message : String(error),
-        rows: [],
-      };
-    }
-  }
-
-  /**
-   * Execute multiple HBase commands in sequence.
-   * HBase does not support true multi‑row transactions across different rows,
-   * so commands are executed sequentially; if one fails, subsequent commands
-   * are still attempted (best effort). A true atomic transaction must be
-   * implemented inside the inspector using checkAndMutate if needed.
-   */
-  async executeTransaction(
-    _connection: DatabaseConnection,
-    queries: Array<{ sql: string; params?: any[] }>
-  ): Promise<QueryResult[]> {
-    if (!this.inspector) {
-      throw new Error('Inspector not initialized. Call connect() first.');
-    }
-
-    const results: QueryResult[] = [];
-    for (const q of queries) {
-      const res = await this.executeQuery(_connection, q.sql);
-      results.push(res);
-    }
-    return results;
-  }
-
-  /**
-   * HBase does not enforce relational constraints – always returns an empty array.
-   */
-  async getTableConstraints(
-    _connection: DatabaseConnection,
-    _schema: string,
-    _table: string
-  ): Promise<any[]> {
-    return [];
-  }
-
-  /**
-   * Map HBase namespaces to the “schema” concept.
-   */
-  async getSchemas(connection: DatabaseConnection): Promise<string[]> {
-    if (!this.inspector) {
-      throw new Error('Inspector not initialized. Call connect() first.');
-    }
-
-    try {
-      return await this.inspector.listNamespaces();
-    } catch (error) {
-      console.error('Failed to list HBase namespaces:', error);
-      return ['default'];
-    }
-  }
-
-  /**
-   * HBase has no user‑defined functions – return an empty array.
-   */
-  async getFunctions(connection: DatabaseConnection, database?: string): Promise<any[]> {
-    return [];
-  }
-
-  /**
-   * HBase does not have native secondary indexes; return an empty array.
-   * (Phoenix or other SQL layers could be queried separately.)
-   */
-  async getIndexes(connection: DatabaseConnection, tableName?: string): Promise<any[]> {
-    return [];
+  hasColumn(name: string): boolean {
+    return this.columns.some(col => col.name === name);
   }
 }
 
-export default HBaseAdapter;
+/** Result of a query execution (scan or get) */
+interface QueryResult {
+  success: boolean;
+  rows?: any[];
+  rowCount?: number;
+  fields?: Array<{ name: string; type: string }>;
+  executionTime?: number;
+  error?: string;
+  affectedRows?: number;
+  command?: string;
+}
+
+// ============================================================================
+// Utilities & Logging
+// ============================================================================
+
+function getErrorMessage(error: unknown): string {
+  if (error instanceof Error) return error.message;
+  if (typeof error === 'string') return error;
+  return 'Unknown error occurred';
+}
+
+function isError(error: unknown): error is Error {
+  return error instanceof Error;
+}
+
+class Logger {
+  static logLevel: 'DEBUG' | 'INFO' | 'WARN' | 'ERROR' = 'INFO';
+
+  static setLogLevel(level: 'DEBUG' | 'INFO' | 'WARN' | 'ERROR'): void {
+    this.logLevel = level;
+  }
+
+  static debug(fmt: string, ...args: any[]): void {
+    if (this.logLevel === 'DEBUG') {
+      console.debug(`[DEBUG] ${this.format(fmt, args)}`);
+    }
+  }
+
+  static info(fmt: string, ...args: any[]): void {
+    if (['DEBUG', 'INFO'].includes(this.logLevel)) {
+      console.log(`[INFO] ${this.format(fmt, args)}`);
+    }
+  }
+
+  static warn(fmt: string, ...args: any[]): void {
+    if (['DEBUG', 'INFO', 'WARN'].includes(this.logLevel)) {
+      console.warn(`[WARN] ${this.format(fmt, args)}`);
+    }
+  }
+
+  static error(fmt: string, ...args: any[]): void {
+    console.error(`[ERROR] ${this.format(fmt, args)}`);
+  }
+
+  static fatal(fmt: string, ...args: any[]): never {
+    const msg = this.format(fmt, args);
+    console.error(`[FATAL] ${msg}`);
+    throw new Error(msg);
+  }
+
+  private static format(fmt: string, args: any[]): string {
+    return fmt.replace(/%(\w)/g, (_, spec) => {
+      if (args.length === 0) return `%${spec}`;
+      const val = args.shift();
+      return String(val);
+    });
+  }
+}
+
+// Custom error classes
+class HBaseConnectionError extends Error {
+  constructor(message: string, public code?: string, public originalError?: unknown) {
+    super(message);
+    this.name = 'HBaseConnectionError';
+  }
+}
+
+class HBaseQueryError extends Error {
+  constructor(message: string, public command: string, public originalError?: unknown) {
+    super(message);
+    this.name = 'HBaseQueryError';
+  }
+}
+
+// ============================================================================
+// HBase Connection Manager (REST client)
+// ============================================================================
+
+class HBaseConnection {
+  private client: AxiosInstance | null = null;
+  private isConnected: boolean = false;
+  private config: Required<Omit<HBaseConfig, 'username' | 'password'>> &
+    Pick<HBaseConfig, 'username' | 'password'>;
+
+  constructor(config: HBaseConfig) {
+    const defaulted = {
+      restUrl: 'http://localhost:8080',
+      namespace: 'default',
+      timeout: 30000,
+      maxRetries: 3,
+      retryDelay: 1000,
+      ...config,
+    };
+    this.config = {
+      restUrl: defaulted.restUrl!,
+      namespace: defaulted.namespace!,
+      timeout: defaulted.timeout!,
+      maxRetries: defaulted.maxRetries!,
+      retryDelay: defaulted.retryDelay!,
+      username: config.username,
+      password: config.password,
+    };
+  }
+
+  /** Establish connection – creates Axios instance and tests connectivity */
+  async connect(): Promise<void> {
+    if (this.isConnected && this.client) {
+      Logger.debug('HBase connection already established');
+      return;
+    }
+
+    const axiosConfig: AxiosRequestConfig = {
+      baseURL: this.config.restUrl,
+      timeout: this.config.timeout,
+      headers: {
+        'Accept': 'application/json',
+        'Content-Type': 'application/json',
+      },
+    };
+
+    if (this.config.username && this.config.password) {
+      axiosConfig.auth = {
+        username: this.config.username,
+        password: this.config.password,
+      };
+    }
+
+    let lastError: unknown = null;
+    for (let attempt = 1; attempt <= this.config.maxRetries; attempt++) {
+      try {
+        Logger.debug('HBase connection attempt %d/%d', attempt, this.config.maxRetries);
+        this.client = axios.create(axiosConfig);
+
+        // Test connectivity: get version info
+        const versionRes = await this.client.get('/version/cluster');
+        if (versionRes.status !== 200) {
+          throw new Error(`Unexpected status ${versionRes.status}`);
+        }
+
+        this.isConnected = true;
+        Logger.info('Successfully connected to HBase REST at %s (attempt %d)',
+          this.config.restUrl, attempt);
+        return;
+      } catch (error) {
+        lastError = error;
+        this.isConnected = false;
+        this.client = null;
+
+        Logger.warn('Connection attempt %d failed: %s', attempt, getErrorMessage(error));
+        if (attempt < this.config.maxRetries) {
+          const backoff = Math.min(1000 * Math.pow(2, attempt - 1), 10000);
+          await new Promise(resolve => setTimeout(resolve, backoff));
+        }
+      }
+    }
+
+    throw new HBaseConnectionError(
+      `Failed to connect to HBase REST after ${this.config.maxRetries} attempts: ${getErrorMessage(lastError)}`,
+      'ECONNFAILED',
+      lastError
+    );
+  }
+
+  /** Health check by requesting cluster status */
+  async checkHealth(): Promise<boolean> {
+    if (!this.isConnected || !this.client) return false;
+    try {
+      const res = await this.client.get('/status/cluster');
+      return res.status === 200;
+    } catch (error) {
+      this.isConnected = false;
+      Logger.error('Health check failed: %s', getErrorMessage(error));
+      return false;
+    }
+  }
+
+  /** Execute a REST request with retries – public for direct use by inspector */
+  public async request<T>(method: string, path: string, data?: any): Promise<T> {
+    if (!this.client) throw new HBaseConnectionError('Not connected');
+    try {
+      const response = await this.client.request({ method, url: path, data });
+      return response.data;
+    } catch (error) {
+      const axiosErr = error as AxiosError;
+      throw new HBaseQueryError(
+        `REST request failed: ${axiosErr.message}`,
+        `${method} ${path}`,
+        error
+      );
+    }
+  }
+
+  /** Perform an HBase scan using the scanner API */
+  async scan(
+    table: string,
+    options: {
+      startRow?: string;
+      endRow?: string;
+      columns?: string[];    // e.g., ["cf:col1", "cf:col2"]
+      limit?: number;
+      batchSize?: number;
+      reversed?: boolean;
+    } = {}
+  ): Promise<{ rows: any[]; count: number }> {
+    const scannerConfig: any = {};
+    if (options.startRow) scannerConfig.startRow = options.startRow;
+    if (options.endRow) scannerConfig.endRow = options.endRow;
+    if (options.columns) scannerConfig.columns = options.columns;
+    if (options.batchSize) scannerConfig.batch = options.batchSize;
+    if (options.reversed) scannerConfig.reversed = options.reversed;
+
+    const limit = options.limit ?? 0;
+    const batchSize = options.batchSize ?? 100;
+
+    try {
+      // 1. Create scanner
+      const scannerRes = await this.request<any>(
+        'POST',
+        `/${encodeURIComponent(table)}/scanner`,
+        scannerConfig
+      );
+      const scannerId = scannerRes?.scannerId;
+      if (!scannerId) throw new Error('No scannerId returned');
+
+      const rows: any[] = [];
+      let fetched = 0;
+      let stop = false;
+
+      while (!stop) {
+        const fetchRes = await this.request<any>(
+          'GET',
+          `/${encodeURIComponent(table)}/scanner/${scannerId}`,
+          undefined
+        );
+        const chunk = fetchRes?.rows || [];
+        rows.push(...chunk);
+        fetched += chunk.length;
+
+        if (chunk.length === 0 || (limit > 0 && fetched >= limit)) {
+          stop = true;
+        }
+        // Prevent infinite loops
+        if (chunk.length < batchSize && chunk.length > 0) {
+          stop = true;
+        }
+      }
+
+      // 2. Delete scanner
+      await this.request('DELETE', `/${encodeURIComponent(table)}/scanner/${scannerId}`);
+
+      const finalRows = limit > 0 ? rows.slice(0, limit) : rows;
+      return { rows: finalRows, count: finalRows.length };
+    } catch (error) {
+      throw new HBaseQueryError(`Scan failed on ${table}`, 'SCAN', error);
+    }
+  }
+
+  /** Get a single row from a table */
+  async get(table: string, rowKey: string, columns?: string[]): Promise<any> {
+    let url = `/${encodeURIComponent(table)}/${encodeURIComponent(rowKey)}`;
+    if (columns && columns.length) {
+      url += `?column=${columns.map(c => encodeURIComponent(c)).join(',')}`;
+    }
+    const data = await this.request<any>('GET', url);
+    return data?.Row || null;
+  }
+
+  /** List all tables (optionally filtered by namespace) */
+  async listTables(namespace?: string): Promise<string[]> {
+    const ns = namespace ?? this.config.namespace;
+    const path = ns === 'default'
+      ? '/'
+      : `/namespaces/${encodeURIComponent(ns)}/tables`;
+    const result = await this.request<any>('GET', path);
+    const tables: string[] = [];
+    if (result.tables) {
+      for (const t of result.tables) {
+        const name = typeof t === 'string' ? t : t.name;
+        tables.push(name);
+      }
+    } else if (Array.isArray(result)) {
+      tables.push(...result);
+    }
+    // names may include namespace:table, extract simple name
+    return tables.map(t => t.includes(':') ? t.split(':')[1] : t);
+  }
+
+  /** List all namespaces */
+  async listNamespaces(): Promise<string[]> {
+    const result = await this.request<any>('GET', '/namespaces');
+    if (result?.Namespace) {
+      return result.Namespace.map((ns: any) => ns.name ?? ns);
+    }
+    return [];
+  }
+
+  /** Describe table schema: column families */
+  async describeTable(table: string, namespace?: string): Promise<ColumnInfo[]> {
+    const ns = namespace ?? this.config.namespace;
+    const fullName = ns === 'default' ? table : `${ns}:${table}`;
+    const schema = await this.request<any>('GET', `/${encodeURIComponent(fullName)}/schema`);
+    const columns: ColumnInfo[] = [];
+    if (schema?.ColumnSchema) {
+      for (const cf of schema.ColumnSchema) {
+        const col: ColumnInfo = {
+          name: cf.name,
+          type: 'column family',
+          nullable: true,
+          comment: cf.DESCRIPTION || undefined,
+          maxVersions: cf.VERSIONS ? parseInt(cf.VERSIONS) : undefined,
+          compression: cf.COMPRESSION,
+          ttl: cf.TTL ? parseInt(cf.TTL) : undefined,
+          blockCache: cf.BLOCKCACHE === 'true',
+        };
+        columns.push(col);
+      }
+    }
+    return columns;
+  }
+
+  /** Close connection */
+  async disconnect(): Promise<void> {
+    if (this.client) {
+      Logger.debug('Closing HBase REST client');
+      this.client = null;
+      this.isConnected = false;
+      Logger.info('HBase connection closed');
+    }
+  }
+
+  getConfig(): Omit<HBaseConfig, 'password'> {
+    const { password, ...safe } = this.config;
+    return safe;
+  }
+
+  get connectionStatus(): { connected: boolean; healthy?: boolean } {
+    return { connected: this.isConnected, healthy: this.isConnected ? undefined : false };
+  }
+}
+
+// ============================================================================
+// HBase Schema Inspector (main facade)
+// ============================================================================
+
+class HBaseSchemaInspector {
+  private connection: HBaseConnection;
+  private namespace: string;
+
+  constructor(config: HBaseConfig) {
+    this.connection = new HBaseConnection(config);
+    this.namespace = config.namespace || 'default';
+  }
+
+  static setLogLevel(level: 'DEBUG' | 'INFO' | 'WARN' | 'ERROR'): void {
+    Logger.setLogLevel(level);
+  }
+
+  static validateConnectionConfig(config: HBaseConfig): string[] {
+    const errors: string[] = [];
+    if (config.restUrl && !config.restUrl.startsWith('http')) {
+      errors.push('restUrl must start with http:// or https://');
+    }
+    if (config.namespace && !/^[a-zA-Z0-9_]+$/.test(config.namespace)) {
+      errors.push('namespace contains invalid characters');
+    }
+    return errors;
+  }
+
+  // ---- Adapter-friendly methods ----
+
+  /** Alias for setSchema */
+  setNamespace(namespace: string): void {
+    this.setSchema(namespace);
+  }
+
+  /** List available namespaces */
+  async listNamespaces(): Promise<string[]> {
+    await this.connection.connect();
+    return this.connection.listNamespaces();
+  }
+
+  /** Get a single row */
+  async getRow(table: string, rowKey: string, columns?: string[]): Promise<any> {
+    await this.connection.connect();
+    return this.connection.get(table, rowKey, columns);
+  }
+
+  /** Scan a table */
+  async scanTable(
+    table: string,
+    options: {
+      startRow?: string;
+      stopRow?: string;
+      limit?: number;
+      columns?: string[];
+      reversed?: boolean;
+    } = {}
+  ): Promise<any[]> {
+    await this.connection.connect();
+    const result = await this.connection.scan(table, {
+      startRow: options.startRow,
+      endRow: options.stopRow,
+      limit: options.limit,
+      columns: options.columns,
+      reversed: options.reversed,
+    });
+    return result.rows;
+  }
+
+  /** Insert/update a row */
+  async putRow(table: string, rowKey: string, columns: Record<string, string>): Promise<void> {
+    await this.connection.connect();
+    const cells = Object.entries(columns).map(([col, val]) => ({
+      key: Buffer.from(rowKey).toString('base64'),
+      cell: [{
+        column: Buffer.from(col).toString('base64'),
+        $: Buffer.from(val).toString('base64'),
+      }],
+    }));
+    await this.connection.request('PUT', `/${encodeURIComponent(table)}/${encodeURIComponent(rowKey)}`, {
+      Row: cells,
+    });
+  }
+
+  /** Delete a row */
+  async deleteRow(table: string, rowKey: string): Promise<void> {
+    await this.connection.connect();
+    await this.connection.request('DELETE', `/${encodeURIComponent(table)}/${encodeURIComponent(rowKey)}`);
+  }
+
+  /** Estimate row count */
+  async getRowCount(table: string, maxScan: number = 100000): Promise<number> {
+    await this.connection.connect();
+    const result = await this.connection.scan(table, { limit: maxScan });
+    return result.count;
+  }
+
+  // ---- Original inspector methods ----
+
+  /** Test connectivity */
+  async testConnection(): Promise<{ success: boolean; version?: string; error?: string }> {
+    try {
+      await this.connection.connect();
+      const versionData = await this.connection.request<{ version?: string }>('GET', '/version/cluster');
+      const version = versionData?.version || 'unknown';
+      Logger.info('HBase connection test successful, version: %s', version);
+      return { success: true, version };
+    } catch (error) {
+      const msg = getErrorMessage(error);
+      Logger.error('Connection test failed: %s', msg);
+      return { success: false, error: msg };
+    } finally {
+      await this.connection.disconnect();
+    }
+  }
+
+  /** Execute a query using SCAN/GET shell syntax */
+  async executeQuery(
+    sql: string,
+    _params: any[] = [],
+    options: { maxRows?: number; timeout?: number; autoDisconnect?: boolean } = {}
+  ): Promise<QueryResult> {
+    const startTime = Date.now();
+    const { maxRows, autoDisconnect = false } = options;
+    try {
+      await this.connection.connect();
+
+      let command = sql.trim();
+      let resultRows: any[] = [];
+      let commandType = '';
+
+      const scanMatch = command.match(/^SCAN\s+['"]([^'"]+)['"](.*)$/i);
+      const getMatch = command.match(/^GET\s+['"]([^'"]+)['"]\s+['"]([^'"]+)['"](.*)$/i);
+
+      if (scanMatch) {
+        const table = scanMatch[1];
+        const rest = scanMatch[2];
+        const scanOptions = this.parseScanOptions(rest, maxRows);
+        const result = await this.connection.scan(table, scanOptions);
+        resultRows = result.rows;
+        commandType = 'SCAN';
+      } else if (getMatch) {
+        const table = getMatch[1];
+        const rowKey = getMatch[2];
+        const columnsPart = getMatch[3].trim();
+        let columns: string[] | undefined;
+        if (columnsPart && columnsPart.toUpperCase().startsWith('COLUMNS')) {
+          const colMatch = columnsPart.match(/COLUMNS\s+['"]([^'"]+)['"]/i);
+          if (colMatch) {
+            columns = colMatch[1].split(',').map(c => c.trim());
+          }
+        }
+        const row = await this.connection.get(table, rowKey, columns);
+        resultRows = row ? [row] : [];
+        commandType = 'GET';
+      } else {
+        throw new HBaseQueryError(
+          'Unsupported query. Use SCAN \'table\' ... or GET \'table\' \'rowkey\' ...',
+          command
+        );
+      }
+
+      const executionTime = Date.now() - startTime;
+      const fields = this.extractFieldsFromRows(resultRows);
+
+      return {
+        success: true,
+        rows: resultRows,
+        rowCount: resultRows.length,
+        fields,
+        executionTime,
+        command: commandType,
+        affectedRows: resultRows.length,
+      };
+    } catch (error) {
+      const executionTime = Date.now() - startTime;
+      const errorMessage = getErrorMessage(error);
+      Logger.error('Query execution failed: %s', errorMessage);
+      return {
+        success: false,
+        executionTime,
+        error: errorMessage,
+        rows: [],
+        rowCount: 0,
+      };
+    } finally {
+      if (autoDisconnect) {
+        await this.connection.disconnect();
+      }
+    }
+  }
+
+  /** Convenience: auto-disconnect after query */
+  async executeQueryAndDisconnect(sql: string, params: any[] = []): Promise<QueryResult> {
+    return this.executeQuery(sql, params, { autoDisconnect: true });
+  }
+
+  private parseScanOptions(rest: string, defaultLimit?: number): any {
+    const options: any = {};
+    const limit = defaultLimit ? Math.min(defaultLimit, 1000) : undefined;
+
+    const startMatch = rest.match(/STARTROW\s+['"]([^'"]+)['"]/i);
+    const endMatch = rest.match(/ENDROW\s+['"]([^'"]+)['"]/i);
+    const limitMatch = rest.match(/LIMIT\s+(\d+)/i);
+    const columnsMatch = rest.match(/COLUMNS\s+['"]([^'"]+)['"]/i);
+    const reversedMatch = rest.match(/REVERSED\s+true/i);
+
+    if (startMatch) options.startRow = startMatch[1];
+    if (endMatch) options.endRow = endMatch[1];
+    if (limitMatch) options.limit = parseInt(limitMatch[1], 10);
+    else if (limit) options.limit = limit;
+    if (columnsMatch) options.columns = columnsMatch[1].split(',').map(c => c.trim());
+    if (reversedMatch) options.reversed = true;
+
+    return options;
+  }
+
+  private extractFieldsFromRows(rows: any[]): Array<{ name: string; type: string }> {
+    if (!rows || rows.length === 0) return [];
+    const fieldSet = new Set<string>();
+    for (const row of rows) {
+      if (row.key) fieldSet.add('key');
+      if (row.cell) {
+        for (const cell of row.cell) {
+          const colName = `${cell.column}`;
+          fieldSet.add(colName);
+        }
+      }
+    }
+    return Array.from(fieldSet).map(name => ({ name, type: 'string' }));
+  }
+
+  /** Retrieve all tables (with column families) */
+  async getTables(): Promise<TableInfo[]> {
+    await this.connection.connect();
+    const tables: TableInfo[] = [];
+
+    try {
+      const tableNames = await this.connection.listTables(this.namespace);
+      Logger.info('Found %d tables in namespace "%s"', tableNames.length, this.namespace);
+
+      for (const tableName of tableNames) {
+        const columns = await this.connection.describeTable(tableName, this.namespace);
+        const table = new TableInfo(this.namespace, tableName, columns);
+        table.tabletype = 'table';
+        table.rowCount = 0;
+        table.size = 'N/A';
+        tables.push(table);
+      }
+      return tables;
+    } catch (error) {
+      Logger.error('Failed to retrieve tables: %s', getErrorMessage(error));
+      throw error;
+    }
+  }
+
+  /** Get a single table by name */
+  async getTable(tableName: string): Promise<TableInfo | null> {
+    const allTables = await this.getTables();
+    return allTables.find(t => t.tablename === tableName) || null;
+  }
+
+  /** Get cluster information */
+  async getDatabaseInfo(): Promise<{
+    version: string;
+    name: string;
+    encoding: string;
+    collation: string;
+  }> {
+    await this.connection.connect();
+    try {
+      const versionData = await this.connection.request<{ version?: string }>('GET', '/version/cluster');
+      const version = versionData?.version || 'unknown';
+      return {
+        version,
+        name: `HBase_${this.namespace}`,
+        encoding: 'UTF-8',
+        collation: 'binary',
+      };
+    } catch (error) {
+      Logger.error('Failed to get database info: %s', getErrorMessage(error));
+      throw error;
+    }
+  }
+
+  /** Direct access to connection */
+  getConnection(): HBaseConnection {
+    return this.connection;
+  }
+
+  /** Get current namespace */
+  getCurrentSchema(): string {
+    return this.namespace;
+  }
+
+  /** Set namespace (schema) for operations */
+  setSchema(schema: string): void {
+    this.namespace = schema;
+    Logger.debug('Namespace set to: %s', schema);
+  }
+
+  /** Transaction (not supported in HBase) */
+  async executeTransaction(): Promise<QueryResult[]> {
+    throw new Error('Transactions are not supported in HBase');
+  }
+
+  /** Convert TableInfo list to standardized format */
+  static toStandardizedFormat(tables: TableInfo[]): any[] {
+    return tables.map(table => ({
+      schemaname: table.schemaname,
+      tablename: table.tablename,
+      tabletype: table.tabletype,
+      columns: table.columns.map(col => ({
+        name: col.name,
+        type: col.type,
+        nullable: col.nullable,
+        default: col.default,
+        comment: col.comment,
+        maxVersions: col.maxVersions,
+        compression: col.compression,
+        ttl: col.ttl,
+      })),
+      comment: table.comment,
+      rowCount: table.rowCount,
+      size: table.size,
+      originalData: table,
+    }));
+  }
+}
+
+// ============================================================================
+// Exports
+// ============================================================================
+
+export {
+  HBaseSchemaInspector,
+  HBaseConnection,
+  TableInfo,
+  Logger,
+  HBaseConnectionError,
+  HBaseQueryError,
+  getErrorMessage,
+  isError,
+};
+
+export type {
+  ColumnInfo,
+  HBaseConfig,
+  QueryResult,
+};
+
+export default HBaseSchemaInspector;

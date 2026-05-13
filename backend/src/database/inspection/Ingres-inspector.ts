@@ -3,18 +3,20 @@
  * Comprehensive schema inspection with robust error handling and connection management
  * TypeScript implementation optimized for DatabaseMetadataWizard integration
  *
- * NOTE: This implementation assumes a hypothetical Ingres driver with a callback-based
- *       query interface. Replace the driver import with the actual package you wish to use.
- *       For example: npm install ingres (or another community package).
+ * NOTE: This implementation uses a generic ODBC driver to connect to Ingres.
+ *       It replaces the previous native driver layer while preserving the same
+ *       inspector behaviour and Ingres-specific SQL queries.
+ *
+ *       Required Node.js package: `odbc` (npm install odbc)
  */
 
-import { IngresClient } from 'ingres'; // Placeholder: actual driver may differ
+import * as odbc from 'odbc';  // Generic ODBC driver for Node.js
 
 // Database connection configuration
 interface DatabaseConfig {
   dbname: string;           // Ingres database name (effective database)
   host?: string;            // Ingres host (default: 'localhost')
-  port?: string;            // Port (default: 'II7' or '21064' depending on driver)
+  port?: string;            // Port (default: '21064')
   user?: string;            // Username
   password?: string;        // Password
   schema?: string;          // Target schema (default: 'ingres' or user name)
@@ -152,7 +154,7 @@ class Logger {
 }
 
 /**
- * Ingres Connection Error Types
+ * Ingres Connection Error Types (unchanged)
  */
 class IngresConnectionError extends Error {
   constructor(
@@ -178,18 +180,41 @@ class IngresQueryError extends Error {
 }
 
 /**
- * Ingres Connection Manager
- * Manages a single connection (similar to Vertica/Teradata managers).
+ * Ingres Connection Manager – now based on a generic ODBC driver.
+ * Manages a single ODBC connection (and an optional pool).
  */
 class IngresConnectionManager {
-  private connection: any = null; // IngresClient instance
+  private connection: odbc.Connection | null = null;
+  private pool: odbc.Pool | null = null;
   private isConnected: boolean = false;
   private readonly maxRetries: number = 3;
 
   constructor(private config: DatabaseConfig) {}
 
   /**
-   * Initializes the Ingres connection.
+   * Build ODBC connection string from the configuration.
+   */
+  private buildConnectionString(): string {
+    const host = this.config.host || 'localhost';
+    const port = this.config.port || '21064';
+    const user = this.config.user || '';
+    const password = this.config.password || '';
+    const dbname = this.config.dbname;
+
+    // Typical Ingres ODBC connection string. The DRIVER name may need to be
+    // adjusted for different environments (e.g., "Ingres", "Ingres II").
+    return (
+      `DRIVER={Ingres};` +
+      `SERVER=${host};` +
+      `PORT=${port};` +
+      `DATABASE=${dbname};` +
+      `UID=${user};` +
+      `PWD=${password}`
+    );
+  }
+
+  /**
+   * Initializes the ODBC connection.
    */
   async connect(): Promise<void> {
     if (this.isConnected && this.connection) {
@@ -197,33 +222,26 @@ class IngresConnectionManager {
       return;
     }
 
-    const connectionConfig = {
-      host: this.config.host || 'localhost',
-      port: this.config.port ? parseInt(this.config.port) : 21064, // Default Ingres II port
-      user: this.config.user || '',
-      password: this.config.password || '',
-      database: this.config.dbname,
-      appName: 'schema_inspector',
-      timeout: this.config.connectionTimeout || 30000,
-    };
-
+    const connectionString = this.buildConnectionString();
     let lastError: unknown = null;
 
     for (let attempt = 1; attempt <= this.maxRetries; attempt++) {
       try {
         Logger.debug('connection attempt %d/%d', attempt, this.maxRetries);
 
-        this.connection = new IngresClient();
-        await this.connection.connect(connectionConfig);
+        this.connection = await odbc.connect(connectionString);
+        this.isConnected = true;
 
         // Test connection
-        const result = await this.queryAsync('SELECT 1 AS connection_test');
-        if (!result || result.rowCount === 0) {
+        const result = await this.connection.query('SELECT 1 AS connection_test');
+        if (!result || result.length === 0) {
           throw new Error('Connection test returned no rows');
         }
 
-        this.isConnected = true;
-        Logger.info('successfully connected to Ingres database "%s" (attempt %d)',
+        // Create a pool for transactional work if needed later
+        this.pool = await odbc.pool(connectionString);
+
+        Logger.info('successfully connected to Ingres database "%s" via ODBC (attempt %d)',
           this.config.dbname, attempt);
         return;
 
@@ -248,25 +266,10 @@ class IngresConnectionManager {
     }
 
     throw new IngresConnectionError(
-      `Failed to connect to Ingres database "${this.config.dbname}" after ${this.maxRetries} attempts: ${getErrorMessage(lastError)}`,
+      `Failed to connect to Ingres database "${this.config.dbname}" via ODBC after ${this.maxRetries} attempts: ${getErrorMessage(lastError)}`,
       'ECONNFAILED',
       lastError
     );
-  }
-
-  /**
-   * Internal helper to promisify the query call (assuming callback-based driver).
-   */
-  private queryAsync(sql: string): Promise<any> {
-    return new Promise((resolve, reject) => {
-      this.connection.query(sql, (err: any, rows: any[], rowCount: number, fields: any[]) => {
-        if (err) {
-          reject(err);
-        } else {
-          resolve({ rows, rowCount, fields });
-        }
-      });
-    });
   }
 
   /**
@@ -277,8 +280,8 @@ class IngresConnectionManager {
       return false;
     }
     try {
-      const result = await this.queryAsync('SELECT 1 AS health_check');
-      return result && result.rowCount > 0;
+      const result = await this.connection.query('SELECT 1 AS health_check');
+      return Array.isArray(result) && result.length > 0;
     } catch (error) {
       this.isConnected = false;
       Logger.error('connection health check failed: %s', getErrorMessage(error));
@@ -298,6 +301,7 @@ class IngresConnectionManager {
 
   /**
    * Execute a parameterized query with $1, $2, ... substitution.
+   * (Manual escaping is preserved; the final SQL string is sent directly to ODBC.)
    */
   async query(sql: string, params: any[] = []): Promise<any> {
     this.validateQueryParameters(sql, params);
@@ -314,13 +318,20 @@ class IngresConnectionManager {
 
     const startTime = Date.now();
     try {
-      const result = await this.queryAsync(finalSql);
+      // ODBC query returns an array of rows (plain objects)
+      const rows = await this.connection.query(finalSql);
+      const rowCount = Array.isArray(rows) ? rows.length : 0;
       const duration = Date.now() - startTime;
-      Logger.debug('query completed in %d ms, %d rows returned',
-        duration, result.rowCount || 0);
-      return result;
+      Logger.debug('query completed in %d ms, %d rows returned', duration, rowCount);
+
+      // Mimic the previous return shape: { rows, rowCount, fields }
+      // Fields metadata is not directly available from odbc.query; we return an empty array.
+      return {
+        rows,
+        rowCount,
+        fields: []
+      };
     } catch (error) {
-      const duration = Date.now() - startTime;
       if (this.isConnectionError(error)) {
         this.isConnected = false;
         Logger.warn('connection lost during query');
@@ -372,7 +383,7 @@ class IngresConnectionManager {
   }
 
   /**
-   * Validate query parameters (unchanged logic)
+   * Validate query parameters (unchanged)
    */
   private validateQueryParameters(sql: string, params: any[] = []): void {
     if (!sql || typeof sql !== 'string') {
@@ -401,13 +412,14 @@ class IngresConnectionManager {
 
   /**
    * Determine if error is a connection-level error
+   * (Enhanced with ODBC-related keywords.)
    */
   private isConnectionError(error: unknown): boolean {
     const errorMessage = getErrorMessage(error).toLowerCase();
     const connectionErrors = [
       'econnreset', 'econnrefused', 'epipe', 'etimedout',
       'connection', 'connect', 'socket', 'network', 'terminated',
-      'closed', 'refused', 'ingres'
+      'closed', 'refused', 'odbc', 'driver'
     ];
     return connectionErrors.some(connError =>
       errorMessage.includes(connError.toLowerCase())
@@ -415,12 +427,12 @@ class IngresConnectionManager {
   }
 
   /**
-   * Closes the Ingres connection.
+   * Closes the ODBC connection.
    */
   async disconnect(): Promise<void> {
     if (this.connection) {
       try {
-        Logger.debug('closing Ingres connection');
+        Logger.debug('closing ODBC connection');
         this.connection.close();
         Logger.info('connection closed successfully');
       } catch (error) {
@@ -433,17 +445,33 @@ class IngresConnectionManager {
   }
 
   /**
-   * Mock getPool to maintain interface compatibility.
+   * Returns an object that mimics a pool interface.
+   * It uses the internal ODBC pool to provide connection clients for transactions.
    */
   getPool(): any {
-    if (!this.connection) return null;
+    if (!this.pool) {
+      return null;
+    }
     return {
-      connect: async () => ({
-        query: (sql: string, params?: any[]) => this.query(sql, params),
-        release: () => {},
-        on: () => {},
-        off: () => {},
-      })
+      connect: async () => {
+        const conn = await this.pool!.connect();
+        return {
+          query: async (sql: string, _params?: any[]) => {
+            // params are already substituted; no further binding needed
+            const rows = await conn.query(sql);
+            return {
+              rows,
+              rowCount: Array.isArray(rows) ? rows.length : 0,
+              fields: []
+            };
+          },
+          release: () => {
+            try { conn.close(); } catch {}
+          },
+          on: () => {},
+          off: () => {},
+        };
+      }
     };
   }
 
@@ -459,14 +487,18 @@ class IngresConnectionManager {
 /**
  * Enhanced Ingres Schema Inspector with Query Execution
  * Comprehensive metadata extraction with robust error handling
+ *
+ * (This class is unchanged except for the underlying ODBC connection manager;
+ *  it still uses Ingres‑specific system catalogs like iitables, iicolumns, etc.)
  */
 class IngresSchemaInspector {
   private connection: IngresConnectionManager;
   private schema: string;
+  private config: DatabaseConfig;   // ADDED to fix TS2339 error
 
   constructor(config: DatabaseConfig) {
+    this.config = config;           // ASSIGN config so it can be used elsewhere
     this.connection = new IngresConnectionManager(config);
-    // Ingres default schema is often the user name if not specified
     this.schema = config.schema || config.user || 'ingres';
   }
 
@@ -510,7 +542,6 @@ class IngresSchemaInspector {
     try {
       await this.connection.connect();
 
-      // Ingres version info via dbmsinfo('_version') or dbmsinfo('version')
       let version = 'Unknown';
       try {
         const result = await this.connection.query("SELECT dbmsinfo('_version') AS version");
@@ -518,7 +549,6 @@ class IngresSchemaInspector {
           version = result.rows[0].version;
         }
       } catch {
-        // Fallback
         version = 'Ingres (version unknown)';
       }
 
@@ -570,10 +600,7 @@ class IngresSchemaInspector {
       const result = await this.connection.query(finalSql, params);
       const executionTime = Date.now() - startTime;
 
-      const fields = result.fields?.map((field: any) => ({
-        name: field.name,
-        type: field.type || field.dataType
-      })) || [];
+      const fields = result.fields || [];
 
       const queryResult: QueryResult = {
         success: true,
@@ -611,17 +638,14 @@ class IngresSchemaInspector {
 
   /**
    * Apply row limit to SELECT queries (Ingres uses FETCH FIRST n ROWS ONLY or LIMIT n).
-   * We'll use FETCH FIRST syntax for broader compatibility.
    */
   private applyRowLimit(sql: string, maxRows: number): string {
     const trimmed = sql.trim();
     const upperSql = trimmed.toUpperCase();
 
     if (upperSql.startsWith('SELECT')) {
-      // Remove any existing FETCH FIRST clause
       const fetchRegex = /FETCH\s+FIRST\s+\d+\s+ROWS\s+ONLY$/i;
       let baseSql = trimmed.replace(fetchRegex, '').trim();
-      // Avoid adding to subqueries; simplest approach: append
       return `${baseSql} FETCH FIRST ${maxRows} ROWS ONLY`;
     }
     return sql;
@@ -785,11 +809,10 @@ class IngresSchemaInspector {
   }
 
   /**
-   * Enrich table with size and row count (using system procedure ifavailable)
+   * Enrich table with size and row count
    */
   private async enrichTableMetadata(table: TableInfo): Promise<void> {
     try {
-      // Attempt to get row count from statistics (may not be present)
       const countQuery = `
         SELECT num_rows 
         FROM iitables 
@@ -803,7 +826,6 @@ class IngresSchemaInspector {
         }
       }
 
-      // Table size is not directly available in Ingres system catalogs; skip.
       table.size = 'N/A';
     } catch (error) {
       Logger.warn('failed to enrich metadata for table %s: %s', table.tablename, getErrorMessage(error));
@@ -839,7 +861,7 @@ class IngresSchemaInspector {
       return {
         version,
         name: this.config.dbname,
-        encoding: 'ISO-8859-1',  // Ingres default
+        encoding: 'ISO-8859-1',
         collation: 'N/A'
       };
     } catch (error) {
@@ -871,7 +893,7 @@ class IngresSchemaInspector {
   }
 
   /**
-   * Utility method to convert table list to array (unchanged)
+   * Utility method to convert table list to array
    */
   static flattenTableList(tables: TableInfo | TableInfo[]): TableInfo[] {
     if (Array.isArray(tables)) {
@@ -887,7 +909,7 @@ class IngresSchemaInspector {
   }
 
   /**
-   * Generate standardized table metadata for DatabaseMetadataWizard (unchanged)
+   * Generate standardized table metadata for DatabaseMetadataWizard
    */
   static toStandardizedFormat(tables: TableInfo[]): any[] {
     return tables.map(table => ({

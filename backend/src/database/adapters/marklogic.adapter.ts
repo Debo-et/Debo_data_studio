@@ -5,7 +5,6 @@ import {
   DatabaseConnection,
   QueryResult,
   TableInfo,
-  ColumnMetadata,
   DatabaseConfig,
   InspectionOptions,
   QueryExecutionOptions,
@@ -14,7 +13,7 @@ import {
 
 // Assumes the `marklogic` package is installed:
 // npm install marklogic @types/marklogic --save
-import marklogic, { DatabaseClient, documents, evalResult } from 'marklogic';
+import marklogic, { DatabaseClient } from 'marklogic';
 
 // -------- MarkLogic Connection Wrapper --------
 export class MarkLogicConnection implements DatabaseConnection {
@@ -22,6 +21,10 @@ export class MarkLogicConnection implements DatabaseConnection {
   private configBrief: { host: string; port: string; database: string } | null = null;
 
   constructor() {}
+
+  get connected(): boolean {
+    return this.client !== null;
+  }
 
   async connect(config: {
     host: string;
@@ -158,7 +161,7 @@ class MarkLogicInspector {
       columns: [],                        // schema-less
       comment: '',
       rowCount: Number(row.docCount),
-      size: Number(row.sizeKB) * 1024,    // convert KB to bytes
+      size: (Number(row.sizeKB) * 1024).toString(),    // convert KB to bytes and store as string
       originalData: row,
     }));
   }
@@ -226,10 +229,18 @@ class MarkLogicInspector {
         rows = rows.slice(0, options.maxRows);
       }
 
+      // Build fields array with name and type, inferring basic types
+      const fields = rows.length > 0
+        ? Object.keys(rows[0]).map(key => ({
+            name: key,
+            type: typeof rows[0][key] === 'number' ? 'number' : 'string'
+          }))
+        : [];
+
       return {
         success: true,
         rows,
-        fields: rows.length > 0 ? Object.keys(rows[0]) : [],
+        fields,
         rowCount: rows.length,
         executionTime: Date.now() - start,
       };
@@ -295,7 +306,7 @@ export class MarkLogicAdapter implements IBaseDatabaseInspector {
     return tempInspector.testConnection();
   }
 
-  async getTables(_connection: DatabaseConnection, options?: InspectionOptions): Promise<TableInfo[]> {
+  async getTables(_connection: DatabaseConnection, _options?: InspectionOptions): Promise<TableInfo[]> {
     if (!this.inspector) throw new Error('Inspector not initialized. Call connect() first.');
     return this.inspector.getTables();
   }
@@ -361,7 +372,7 @@ export class MarkLogicAdapter implements IBaseDatabaseInspector {
     return [];
   }
 
-  async getIndexes(connection: DatabaseConnection, tableName?: string): Promise<any[]> {
+  async getIndexes(_connection: DatabaseConnection, tableName?: string): Promise<any[]> {
     if (!this.inspector) throw new Error('Inspector not initialized.');
     // Retrieve range indexes, word lexicons, etc. using management API or cts:indexes
     const client = this.connectionInstance?.getClient();

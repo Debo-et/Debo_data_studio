@@ -12,18 +12,17 @@
     "build": "npm run build:client && npm run build:electron && npm run build:backend",
     "build:client": "cd client && npm run build",
     "build:electron": "tsc -p electron/tsconfig.json",
-    "build:backend": "cd backend && npm run build",
+    "build:backend": "cd backend && npm install --production && npm run build",
     "prepack": "npm run build",
-    "dist": "npm run build && electron-builder",
-    "dist:win": "npm run build && electron-builder --win",
-    "dist:mac": "npm run build && electron-builder --mac",
+    "dist": "npm run prepack && electron-builder",
+    "dist:win": "npm run prepack && electron-builder --win",
+    "dist:mac": "npm run prepack && electron-builder --mac",
+    "dist:linux": "npm run prepack && electron-builder --linux",
     "dev:full": "node dev.js",
-
-  "clean": "npm run clean:client && npm run clean:electron && npm run clean:backend",
-  "clean:client": "cd client && npm run clean",
-  "clean:electron": "rm -rf dist-electron",
-  "clean:backend": "cd backend && rm -rf dist node_modules/.vite",
-    "dist:linux": "npm run build && electron-builder --linux"
+    "clean": "npm run clean:client && npm run clean:electron && npm run clean:backend",
+    "clean:client": "cd client && npm run clean",
+    "clean:electron": "rm -rf dist-electron",
+    "clean:backend": "cd backend && rm -rf node_modules dist"
   },
   "build": {
     "appId": "com.yourcompany.debodatastudio",
@@ -34,15 +33,18 @@
     "files": [
       "dist-electron/**/*",
       "client/dist/**/*",
-      "backend/dist/**/*",
-      "node_modules/**/*",
       "!**/*.ts",
       "!**/*.map",
       "!**/test{,/**}",
       "!**/.git"
     ],
-    "asarUnpack": [
-      "backend/dist/**/*"
+    "asarUnpack": [],
+    "extraResources": [
+      {
+        "from": "backend",
+        "to": "backend",
+        "filter": ["**/*"]
+      }
     ],
     "win": {
       "target": "nsis",

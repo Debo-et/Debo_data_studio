@@ -15,13 +15,13 @@ import {
 // ------------------------------------------------------------------
 // Internal MongoDB connection wrapper (can be moved to its own module)
 // ------------------------------------------------------------------
-import { MongoClient, Db, Collection, Document, ServerApiVersion } from 'mongodb';
+import { MongoClient, Db,  ServerApiVersion, ObjectId } from 'mongodb';
 
 class MongoDBConnection {
   private client: MongoClient;
   private db: Db | null = null;
 
-  constructor(private uri: string, private dbName: string) {
+  constructor(uri: string, private dbName: string) {
     this.client = new MongoClient(uri, {
       serverApi: { version: ServerApiVersion.v1, strict: true, deprecationErrors: true },
       // Additional options can be passed via connect
@@ -239,7 +239,7 @@ export class MongoDBAdapter implements IBaseDatabaseInspector {
 
     try {
       const adminDb = this.connectionInstance.nativeClient.db('admin');
-      const [buildInfo, serverStatus] = await Promise.all([
+      const [buildInfo] = await Promise.all([
         adminDb.command({ buildInfo: 1 }),
         adminDb.command({ serverStatus: 1 }),
       ]);
@@ -334,10 +334,21 @@ export class MongoDBAdapter implements IBaseDatabaseInspector {
           throw new Error(`Unsupported MongoDB action: ${queryObj.action}`);
       }
 
+      // Build fields metadata from the first result row (if any)
+      let fields: { name: string; type: string }[] = [];
+      if (rows.length > 0) {
+        fields = Object.entries(rows[0]).map(([name, value]) => ({
+          name,
+          type: value instanceof Date ? 'date'
+                : value instanceof ObjectId ? 'objectId'
+                : typeof value,
+        }));
+      }
+
       return {
         success: true,
         rows,
-        fields: rows.length > 0 ? Object.keys(rows[0]) : [],
+        fields,
         rowCount: rows.length,
       };
     } catch (error) {
@@ -397,7 +408,7 @@ export class MongoDBAdapter implements IBaseDatabaseInspector {
   /**
    * Get MongoDB databases (schemas).
    */
-  async getSchemas(connection: DatabaseConnection): Promise<string[]> {
+  async getSchemas(_connection: DatabaseConnection): Promise<string[]> {
     if (!this.connectionInstance) {
       throw new Error('Inspector not initialized. Call connect() first.');
     }
@@ -415,7 +426,7 @@ export class MongoDBAdapter implements IBaseDatabaseInspector {
   /**
    * MongoDB has no UDFs; return empty array.
    */
-  async getFunctions(connection: DatabaseConnection, database?: string): Promise<any[]> {
+  async getFunctions(): Promise<any[]> {
     return []; // No functions equivalent
   }
 
@@ -423,7 +434,7 @@ export class MongoDBAdapter implements IBaseDatabaseInspector {
    * List indexes for a given collection (table).
    * If tableName is not provided, returns indexes for all collections in current db.
    */
-  async getIndexes(connection: DatabaseConnection, tableName?: string): Promise<any[]> {
+  async getIndexes(tableName?: string): Promise<any[]> {
     if (!this.connectionInstance) {
       throw new Error('Inspector not initialized. Call connect() first.');
     }

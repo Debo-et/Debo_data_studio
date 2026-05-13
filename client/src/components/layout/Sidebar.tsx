@@ -19,6 +19,7 @@ import LDAPConnectionWizard from '../../Wizard/LDAPConnectionWizard';
 import AvroMetadataWizard from '../../Wizard/AvroMetadataWizard';
 import ParquetMetadataWizard from '../../Wizard/ParquetMetadataWizard';
 
+
 // Import React components from Wizard
 import ContextMenu from '../../Wizard/ContextMenu';
 
@@ -42,7 +43,6 @@ import { Plus, Layers, RefreshCw, Trash2 } from 'lucide-react';
 import * as XLSX from 'xlsx';
 
 // Import Canvas Design Service and Hook
-import { CanvasDesignManager } from '../../services/canvas-design.service';
 import { useCanvasDesign } from '../../hooks/useCanvasDesign';
 import { COMPONENT_REGISTRY, getCategoryColor } from '@/pages/ComponentRegistry';
 
@@ -124,7 +124,9 @@ const getDefaultRepositoryStructure = (): RepositoryNode[] => {
         { id: 'file-schema', name: 'File Schema', type: 'category', children: [], draggable: false, metadata: { type: 'category', count: 0 } },
         { id: 'file-regex', name: 'Regex Patterns', type: 'category', children: [], draggable: false, metadata: { type: 'category', count: 0 } },
         { id: 'file-ldif', name: 'LDIF', type: 'category', children: [], draggable: false, metadata: { type: 'category', count: 0 } },
-        { id: 'file-json-avro-parquet', name: 'JSON/Avro/Parquet', type: 'category', children: [], draggable: false, metadata: { type: 'category', count: 0 } },
+        { id: 'file-json',    name: 'JSON',    type: 'category', children: [], draggable: false, metadata: { type: 'category', count: 0 } },
+{ id: 'file-avro',    name: 'Avro',    type: 'category', children: [], draggable: false, metadata: { type: 'category', count: 0 } },
+{ id: 'file-parquet', name: 'Parquet', type: 'category', children: [], draggable: false, metadata: { type: 'category', count: 0 } },
         { id: 'web-service', name: 'Web Service', type: 'category', children: [], draggable: false, metadata: { type: 'category', count: 0 } },
         { id: 'ldap', name: 'LDAP', type: 'folder', children: [], draggable: false, metadata: { type: 'folder', count: 0 } },
         { id: 'ftp-sftp', name: 'FTP/SFTP', type: 'folder', children: [], draggable: false, metadata: { type: 'folder', count: 0 } },
@@ -190,9 +192,9 @@ function determineFolderId(fileType: string): string | null {
     case 'fixed':
     case 'positional': return 'file-positional';
     case 'schema': return 'file-schema';
-    case 'json':
-    case 'avro':
-    case 'parquet': return 'file-json-avro-parquet';
+    case 'json':    return 'file-json';
+    case 'avro':    return 'file-avro';
+    case 'parquet': return 'file-parquet';
     case 'regex': return 'file-regex';
     case 'ldif': return 'file-ldif';
     case 'web-service': return 'web-service';
@@ -444,6 +446,7 @@ const RepositorySidebar: React.FC<EnhancedRepositorySidebarProps> = ({
   const [salesforceWizardOpen, setSalesforceWizardOpen] = useState(false);
   const [avroWizardOpen, setAvroWizardOpen] = useState(false);
 const [parquetWizardOpen, setParquetWizardOpen] = useState(false);
+const [jsonWizardOpen, setJsonWizardOpen] = useState(false);
 
   const contextMenuRef = useRef<HTMLDivElement>(null);
   const jobDesignContextMenuRef = useRef<HTMLDivElement>(null);
@@ -1340,6 +1343,11 @@ const confirmDeleteNode = useCallback(async () => {
     setContextMenu(null);
   }, []);
 
+  const handleOpenJsonWizard = useCallback(() => {
+  setJsonWizardOpen(true);
+  setContextMenu(null);
+}, []);
+
   const handleOpenXMLWizard = useCallback(() => {
     console.log('🔵 Opening XML wizard');
     setXmlWizardOpen(true);
@@ -1364,11 +1372,6 @@ const confirmDeleteNode = useCallback(async () => {
     setContextMenu(null);
   }, []);
 
-  const handleOpenJsonAvroParquetWizard = useCallback(() => {
-    console.log('🔵 Opening JSON/Avro/Parquet wizard');
-    setJsonAvroParquetWizardOpen(true);
-    setContextMenu(null);
-  }, []);
 
   const handleOpenRegexWizard = useCallback(() => {
     console.log('🔵 Opening Regex wizard');
@@ -1965,8 +1968,9 @@ const handleSaveJsonAvroParquetMetadata = useCallback(async (metadata: any) => {
       // Convert via backend
       const csvPath = await convertFileViaBackend(
         metadata.file,
-        '/api/convert/avro',
+        '/api/convert/structured',           // ✅ Correct unified endpoint
         {
+          format: 'avro',                    // ✅ Required format parameter
           columns: JSON.stringify(metadata.schema || []),
         }
       );
@@ -2010,10 +2014,18 @@ const handleSaveJsonAvroParquetMetadata = useCallback(async (metadata: any) => {
         options,
       });
 
+      // Determine the correct folder ID for the sidebar tree
+      const folderIdMap: Record<string, string> = {
+        json: 'file-json',
+        avro: 'file-avro',
+        parquet: 'file-parquet',
+      };
+      const folderId = folderIdMap[format] || 'file-json';
+
       // Notify sidebar tree
       window.dispatchEvent(
         new CustomEvent('metadata-created', {
-          detail: { metadata, type: 'avro', folderId: 'file-json-avro-parquet' },
+          detail: { metadata, type: 'avro', folderId },
         })
       );
 
@@ -2022,9 +2034,71 @@ const handleSaveJsonAvroParquetMetadata = useCallback(async (metadata: any) => {
     }
 
     // ──────────────────────────────────────────────────────────────
-    // JSON & Parquet – use the existing client‑side Web Worker
+    // 🚀 Parquet – handled by backend to avoid WASM MIME issues
     // ──────────────────────────────────────────────────────────────
-    console.log('🔄 [JSON/Parquet] Starting client‑side conversion');
+    if (format === 'parquet') {
+      console.log('🔄 [Parquet] Delegating conversion to backend');
+
+      const csvPath = await convertFileViaBackend(
+        metadata.file,
+        '/api/convert/structured',
+        { format: 'parquet' }
+      );
+
+      console.log('✅ [Parquet] Converted to CSV at:', csvPath);
+
+      const columns = (metadata.schema || []).map((col: any) => ({
+        name: col.name,
+        type: col.type,
+        nullable: true,
+      }));
+
+      if (columns.length === 0) {
+        toast.error('❌ No columns defined');
+        return;
+      }
+
+      const options = { format: 'parquet' };
+
+      const result = await apiService.createForeignTableViaBackend(
+        connectionId,
+        metadata.name,
+        columns,
+        'json-avro-parquet',
+        csvPath,
+        options
+      );
+
+      if (!result.success) {
+        throw new Error(result.error || 'Foreign table creation failed');
+      }
+
+      metadata.postgresTableName = result.tableName || metadata.name;
+
+      await apiService.insertDataSourceMetadata(connectionId, {
+        name: metadata.name,
+        type: 'parquet',
+        filePath: csvPath,
+        foreignTableName: result.tableName || metadata.name,
+        options,
+      });
+
+      const folderId = 'file-parquet';
+
+      window.dispatchEvent(
+        new CustomEvent('metadata-created', {
+          detail: { metadata, type: 'parquet', folderId },
+        })
+      );
+
+      toast.success(`✅ Parquet table "${metadata.name}" created`);
+      return;
+    }
+
+    // ──────────────────────────────────────────────────────────────
+    // JSON – use the existing client‑side Web Worker
+    // ──────────────────────────────────────────────────────────────
+    console.log('🔄 [JSON] Starting client‑side conversion');
 
     const worker = new Worker(
       new URL('../../workers/formatConverter.worker.ts', import.meta.url),
@@ -2037,7 +2111,6 @@ const handleSaveJsonAvroParquetMetadata = useCallback(async (metadata: any) => {
         if (msg.data.success && msg.data.csvString) {
           resolve(msg.data.csvString);
         } else {
-          // 🔍 Log the actual worker error to the console for debugging
           console.error('[Sidebar] Worker conversion error:', msg.data.error);
           reject(new Error(msg.data.error || 'Conversion failed'));
         }
@@ -2120,10 +2193,17 @@ const handleSaveJsonAvroParquetMetadata = useCallback(async (metadata: any) => {
       options,
     });
 
+    const folderIdMap: Record<string, string> = {
+      json: 'file-json',
+      avro: 'file-avro',
+      parquet: 'file-parquet',
+    };
+    const folderId = folderIdMap[format] || 'file-json';
+
     // Notify sidebar tree
     window.dispatchEvent(
       new CustomEvent('metadata-created', {
-        detail: { metadata, type: format, folderId: 'file-json-avro-parquet' },
+        detail: { metadata, type: format, folderId },
       })
     );
 
@@ -2341,6 +2421,11 @@ const handleSaveLDAPConnection = useCallback(async (data: LDAPConnectionFormData
 const handleSaveAvroMetadata = useCallback((metadata: any) => {
   // Force the format so the unified handler takes the Avro branch
   metadata.format = 'avro';
+  handleSaveJsonAvroParquetMetadata(metadata);
+}, [handleSaveJsonAvroParquetMetadata]);
+
+const handleSaveJsonMetadata = useCallback((metadata: any) => {
+  metadata.format = 'json';
   handleSaveJsonAvroParquetMetadata(metadata);
 }, [handleSaveJsonAvroParquetMetadata]);
 
@@ -3378,8 +3463,9 @@ useEffect(() => {
         handleOpenPositionalWizard();
       } else if (buttonText.includes('schema')) {
         handleOpenFileSchemaWizard();
-      } else if (buttonText.includes('json') || buttonText.includes('avro') || buttonText.includes('parquet')) {
-        handleOpenJsonAvroParquetWizard();
+        if (buttonText.includes('json'    )) handleOpenJsonWizard();
+else if (buttonText.includes('avro'    )) handleOpenAvroWizard();
+else if (buttonText.includes('parquet' )) handleOpenParquetWizard();
       } else if (buttonText.includes('regex')) {
         handleOpenRegexWizard();
       } else if (buttonText.includes('ldif')) {
@@ -3400,7 +3486,9 @@ useEffect(() => {
     handleOpenDelimitedWizard,
     handleOpenPositionalWizard,
     handleOpenFileSchemaWizard,
-    handleOpenJsonAvroParquetWizard,
+    handleOpenJsonWizard,
+    handleOpenAvroWizard,
+    handleOpenParquetWizard,
     handleOpenRegexWizard,
     handleOpenLDIFWizard,
     handleOpenWebServiceWizard,
@@ -3539,7 +3627,9 @@ useEffect(() => {
               onOpenDelimitedWizard={handleOpenDelimitedWizard}
               onOpenPositionalWizard={handleOpenPositionalWizard}
               onOpenFileSchemaWizard={handleOpenFileSchemaWizard}
-              onOpenJsonAvroParquetWizard={handleOpenJsonAvroParquetWizard}
+                onOpenJSONWizard={handleOpenJsonWizard}
+  onOpenAvroWizard={handleOpenAvroWizard}
+  onOpenParquetWizard={handleOpenParquetWizard}
               onOpenRegexWizard={handleOpenRegexWizard}
               onOpenLDIFWizard={handleOpenLDIFWizard}
               onCreateJobWizard={handleCreateJobWizard} 
@@ -3718,7 +3808,11 @@ useEffect(() => {
   onClose={() => setParquetWizardOpen(false)}
   onSave={handleSaveParquetMetadata}
 />
-
+<JsonMetadataWizard
+  isOpen={jsonWizardOpen}
+  onClose={() => setJsonWizardOpen(false)}
+  onSave={handleSaveJsonMetadata}
+/>
 
       <Layout.ToastContainerWrapper />
     </>

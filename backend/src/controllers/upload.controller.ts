@@ -4,6 +4,19 @@ import path from 'path';
 import fs from 'fs';
 import { spawn } from 'child_process';
 
+// ─── Custom interface for multer file (avoids type-import issues) ───────────
+interface MulterFile {
+  fieldname: string;
+  originalname: string;
+  encoding: string;
+  mimetype: string;
+  size: number;
+  destination: string;
+  filename: string;
+  path: string;
+  buffer: Buffer;
+}
+
 // ─── Configuration constants ────────────────────────────────────────────────
 const UPLOAD_DIR = process.env.CSV_UPLOAD_DIR || path.join(__dirname, '../../uploads');
 
@@ -81,13 +94,12 @@ function runPythonScript(
   } catch (err: any) {
     console.error(`❌ ${err.message}`);
     res.status(500).json({ error: err.message });
-    return; // early exit
+    return;
   }
 
   const outputFileName = `converted_${Date.now()}.csv`;
   const outputPath = path.join(UPLOAD_DIR, outputFileName);
 
-  // ─── Diagnostic dump ────────────────────────────────────────────────────
   console.log('\n══════════════════════════════════════════════════════');
   console.log('📄 Python Conversion Request');
   console.log('══════════════════════════════════════════════════════');
@@ -244,18 +256,59 @@ export const convertLdif = (req: Request, res: Response): void => {
 };
 
 export const convertSchema = (req: Request, res: Response): void => {
-  const files = req.files as { [fieldname: string]: Express.Multer.File[] };
+  // ✅ Use the custom MulterFile interface instead of relying on any import
+  const files = req.files as { [fieldname: string]: MulterFile[] };
   if (!files || !files.schemaFile || !files.dataFile) {
-    res.status(400).json({ error: 'Both schemaFile and dataFile are required' }); return;
+    res.status(400).json({ error: 'Both schemaFile and dataFile are required' });
+    return;
   }
   const schemaFile = files.schemaFile[0];
   const dataFile = files.dataFile[0];
   const dataFormat = req.body.dataFormat;
   const delimiter = req.body.delimiter || ',';
 
-  if (!dataFormat) { res.status(400).json({ error: 'Missing dataFormat' }); return; }
+  if (!dataFormat) {
+    res.status(400).json({ error: 'Missing dataFormat' });
+    return;
+  }
 
   runPythonScript('schema_to_csv.py', [schemaFile.path, dataFile.path, dataFormat, delimiter], res,
     (outputPath) => res.json({ filePath: outputPath })
+  );
+};
+
+export const avroMetadata = (req: Request, res: Response): void => {
+  if (!req.file) {
+    res.status(400).json({ error: 'No file uploaded' });
+    return;
+  }
+  const sampleCount = req.body.sampleCount || 5;
+
+  runPythonScript(
+    'extract_avro_metadata.py',
+    [req.file.path, String(sampleCount)],
+    res,
+    async (outputPath) => {
+      const jsonContent = await fs.promises.readFile(outputPath, 'utf-8');
+      res.json(JSON.parse(jsonContent));
+    }
+  );
+};
+
+export const extractParquetMetadata = (req: Request, res: Response): void => {
+  if (!req.file) {
+    res.status(400).json({ error: 'No file uploaded' });
+    return;
+  }
+  const sampleCount = req.body.sampleCount || 5;
+
+  runPythonScript(
+    'extract_parquet_metadata.py',
+    [req.file.path, String(sampleCount)],
+    res,
+    async (outputPath) => {
+      const jsonContent = await fs.promises.readFile(outputPath, 'utf-8');
+      res.json(JSON.parse(jsonContent));
+    }
   );
 };

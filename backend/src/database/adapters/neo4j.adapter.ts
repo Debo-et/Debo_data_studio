@@ -5,7 +5,6 @@ import {
   DatabaseConnection,
   QueryResult,
   TableInfo,
-  ColumnMetadata,
   DatabaseConfig,
   InspectionOptions,
   QueryExecutionOptions,
@@ -14,7 +13,11 @@ import {
 
 // Assumes the neo4j-driver package is installed:
 // npm install neo4j-driver
-import neo4j, { Driver, Session, Result, Record } from 'neo4j-driver';
+import neo4j, {
+  Driver,
+  Session,
+  Record as Neo4jRecord   // alias to avoid shadowing built‑in Record<K,V>
+} from 'neo4j-driver';
 
 // -------- Neo4j Connection Wrapper --------
 export class Neo4jConnection implements DatabaseConnection {
@@ -46,6 +49,10 @@ export class Neo4jConnection implements DatabaseConnection {
     }
   }
 
+  get connected(): boolean {
+    return this.session !== null;
+  }
+
   getDriver(): Driver | null {
     return this.driver;
   }
@@ -63,7 +70,7 @@ export class Neo4jConnection implements DatabaseConnection {
 class Neo4jInspector {
   private connection: Neo4jConnection;
   private config: DatabaseConfig;
-  private sessionFn: () => Session; // helper to get session
+  private sessionFn: () => Session;
 
   constructor(config: DatabaseConfig) {
     this.config = {
@@ -90,7 +97,6 @@ class Neo4jInspector {
       this.config.password!,
       this.config.dbname
     );
-    // Verify connectivity
     await this.sessionFn().run('RETURN 1');
   }
 
@@ -106,7 +112,9 @@ class Neo4jInspector {
       );
       const session = driver.session({ database: this.config.dbname });
       try {
-        const result = await session.run('CALL dbms.components() YIELD versions RETURN versions[0] AS version');
+        const result = await session.run(
+          'CALL dbms.components() YIELD versions RETURN versions[0] AS version'
+        );
         const version = result.records[0]?.get('version') || 'unknown';
         await session.close();
         await driver.close();
@@ -121,10 +129,6 @@ class Neo4jInspector {
     }
   }
 
-  /**
-   * Get tables = node labels and relationship types.
-   * Columns are left empty (schema‑less), but we include row counts and an empty size.
-   */
   async getTables(): Promise<TableInfo[]> {
     const session = this.sessionFn();
     if (!session) throw new Error('Not connected');
@@ -139,15 +143,17 @@ class Neo4jInspector {
     `);
     for (const record of labelResult.records) {
       const label = record.get('label');
-      const count = record.get('count').toNumber ? record.get('count').toNumber() : Number(record.get('count'));
+      const count = record.get('count').toNumber
+        ? record.get('count').toNumber()
+        : Number(record.get('count'));
       tables.push({
         schemaname: '',
-        tablename: `:${label}`,          // prefix with colon to indicate label
+        tablename: `:${label}`,
         tabletype: 'node-label',
         columns: [],
         comment: '',
         rowCount: count,
-        size: 0,
+        size: '',
         originalData: null,
       });
     }
@@ -166,8 +172,8 @@ class Neo4jInspector {
         tabletype: 'relationship-type',
         columns: [],
         comment: '',
-        rowCount: 0,   // would require counting relationships for each type
-        size: 0,
+        rowCount: 0,
+        size: '',
         originalData: null,
       });
     }
@@ -187,10 +193,10 @@ class Neo4jInspector {
       CALL dbms.components() YIELD name, versions
       RETURN name, versions[0] AS version
     `);
-    const record = result.records[0];
+    const r = result.records[0];
     return {
-      version: record?.get('version') || 'unknown',
-      name: record?.get('name') || 'Neo4j',
+      version: r?.get('version') || 'unknown',
+      name: r?.get('name') || 'Neo4j',
       encoding: 'UTF-8',
       collation: '',
     };
@@ -198,8 +204,6 @@ class Neo4jInspector {
 
   /**
    * Execute a Cypher query.
-   * The `sql` parameter contains the Cypher statement.
-   * `params` are passed as query parameters.
    */
   async executeQuery(
     sql: string,
@@ -209,17 +213,11 @@ class Neo4jInspector {
     const session = this.sessionFn();
     if (!session) throw new Error('Not connected');
 
-    // Map positional params to named parameters: $p0, $p1, ...
     const parameterMap: Record<string, any> = {};
     params.forEach((val, idx) => {
       parameterMap[`p${idx}`] = val;
     });
 
-    // Optionally replace placeholders in the query from positional (?) to named ($p0, ...)
-    // but Neo4j only supports named parameters. We'll assume the query uses $p0,... or we can transform.
-    // For simplicity, we expect the caller to use named params. If positional needed, we can transform:
-    // We'll attempt to replace `?` with $p0 etc. But that's fragile. We'll just document that.
-    // Instead, we can provide a simple helper: if sql contains `?`, replace them sequentially.
     let finalSql = sql;
     if (sql.includes('?')) {
       let idx = 0;
@@ -228,12 +226,14 @@ class Neo4jInspector {
 
     const start = Date.now();
     try {
-      const result: Result = await session.run(finalSql, parameterMap, {
-        timeout: options?.timeout ? options.timeout * 1000 : undefined, // seconds to ms
-      });
+      const runOptions: { timeout?: number } = {};
+      if (options?.timeout) {
+        runOptions.timeout = options.timeout * 1000; // seconds → ms
+      }
 
-      // Transform Neo4j records to plain objects
-      const rows = result.records.map((record: Record) => {
+      const result = await session.run(finalSql, parameterMap, runOptions);
+
+      const rows = result.records.map((record: Neo4jRecord) => {
         const row: any = {};
         record.keys.forEach(key => {
           row[key] = record.get(key);
@@ -246,10 +246,34 @@ class Neo4jInspector {
         limitedRows = rows.slice(0, options.maxRows);
       }
 
+      // Build fields with explicit string conversion for name
+      const fields = result.records.length > 0
+        ? result.records[0].keys.map(key => {
+            const val = result.records[0].get(key);
+            let type = 'string';
+            if (val === null || val === undefined) {
+              type = 'null';
+            } else if (neo4j.isInt(val)) {
+              type = 'integer';
+            } else if (typeof val === 'number') {
+              type = 'float';
+            } else if (val instanceof Date) {
+              type = 'date';
+            } else if (Array.isArray(val)) {
+              type = 'array';
+            } else if (typeof val === 'object') {
+              type = 'object';
+            } else {
+              type = typeof val;
+            }
+            return { name: String(key), type };   // <-- String() fixes PropertyKey → string
+          })
+        : [];
+
       return {
         success: true,
         rows: limitedRows,
-        fields: result.records.length > 0 ? result.records[0].keys : [],
+        fields,
         rowCount: limitedRows.length,
         executionTime: Date.now() - start,
       };
@@ -267,9 +291,6 @@ class Neo4jInspector {
   async executeTransaction(
     queries: Array<{ sql: string; params?: any[] }>
   ): Promise<QueryResult[]> {
-    // Neo4j supports explicit transactions via session.beginTransaction().
-    // For simplicity, we'll run each query sequentially within the same session.
-    // A real adapter might wrap them in a transaction.
     const results: QueryResult[] = [];
     for (const q of queries) {
       results.push(await this.executeQuery(q.sql, q.params || []));
@@ -278,7 +299,7 @@ class Neo4jInspector {
   }
 }
 
-// -------- Neo4j Adapter (Implements IBaseDatabaseInspector) --------
+// -------- Neo4j Adapter --------
 export class Neo4jAdapter implements IBaseDatabaseInspector {
   private inspector: Neo4jInspector | null = null;
   private connectionInstance: Neo4jConnection | null = null;
@@ -315,18 +336,23 @@ export class Neo4jAdapter implements IBaseDatabaseInspector {
     return tempInspector.testConnection();
   }
 
-  async getTables(_connection: DatabaseConnection, options?: InspectionOptions): Promise<TableInfo[]> {
-    if (!this.inspector) throw new Error('Inspector not initialized. Call connect() first.');
+  async getTables(
+    _connection: DatabaseConnection,
+    _options?: InspectionOptions
+  ): Promise<TableInfo[]> {
+    if (!this.inspector) throw new Error('Inspector not initialized.');
     return this.inspector.getTables();
   }
 
-  async getTableColumns(_connection: DatabaseConnection, tables: TableInfo[]): Promise<TableInfo[]> {
-    // Tables do not have columns defined yet. Could optionally fetch property keys for each label.
+  async getTableColumns(
+    _connection: DatabaseConnection,
+    tables: TableInfo[]
+  ): Promise<TableInfo[]> {
     return tables;
   }
 
   async getDatabaseInfo(_connection: DatabaseConnection): Promise<DatabaseVersionInfo> {
-    if (!this.inspector) throw new Error('Inspector not initialized. Call connect() first.');
+    if (!this.inspector) throw new Error('Inspector not initialized.');
     const info = await this.inspector.getDatabaseInfo();
     return {
       version: info.version,
@@ -364,7 +390,6 @@ export class Neo4jAdapter implements IBaseDatabaseInspector {
     _schema: string,
     _table: string
   ): Promise<any[]> {
-    // Neo4j constraints (uniqueness, existence, keys) can be fetched with SHOW CONSTRAINTS.
     if (!this.inspector) throw new Error('Inspector not initialized.');
     const session = this.connectionInstance?.getSession();
     if (!session) return [];
@@ -377,14 +402,10 @@ export class Neo4jAdapter implements IBaseDatabaseInspector {
   }
 
   async getSchemas(_connection: DatabaseConnection): Promise<string[]> {
-    // No schema concept; return empty.
     return [];
   }
 
-  // -------- Neo4j-specific additions --------
-
   async getFunctions(_connection: DatabaseConnection, _schema?: string): Promise<any[]> {
-    // User-defined procedures/functions can be listed with SHOW PROCEDURES / SHOW FUNCTIONS.
     if (!this.inspector) throw new Error('Inspector not initialized.');
     const session = this.connectionInstance?.getSession();
     if (!session) return [];
@@ -396,13 +417,12 @@ export class Neo4jAdapter implements IBaseDatabaseInspector {
     }
   }
 
-  async getIndexes(connection: DatabaseConnection, tableName?: string): Promise<any[]> {
+  async getIndexes(_connection: DatabaseConnection, tableName?: string): Promise<any[]> {
     if (!this.inspector) throw new Error('Inspector not initialized.');
     const session = this.connectionInstance?.getSession();
     if (!session) return [];
     let cypher = 'SHOW INDEXES';
     if (tableName) {
-      // tableName is like ":Label", extract label without colon
       const label = tableName.startsWith(':') ? tableName.substring(1) : tableName;
       cypher = `SHOW INDEXES WHERE entityType = 'NODE' AND labelsOrTypes = '${label}'`;
     }

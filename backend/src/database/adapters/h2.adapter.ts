@@ -21,7 +21,7 @@ import path from 'path';
 export class H2Connection implements DatabaseConnection {
   private jdbc: any = null;
   private config: DatabaseConfig;
-  private connected: boolean = false;
+  public connected: boolean = false; // FIX: changed from private to public
 
   constructor(config: DatabaseConfig) {
     this.config = config;
@@ -189,7 +189,7 @@ export class H2SchemaInspector {
     `;
     const tables = await this.connection.query(sql, [this.schema]);
 
-    const result = [];
+    const result: any[] = []; // FIX: explicit type annotation to avoid never[]
     for (const table of tables) {
       const columns = await this.getTableColumns(table.SCHEMANAME, table.TABLENAME);
       const rowCount = await this.getRowCount(table.SCHEMANAME, table.TABLENAME);
@@ -266,11 +266,18 @@ export class H2SchemaInspector {
       if (options?.maxRows && rows.length > options.maxRows) {
         rows = rows.slice(0, options.maxRows);
       }
+      // FIX: transform string[] to { name: string; type: string }[]
+      const fields = rows.length
+        ? Object.keys(rows[0]).map(key => ({
+            name: key,
+            type: typeof rows[0][key], // falls back to JS type if no DB metadata
+          }))
+        : [];
       return {
         success: true,
         rows,
         rowCount: rows.length,
-        fields: rows.length ? Object.keys(rows[0]) : [],
+        fields,
       };
     } catch (error) {
       return {
@@ -414,7 +421,11 @@ export class H2Adapter implements IBaseDatabaseInspector {
       WHERE TABLE_SCHEMA = ? AND TABLE_NAME = ?
     `;
     const result = await this.inspector.executeQuery(sql, [_schema, _table]);
-    return result.success ? result.rows : [];
+    // FIX: ensure non-null rows when success
+    if (result.success && result.rows) {
+      return result.rows;
+    }
+    return [];
   }
 
   async getSchemas(connection: DatabaseConnection): Promise<string[]> {
@@ -447,7 +458,8 @@ export class H2Adapter implements IBaseDatabaseInspector {
       ORDER BY ALIAS_SCHEMA, ALIAS_NAME
     `;
     const result = await this.executeQuery(connection, sql);
-    return result.success ? result.rows : [];
+    // FIX: handle optional rows
+    return result.success && result.rows ? result.rows : [];
   }
 
   async getIndexes(connection: DatabaseConnection, tableName?: string): Promise<any[]> {
@@ -466,7 +478,8 @@ export class H2Adapter implements IBaseDatabaseInspector {
       ORDER BY TABLE_SCHEMA, TABLE_NAME, INDEX_NAME, ORDINAL_POSITION
     `;
     const result = await this.executeQuery(connection, sql);
-    return result.success ? result.rows : [];
+    // FIX: handle optional rows
+    return result.success && result.rows ? result.rows : [];
   }
 }
 

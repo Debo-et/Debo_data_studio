@@ -8,6 +8,8 @@ import {
   Edit,
   Server,
   Database,
+  Braces,
+  FileArchive,
 } from 'lucide-react';
 import { RepositoryNode } from '../types/types';
 import { WIZARD_CONFIG, WizardConfig } from '../config/wizard-registry';
@@ -25,7 +27,9 @@ interface ContextMenuProps {
   onOpenXMLWizard?: () => void;
   onOpenDelimitedWizard?: () => void;
   onOpenPositionalWizard?: () => void;
-  onOpenJsonAvroParquetWizard?: () => void;
+onOpenJSONWizard?: () => void;
+onOpenAvroWizard?: () => void;
+onOpenParquetWizard?: () => void;
   onOpenFileSchemaWizard?: () => void;
   onOpenRegexWizard?: () => void;
   onOpenLDIFWizard?: () => void;
@@ -293,6 +297,35 @@ const ContextMenu: React.FC<ContextMenuProps> = ({
   >
     <Database className="h-4 w-4" />
     <span>Salesforce Connection</span>
+  </button>
+)}
+{node.id === 'file-json' && (
+  <button
+    onClick={() => handleClick(() => wizardHandlers.onOpenJSONWizard?.())}
+    className="flex items-center space-x-2 w-full px-3 py-2 text-sm text-gray-700 dark:text-gray-200 hover:bg-gray-100 dark:hover:bg-gray-700"
+  >
+    <Braces className="h-4 w-4" />
+    <span>Create JSON Metadata</span>
+  </button>
+)}
+
+{node.id === 'file-avro' && (
+  <button
+    onClick={() => handleClick(() => wizardHandlers.onOpenAvroWizard?.())}
+    className="flex items-center space-x-2 w-full px-3 py-2 text-sm text-gray-700 dark:text-gray-200 hover:bg-gray-100 dark:hover:bg-gray-700"
+  >
+    <Database className="h-4 w-4" />   {/* or use an Avro‑specific icon */}
+    <span>Create Avro Metadata</span>
+  </button>
+)}
+
+{node.id === 'file-parquet' && (
+  <button
+    onClick={() => handleClick(() => wizardHandlers.onOpenParquetWizard?.())}
+    className="flex items-center space-x-2 w-full px-3 py-2 text-sm text-gray-700 dark:text-gray-200 hover:bg-gray-100 dark:hover:bg-gray-700"
+  >
+    <FileArchive className="h-4 w-4" />
+    <span>Create Parquet Metadata</span>
   </button>
 )}
           {node.type !== 'folder' && !isSystemNode() && (

@@ -4,19 +4,30 @@ import { spawn, ChildProcess } from 'child_process';
 import fs from 'fs';
 import http from 'http';
 
-// In CommonJS, __dirname is automatically available
-// If you need to simulate ES module behavior, ensure the tsconfig uses "module": "CommonJS"
-
 const isDev = process.env.NODE_ENV === 'development' || !app.isPackaged;
 
 let mainWindow: BrowserWindow | null = null;
 let backendProcess: ChildProcess | null = null;
 
-// Paths relative to the Electron main script location
-const BACKEND_SCRIPT = isDev
-  ? '' // Not used in dev
-  : path.join(__dirname, '../backend/dist/server.js');
+// --- Production backend path (compiled JS) ---
+function getBackendScriptPath(): string {
+  if (isDev) {
+    return ''; // not used in dev mode
+  }
+  // In packaged app, backend is copied to resources/backend
+  // The entry point is dist/server.js (or dist/app.js – check your backend)
+  return path.join(process.resourcesPath, 'backend/dist/server.js');
+}
 
+function getBackendCwd(): string | undefined {
+  if (isDev) {
+    return path.join(__dirname, '..');
+  }
+  // Working directory is the backend root (contains node_modules, dist, etc.)
+  return path.join(process.resourcesPath, 'backend');
+}
+
+const BACKEND_SCRIPT = getBackendScriptPath();
 const FRONTEND_URL = isDev
   ? 'http://localhost:3001'
   : `file://${path.join(__dirname, '../client/dist/index.html')}`;
@@ -72,14 +83,14 @@ async function startBackend(): Promise<void> {
       ? ['run', 'dev:full']
       : [BACKEND_SCRIPT];
 
-    const cwd = isDev ? path.join(__dirname, '..') : undefined;
+    const cwd = getBackendCwd();
 
-backendProcess = spawn(backendCommand, backendArgs, {
-  cwd,
-  shell: false,  // ← change to false
-  stdio: ['ignore', 'pipe', 'pipe'],
-  env: { ...process.env, ELECTRON_RUNNING: 'true' },
-});
+    backendProcess = spawn(backendCommand, backendArgs, {
+      cwd,
+      shell: false,
+      stdio: ['ignore', 'pipe', 'pipe'],
+      env: { ...process.env, ELECTRON_RUNNING: 'true' },
+    });
 
     backendProcess.stdout?.on('data', (data) => {
       console.log(`[backend] ${data}`);

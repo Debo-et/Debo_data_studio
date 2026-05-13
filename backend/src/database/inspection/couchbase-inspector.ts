@@ -31,8 +31,6 @@ import {
   connect,
   QueryOptions,
   QueryResult as CBQueryResult,
-  SearchQuery,
-  SearchOptions,
 } from 'couchbase';
 
 // Couchbase connection configuration
@@ -440,7 +438,6 @@ class CouchbaseSchemaInspector {
       await this.connection.connect();
 
       // Run a simple query to retrieve cluster version info
-      const result = await this.connection.query('SELECT 1 as test');
 
       // For version, run a separate query or read from cluster info
       const versionResult = await this.connection.query(
@@ -769,7 +766,6 @@ class CouchbaseSchemaInspector {
       // Get cluster name from system:pools_info? Not directly available via query, so we'll approximate.
       // Alternatively, use a simple config request.
       const cluster = this.connection.getCluster();
-      const info = cluster ? await cluster.ping() : null;
       const clusterName = (cluster as any)?.configuration?.clusterName || 'unknown';
 
       const bucketResult = await this.connection.query(

@@ -319,7 +319,6 @@ class VerticaConnectionManager {
         duration, result.rowCount || 0);
       return result;
     } catch (error) {
-      const duration = Date.now() - startTime;
       if (this.isConnectionError(error)) {
         this.isConnected = false;
         Logger.warn('connection lost during query');
@@ -461,10 +460,12 @@ class VerticaConnectionManager {
 class VerticaSchemaInspector {
   private connection: VerticaConnectionManager;
   private schema: string;
+  private config: DatabaseConfig; // ✅ FIX: store the config to access later
 
   constructor(config: DatabaseConfig) {
     this.connection = new VerticaConnectionManager(config);
     this.schema = config.schema || 'public';
+    this.config = config;            // ✅ store config
   }
 
   /**
@@ -512,7 +513,7 @@ class VerticaSchemaInspector {
       if (result.rows && result.rows.length > 0) {
         const version = result.rows[0].version;
         Logger.info('connection test successful - database: %s, version: %s',
-          this.config.dbname, version);
+          this.config.dbname, version);   // ✅ FIX: now works
 
         return {
           success: true,

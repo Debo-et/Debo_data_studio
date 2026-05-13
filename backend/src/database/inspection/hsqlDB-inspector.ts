@@ -3,15 +3,16 @@
  * Comprehensive schema inspection with robust error handling and connection management
  * TypeScript implementation optimized for DatabaseMetadataWizard integration
  *
- * NOTE: This implementation assumes an HSQLDB Node.js driver (e.g., `hsqldb` package)
- *       that provides a callback‑based query interface. Replace the import with the
- *       actual package you intend to use.
- *       Install example: npm install hsqldb
+ * NOTE: This implementation uses a generic ODBC driver to connect to HSQLDB.
+ *       It replaces the previous native driver layer while preserving the same
+ *       inspector behaviour and HSQLDB-specific SQL queries.
+ *
+ *       Required Node.js package: `odbc` (npm install odbc)
  */
 
-import { HsqlDBClient } from 'hsqldb'; // Placeholder – adjust to real driver
+import * as odbc from 'odbc';  // Generic ODBC driver for Node.js
 
-// Database connection configuration
+// Database connection configuration (unchanged)
 interface DatabaseConfig {
   dbname: string;           // HSQLDB database name (e.g., 'mydb')
   host?: string;            // Host (default: 'localhost')
@@ -153,7 +154,7 @@ class Logger {
 }
 
 /**
- * HSQLDB Connection Error Types
+ * HSQLDB Connection Error Types (unchanged)
  */
 class HsqlDBConnectionError extends Error {
   constructor(
@@ -179,18 +180,45 @@ class HsqlDBQueryError extends Error {
 }
 
 /**
- * HSQLDB Connection Manager
- * Manages a single connection (same pattern as other inspectors).
+ * HSQLDB Connection Manager – now based on a generic ODBC driver.
+ * Manages a single ODBC connection (and an optional pool).
  */
 class HsqlDBConnectionManager {
-  private connection: any = null; // HsqlDBClient instance
+  private connection: odbc.Connection | null = null;
+  private pool: odbc.Pool | null = null;
   private isConnected: boolean = false;
   private readonly maxRetries: number = 3;
 
   constructor(private config: DatabaseConfig) {}
 
   /**
-   * Initializes the HSQLDB connection.
+   * Build ODBC connection string for HSQLDB.
+   * Adjust the DRIVER name to match your installed HSQLDB ODBC driver.
+   */
+  private buildConnectionString(): string {
+    const host = this.config.host || 'localhost';
+    const port = this.config.port || '9001';
+    const user = this.config.user || 'SA';
+    const password = this.config.password || '';
+    const dbname = this.config.dbname;
+    const protocol = this.config.protocol || 'hsql';
+
+    // Typical HSQLDB ODBC connection string.
+    // DRIVER may be "HyperSQL", "HSQLDB", or "HSQLDB Unicode" depending on installation.
+    // The protocol is often embedded in the SERVER parameter (e.g., hsql:// or http://).
+    // We construct SERVER as protocol://host:port for simplicity.
+    const server = `${protocol}://${host}:${port}`;
+    return (
+      `DRIVER={HSQLDB};` +
+      `SERVER=${server};` +
+      `DATABASE=${dbname};` +
+      `UID=${user};` +
+      `PWD=${password}`
+    );
+  }
+
+  /**
+   * Initializes the ODBC connection.
    */
   async connect(): Promise<void> {
     if (this.isConnected && this.connection) {
@@ -198,32 +226,26 @@ class HsqlDBConnectionManager {
       return;
     }
 
-    const connectionConfig = {
-      host: this.config.host || 'localhost',
-      port: this.config.port ? parseInt(this.config.port) : 9001,
-      user: this.config.user || 'SA',
-      password: this.config.password || '',
-      database: this.config.dbname,
-      protocol: this.config.protocol || 'hsql',
-    };
-
+    const connectionString = this.buildConnectionString();
     let lastError: unknown = null;
 
     for (let attempt = 1; attempt <= this.maxRetries; attempt++) {
       try {
         Logger.debug('connection attempt %d/%d', attempt, this.maxRetries);
 
-        this.connection = new HsqlDBClient();
-        await this.connection.connect(connectionConfig);
+        this.connection = await odbc.connect(connectionString);
+        this.isConnected = true;
 
         // Test connection – HSQLDB requires a FROM clause in older versions; use dummy
-        const result = await this.queryAsync('SELECT 1 AS connection_test FROM (VALUES(0)) AS t(c)');
-        if (!result || result.rowCount === 0) {
+        const result = await this.connection.query('SELECT 1 AS connection_test FROM (VALUES(0)) AS t(c)');
+        if (!Array.isArray(result) || result.length === 0) {
           throw new Error('Connection test returned no rows');
         }
 
-        this.isConnected = true;
-        Logger.info('successfully connected to HSQLDB database "%s" (attempt %d)',
+        // Create a pool for transactional work if needed later
+        this.pool = await odbc.pool(connectionString);
+
+        Logger.info('successfully connected to HSQLDB database "%s" via ODBC (attempt %d)',
           this.config.dbname, attempt);
         return;
 
@@ -248,25 +270,10 @@ class HsqlDBConnectionManager {
     }
 
     throw new HsqlDBConnectionError(
-      `Failed to connect to HSQLDB database "${this.config.dbname}" after ${this.maxRetries} attempts: ${getErrorMessage(lastError)}`,
+      `Failed to connect to HSQLDB database "${this.config.dbname}" via ODBC after ${this.maxRetries} attempts: ${getErrorMessage(lastError)}`,
       'ECONNFAILED',
       lastError
     );
-  }
-
-  /**
-   * Internal helper to promisify the query call (assumes callback-based driver).
-   */
-  private queryAsync(sql: string): Promise<any> {
-    return new Promise((resolve, reject) => {
-      this.connection.query(sql, (err: any, rows: any[], rowCount: number, fields: any[]) => {
-        if (err) {
-          reject(err);
-        } else {
-          resolve({ rows, rowCount, fields });
-        }
-      });
-    });
   }
 
   /**
@@ -277,8 +284,8 @@ class HsqlDBConnectionManager {
       return false;
     }
     try {
-      const result = await this.queryAsync('SELECT 1 AS health_check FROM (VALUES(0)) AS t(c)');
-      return result && result.rowCount > 0;
+      const result = await this.connection.query('SELECT 1 AS health_check FROM (VALUES(0)) AS t(c)');
+      return Array.isArray(result) && result.length > 0;
     } catch (error) {
       this.isConnected = false;
       Logger.error('connection health check failed: %s', getErrorMessage(error));
@@ -298,6 +305,7 @@ class HsqlDBConnectionManager {
 
   /**
    * Execute a parameterized query with $1, $2, ... substitution.
+   * (Manual escaping is preserved; the final SQL string is sent directly to ODBC.)
    */
   async query(sql: string, params: any[] = []): Promise<any> {
     this.validateQueryParameters(sql, params);
@@ -314,11 +322,19 @@ class HsqlDBConnectionManager {
 
     const startTime = Date.now();
     try {
-      const result = await this.queryAsync(finalSql);
+      // ODBC query returns an array of rows (plain objects)
+      const rows = await this.connection.query(finalSql);
+      const rowCount = Array.isArray(rows) ? rows.length : 0;
       const duration = Date.now() - startTime;
-      Logger.debug('query completed in %d ms, %d rows returned',
-        duration, result.rowCount || 0);
-      return result;
+      Logger.debug('query completed in %d ms, %d rows returned', duration, rowCount);
+
+      // Mimic the previous return shape: { rows, rowCount, fields }
+      // Fields metadata is not directly available from odbc.query; we return an empty array.
+      return {
+        rows,
+        rowCount,
+        fields: []
+      };
     } catch (error) {
       if (this.isConnectionError(error)) {
         this.isConnected = false;
@@ -406,7 +422,7 @@ class HsqlDBConnectionManager {
     const connectionErrors = [
       'econnreset', 'econnrefused', 'epipe', 'etimedout',
       'connection', 'connect', 'socket', 'network', 'terminated',
-      'closed', 'refused', 'hsql'
+      'closed', 'refused', 'odbc', 'driver', 'hsql'
     ];
     return connectionErrors.some(connError =>
       errorMessage.includes(connError.toLowerCase())
@@ -414,12 +430,12 @@ class HsqlDBConnectionManager {
   }
 
   /**
-   * Closes the HSQLDB connection.
+   * Closes the ODBC connection.
    */
   async disconnect(): Promise<void> {
     if (this.connection) {
       try {
-        Logger.debug('closing HSQLDB connection');
+        Logger.debug('closing ODBC connection for HSQLDB');
         this.connection.close();
         Logger.info('connection closed successfully');
       } catch (error) {
@@ -432,17 +448,33 @@ class HsqlDBConnectionManager {
   }
 
   /**
-   * Mock getPool to maintain interface compatibility.
+   * Returns an object that mimics a pool interface.
+   * It uses the internal ODBC pool to provide connection clients for transactions.
    */
   getPool(): any {
-    if (!this.connection) return null;
+    if (!this.pool) {
+      return null;
+    }
     return {
-      connect: async () => ({
-        query: (sql: string, params?: any[]) => this.query(sql, params),
-        release: () => {},
-        on: () => {},
-        off: () => {},
-      })
+      connect: async () => {
+        const conn = await this.pool!.connect();
+        return {
+          query: async (sql: string, _params?: any[]) => {
+            // params are already substituted; no further binding needed
+            const rows = await conn.query(sql);
+            return {
+              rows,
+              rowCount: Array.isArray(rows) ? rows.length : 0,
+              fields: []
+            };
+          },
+          release: () => {
+            try { conn.close(); } catch {}
+          },
+          on: () => {},
+          off: () => {},
+        };
+      }
     };
   }
 
@@ -462,12 +494,11 @@ class HsqlDBConnectionManager {
 class HsqlDBSchemaInspector {
   private connection: HsqlDBConnectionManager;
   private schema: string;
-  private config: DatabaseConfig;   // <-- ADDED: missing property
+  private config: DatabaseConfig;   // <-- already present
 
   constructor(config: DatabaseConfig) {
-    this.config = config;           // <-- ADDED: store the config
+    this.config = config;
     this.connection = new HsqlDBConnectionManager(config);
-    // HSQLDB default schema is PUBLIC (uppercase)
     this.schema = config.schema || 'PUBLIC';
   }
 
@@ -511,7 +542,6 @@ class HsqlDBSchemaInspector {
     try {
       await this.connection.connect();
 
-      // Get version from system properties
       const versionResult = await this.connection.query(
         "SELECT VALUE AS version FROM INFORMATION_SCHEMA.SYSTEM_PRODUCTS WHERE KEY = 'version'"
       );

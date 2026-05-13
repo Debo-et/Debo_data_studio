@@ -90,7 +90,7 @@ export class TeradataAdapter implements IBaseDatabaseInspector {
    * Test connection without full schema inspection
    */
   async testConnection(config: DatabaseConfig): Promise<{ success: boolean; version?: string; error?: string }> {
-    let testConn = null;
+    let testConn: any = null; // *** FIXED: Added explicit 'any' type ***
     try {
       const connectionParams: any = {
         host: config.host || 'localhost',
@@ -481,7 +481,7 @@ export class TeradataAdapter implements IBaseDatabaseInspector {
   /**
    * Get database functions/procedures
    */
-  async getFunctions(connection: DatabaseConnection, schema?: string): Promise<any[]> {
+  async getFunctions(_connection: DatabaseConnection, schema?: string): Promise<any[]> {
     if (!this.connection) {
       throw new Error('Not connected to database. Call connect() first.');
     }
@@ -522,7 +522,7 @@ export class TeradataAdapter implements IBaseDatabaseInspector {
   /**
    * Get database indexes
    */
-  async getIndexes(connection: DatabaseConnection, tableName?: string): Promise<any[]> {
+  async getIndexes(_connection: DatabaseConnection, tableName?: string): Promise<any[]> {
     if (!this.connection) {
       throw new Error('Not connected to database. Call connect() first.');
     }
@@ -586,17 +586,18 @@ export class TeradataAdapter implements IBaseDatabaseInspector {
    * Map Teradata data types to standard SQL types
    */
   private mapTeradataType(typeCode: string, length: number, precision: number, scale: number): string {
+    // *** FIXED: Removed duplicate 'D' key and added 'DA' for DATE ***
     const typeMap: { [key: string]: string } = {
       'I': 'INTEGER',
       'I8': 'BIGINT',
       'I2': 'SMALLINT',
       'F': 'FLOAT',
       'D': 'DECIMAL',
-      'CV': 'VARCHAR',
-      'CF': 'CHAR',
-      'D': 'DATE',
+      'DA': 'DATE',      // DATE is code 'DA', not 'D'
       'TS': 'TIMESTAMP',
       'T': 'TIME',
+      'CV': 'VARCHAR',
+      'CF': 'CHAR',
       'BF': 'BYTE',
       'BV': 'VARBYTE',
       'BO': 'BLOB',

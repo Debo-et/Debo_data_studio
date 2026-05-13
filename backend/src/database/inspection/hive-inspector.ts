@@ -2,9 +2,26 @@
  * Enhanced Apache Hive Schema Inspector with Query Execution
  * Comprehensive schema inspection with robust error handling and connection management
  * TypeScript implementation optimized for DatabaseMetadataWizard integration
+ *
+ * NOTE: Uses the low-level 'hive-driver' Thrift client.
+ * Parameterised queries (params array) are NOT supported by HiveServer2;
+ * they will trigger a warning and the parameters will be ignored.
+ *
+ * Some IHiveSession and operation properties (getResultSetMetadata,
+ * fetchResults, closeOperation, operationHandle, errorCode, errorMessage)
+ * are not exposed in the public type definitions but are available at
+ * runtime. They are accessed via `as any`.
  */
 
-import { HiveClient, HiveClientConfig, QueryResult as HiveQueryResult } from 'hive-driver';
+// eslint-disable-next-line @typescript-eslint/no-var-requires
+const hiveDriver = require('hive-driver');
+
+// Obtain the runtime objects we need. The public typings for hive-driver
+// do not export them, so we extract them manually.
+const HiveClient: any = hiveDriver.HiveClient;
+const TCLIService: any = hiveDriver.TCLIService;
+const TCLIService_types: any = hiveDriver.TCLIService_types;
+const Status: any = hiveDriver.Status;
 
 // ---------------------------------------------------------------------------
 // Re‑use the same interfaces and utilities where possible
@@ -174,17 +191,17 @@ class HiveQueryError extends Error {
 }
 
 // ---------------------------------------------------------------------------
-// Hive Connection Manager (emulates a pool with a single Thrift connection)
+// Hive Connection Manager (wraps the real hive-driver Thrift client)
 // ---------------------------------------------------------------------------
 class HiveConnection {
-  private client: HiveClient | null = null;
+  private client: any = null;   // HiveClient instance (typed as any to avoid import issues)
   private isConnected: boolean = false;
   private readonly maxRetries: number = 3;
 
   constructor(private config: DatabaseConfig) {}
 
   /**
-   * Initialises the underlying HiveClient (single connection, not a pool).
+   * Initialise the underlying HiveClient and open a Thrift connection.
    */
   async connect(): Promise<void> {
     if (this.isConnected && this.client) {
@@ -192,21 +209,11 @@ class HiveConnection {
       return;
     }
 
-    const hiveConfig: HiveClientConfig = {
-      host: this.config.host || 'localhost',
-      port: this.config.port ? parseInt(this.config.port, 10) : 10000,
-      username: this.config.user,
-      password: this.config.password,
-      // Use the 'dbname' as the Hive database; fall back to 'default'
-      databaseName: this.config.dbname || 'default',
-      // Additional HiveClient options
-      maxRetries: 1,
-      retryInitialDelay: 1000,
-      connectTimeout: 15000,
-      socketTimeout: 30000,
-      // SASL authentication (only PLAIN is widely supported)
-      sasl: this.config.user ? { mechanism: 'PLAIN' } : undefined,
-    };
+    const host = this.config.host || 'localhost';
+    const port = this.config.port ? parseInt(this.config.port, 10) : 10000;
+    const username = this.config.user;
+    const password = this.config.password;
+    const databaseName = this.config.dbname || 'default';
 
     let lastError: unknown = null;
 
@@ -214,20 +221,33 @@ class HiveConnection {
       try {
         Logger.debug('connection attempt %d/%d', attempt, this.maxRetries);
 
-        this.client = new HiveClient(hiveConfig);
+        // Create a new client each attempt
+        this.client = new HiveClient(TCLIService, TCLIService_types);
 
-        // Attach error handler for unrecoverable transport errors
-        this.client.on('error', (err: Error) => {
-          Logger.error('Unexpected HiveClient error: %s', getErrorMessage(err));
-          this.isConnected = false;
-        });
+        // Build connection options for the Thrift transport
+        const connectOptions: any = {
+          host,
+          port,
+        };
 
-        // Open the Thrift connection
-        await this.client.connect();
+        // SASL PLAIN authentication (the only widely supported mechanism in hive-driver)
+        if (username) {
+          connectOptions.username = username;
+          if (password) {
+            connectOptions.password = password;
+          }
+          // Tell the client to use PLAIN SASL
+          connectOptions.options = {
+            sasl: { mechanism: 'PLAIN' },
+          };
+        }
+
+        // Open the transport connection
+        await this.client.connect(connectOptions);
 
         this.isConnected = true;
         Logger.info('successfully connected to Hive database "%s" (attempt %d)',
-          hiveConfig.databaseName, attempt);
+          databaseName, attempt);
         return;
 
       } catch (error) {
@@ -251,7 +271,7 @@ class HiveConnection {
     }
 
     throw new HiveConnectionError(
-      `Failed to connect to Hive database "${this.config.dbname}" after ${this.maxRetries} attempts: ${getErrorMessage(lastError)}`,
+      `Failed to connect to Hive database "${databaseName}" after ${this.maxRetries} attempts: ${getErrorMessage(lastError)}`,
       'ECONNFAILED',
       lastError
     );
@@ -264,9 +284,8 @@ class HiveConnection {
     if (!this.isConnected || !this.client) {
       return false;
     }
-
     try {
-      const result = await this.client.query('SELECT 1 AS health_check');
+      const result = await this.query('SELECT 1 AS health_check');
       return result.rows.length > 0 && result.rows[0].health_check === 1;
     } catch (error) {
       this.isConnected = false;
@@ -283,66 +302,140 @@ class HiveConnection {
   }
 
   /**
-   * Execute a query. Parameters are passed as an array of values; they
-   * are substituted using HiveClient’s built‑in parameterised queries.
+   * Execute a query and return a simplified result similar to the previous interface.
+   * 
+   * IMPORTANT: HiveServer2 does NOT support parameterised queries.
+   * The `params` array is accepted for compatibility but will be **ignored**
+   * with a warning. Do not rely on automatic escaping – interpolate values
+   * safely into the SQL yourself if needed.
    */
-  async query(sql: string, params?: any[]): Promise<any> {
+  async query(sql: string, params?: any[]): Promise<{ rows: any[]; schema: Array<{ name: string; type: string }> }> {
     const safeParams = params ?? [];
-    this.validateQueryParameters(sql, safeParams);
+    if (safeParams.length > 0) {
+      Logger.warn(
+        'Parameterised queries are not supported by Hive. ' +
+        'Ignoring %d parameter(s). Use literal values or safe string interpolation.',
+        safeParams.length
+      );
+    }
 
     if (!this.isConnected || !this.client) {
       throw new HiveConnectionError('Database not connected');
     }
 
     try {
-      Logger.debug('executing query: %s with %d parameters',
-        sql.substring(0, 100) + (sql.length > 100 ? '...' : ''),
-        safeParams.length);
+      Logger.debug('executing query: %s',
+        sql.substring(0, 100) + (sql.length > 100 ? '...' : ''));
 
-      const startTime = Date.now();
-      const result: HiveQueryResult = await this.client.query(sql, safeParams);
-      const duration = Date.now() - startTime;
+      // Open a Hive session (required for executing statements)
+      const session = await this.client.openSession({
+        client_protocol: TCLIService_types.TProtocolVersion.HIVE_CLI_SERVICE_PROTOCOL_V1,
+      });
 
-      Logger.debug('query completed in %d ms, %d rows returned',
-        duration, result.rows.length);
+      // Execute statement
+      const executeResponse = await session.executeStatement(
+        sql,
+        { runAsync: false } // synchronous execution
+      );
 
-      return result;
+      // operationHandle is available at runtime but may not be in the typings
+      const operation = (executeResponse as any).operationHandle;
+      if (!operation) {
+        throw new Error('No operation handle returned');
+      }
+
+      // Check for errors after execution – status can be a function in typings, cast to any
+      if (Status.isError(executeResponse.status as any)) {
+        const statusObj = executeResponse.status as any;
+        throw new Error(
+          `Hive execution error: ${statusObj.errorCode || ''} ${statusObj.errorMessage || ''}`
+        );
+      }
+
+      // -------------------------------------------------------------------
+      // NOTE:
+      // The following three calls (getResultSetMetadata, fetchResults, closeOperation)
+      // are present on IHiveSession at runtime but some typings may not expose them.
+      // We use `as any` to avoid TypeScript errors; the runtime behaviour is unaffected.
+      // -------------------------------------------------------------------
+
+      // Fetch schema
+      const metadataResponse = await (session as any).getResultSetMetadata(operation);
+      const columns = metadataResponse.schema.columns;
+
+      // Fetch all rows (paginate automatically)
+      const allRows: any[] = [];
+      let hasMoreRows = true;
+
+      while (hasMoreRows) {
+        const fetchResponse = await (session as any).fetchResults(operation, {
+          orientation: TCLIService_types.TFetchOrientation.FETCH_NEXT,
+          maxRows: 1000,
+        });
+
+        if (Status.isError(fetchResponse.status as any)) {
+          throw new Error(`Fetch error: ${(fetchResponse.status as any).errorMessage}`);
+        }
+
+        if (fetchResponse.results && fetchResponse.results.rows) {
+          for (const row of fetchResponse.results.rows) {
+            const rowObj: any = {};
+            row.colVals.forEach((val: any, idx: number) => {
+              const colName = columns[idx]?.columnName || `col_${idx}`;
+              rowObj[colName] = this.extractValue(val);
+            });
+            allRows.push(rowObj);
+          }
+        }
+
+        hasMoreRows = fetchResponse.hasMoreRows ?? false;
+      }
+
+      // Close the operation and session to free resources
+      await (session as any).closeOperation(operation);
+      await session.close();
+
+      // Build schema array as { name, type }
+      const schema = columns.map((col: any) => ({
+        name: col.columnName,
+        type: col.typeDesc.types?.[0]?.primitiveEntry?.type?.toString() || 'STRING',
+      }));
+
+      return { rows: allRows, schema };
     } catch (error) {
-      // If the error is connection‑related, mark as disconnected
       if (this.isConnectionError(error)) {
         this.isConnected = false;
         Logger.warn('connection lost during query');
       }
-
       const queryError = new HiveQueryError(
         `Query execution failed: ${getErrorMessage(error)}`,
         sql,
         safeParams,
         error
       );
-
       Logger.error('query failed: %s', getErrorMessage(error));
-      Logger.debug('failed query: %s', sql);
-      Logger.debug('parameters: %o', safeParams);
-
       throw queryError;
     }
   }
 
-  private validateQueryParameters(sql: string, params?: any[]): void {
-    if (!sql || typeof sql !== 'string') {
-      throw new HiveQueryError('SQL query must be a non-empty string', sql, params);
-    }
-
-    // HiveClient uses positional `?` placeholders (not $1). Check count.
-    const placeholderCount = (sql.match(/\?/g) || []).length;
-    const safeParams = params ?? [];
-    if (placeholderCount !== safeParams.length) {
-      Logger.warn('parameter count mismatch: %d placeholders, %d parameters',
-        placeholderCount, safeParams.length);
-    }
+  /**
+   * Extracts a plain value from a TColumnValue object.
+   */
+  private extractValue(colVal: any): any {
+    if (colVal.boolVal !== undefined) return colVal.boolVal;
+    if (colVal.byteVal !== undefined) return colVal.byteVal;
+    if (colVal.i16Val !== undefined) return colVal.i16Val;
+    if (colVal.i32Val !== undefined) return colVal.i32Val;
+    if (colVal.i64Val !== undefined) return colVal.i64Val;
+    if (colVal.doubleVal !== undefined) return colVal.doubleVal;
+    if (colVal.stringVal !== undefined) return colVal.stringVal;
+    if (colVal.binaryVal !== undefined) return colVal.binaryVal;
+    return null;
   }
 
+  /**
+   * Determine if an error is connection‑related.
+   */
   private isConnectionError(error: unknown): boolean {
     const errorMessage = getErrorMessage(error).toLowerCase();
     const connectionErrors = [
@@ -350,9 +443,7 @@ class HiveConnection {
       'connection', 'connect', 'socket', 'network', 'terminated',
       'transport', 'thrift',
     ];
-    return connectionErrors.some(term =>
-      errorMessage.includes(term)
-    );
+    return connectionErrors.some(term => errorMessage.includes(term));
   }
 
   /**
@@ -376,7 +467,7 @@ class HiveConnection {
   /**
    * Returns the underlying HiveClient (for advanced operations).
    */
-  getClient(): HiveClient | null {
+  getClient(): any {
     return this.client;
   }
 
@@ -460,6 +551,8 @@ class HiveSchemaInspector {
 
   /**
    * Execute an arbitrary SQL query (HiveQL).
+   * Parameterised queries are NOT supported – the `params` argument is ignored
+   * (see HiveConnection.query documentation).
    */
   async executeQuery(
     sql: string,
@@ -487,11 +580,8 @@ class HiveSchemaInspector {
       const result = await this.connection.query(finalSql, params);
       const executionTime = Date.now() - startTime;
 
-      // HiveClient returns result.schema as an array of { name, type }
-      const fields = (result.schema || []).map((col: any) => ({
-        name: col.name,
-        type: col.type,
-      }));
+      // result.schema is already in {name, type} form
+      const fields = result.schema;
 
       const queryResult: QueryResult = {
         success: true,
@@ -499,7 +589,7 @@ class HiveSchemaInspector {
         rowCount: result.rows.length,
         fields,
         executionTime,
-        affectedRows: result.rows.length,   // Hive generally returns all rows
+        affectedRows: result.rows.length,
         command: finalSql.trim().split(/\s+/)[0].toUpperCase(),
       };
 
@@ -586,13 +676,10 @@ class HiveSchemaInspector {
   /**
    * Retrieves all tables in the configured Hive database.
    * Uses `SHOW TABLES` and then `DESCRIBE FORMATTED` for each table.
-   * In Hive, the "schema" is the database; table names are returned.
    */
   async getTables(): Promise<TableInfo[]> {
     await this.connection.connect();
 
-    // Hive does not let you parameterise identifiers in SHOW TABLES,
-    // so we construct the query carefully (only after validating schema name).
     const schema = this.schema;
     const showTablesSql = `SHOW TABLES IN \`${schema}\``;
 
@@ -606,9 +693,7 @@ class HiveSchemaInspector {
 
       for (const tabName of tableNames) {
         const table = new TableInfo(schema, tabName);
-        // Retrieve column metadata via DESCRIBE
         await this.getTableColumns(table);
-        // Optionally enrich with row counts and size estimates (Hive can provide statistics)
         await this.enrichTableMetadata(table);
         tables.push(table);
       }
@@ -622,7 +707,6 @@ class HiveSchemaInspector {
 
   /**
    * Get column details using `DESCRIBE table`.
-   * Hive returns: col_name, data_type, comment (and sometimes extra columns).
    */
   private async getTableColumns(table: TableInfo): Promise<void> {
     const describeSql = `DESCRIBE \`${table.schemaname}\`.\`${table.tablename}\``;
@@ -631,19 +715,16 @@ class HiveSchemaInspector {
       const result = await this.connection.query(describeSql);
 
       for (const row of result.rows) {
-        // Hive DESCRIBE can also contain partition info (lines starting with '#')
-        // and blank lines; we skip those.
         const colName = row.col_name?.trim();
         if (!colName || colName.startsWith('#') || colName === '') {
           continue;
         }
 
-        // Hive DESCRIBE columns: col_name, data_type, comment
         const columnInfo: ColumnInfo = {
           name: colName,
           type: row.data_type,
           comment: row.comment || undefined,
-          nullable: true,         // Hive does not enforce NOT NULL by default
+          nullable: true,
           default: undefined,
           isIdentity: false,
         };
@@ -687,16 +768,12 @@ class HiveSchemaInspector {
 
   /**
    * Enrich table metadata with row counts and size if statistics are available.
-   * Hive can provide stats via `ANALYZE TABLE` results. A lightweight approach
-   * is to query `SHOW TBLPROPERTIES` or use a `SELECT COUNT(*)` (may be expensive).
-   * Here we attempt a `SHOW TBLPROPERTIES` and parse the `numRows` and `totalSize` keys.
    */
   private async enrichTableMetadata(table: TableInfo): Promise<void> {
     try {
       const propsSql = `SHOW TBLPROPERTIES \`${table.schemaname}\`.\`${table.tablename}\``;
       const result = await this.connection.query(propsSql);
 
-      // The result has columns: prpt_name, prpt_value (depending on Hive version)
       const props: Record<string, string> = {};
       for (const row of result.rows) {
         if (row.prpt_name && row.prpt_value) {
@@ -712,15 +789,11 @@ class HiveSchemaInspector {
       if (props['totalSize']) {
         table.size = this.formatBytes(parseInt(props['totalSize'], 10));
       }
-      // Distinguish views via property 'virtual.view' if present
-      if (props['virtual.view'] === 'true') {
+      if (props['virtual.view'] === 'true' || props['table_type'] === 'VIRTUAL_VIEW') {
         table.tabletype = 'view';
-      } else if (props['table_type'] === 'VIRTUAL_VIEW') {
-        table.tabletype = 'view';
-      } else if (table.tabletype !== 'view') {
+      } else {
         table.tabletype = 'table';
       }
-
     } catch (error) {
       Logger.warn('failed to enrich metadata for table %s: %s',
         table.tablename, getErrorMessage(error));
@@ -735,17 +808,11 @@ class HiveSchemaInspector {
     return parseFloat((bytes / Math.pow(k, i)).toFixed(2)) + ' ' + sizes[i];
   }
 
-  /**
-   * Get a specific table by name.
-   */
   async getTable(tableName: string): Promise<TableInfo | null> {
     const allTables = await this.getTables();
     return allTables.find(t => t.tablename === tableName) || null;
   }
 
-  /**
-   * Get Hive version and database information.
-   */
   async getDatabaseInfo(): Promise<{
     version: string;
     name: string;
@@ -762,14 +829,11 @@ class HiveSchemaInspector {
     return {
       version,
       name,
-      encoding: undefined,    // Hive does not expose encoding in a simple way
+      encoding: undefined,
       collation: undefined,
     };
   }
 
-  /**
-   * Get the underlying connection instance.
-   */
   getConnection(): HiveConnection {
     return this.connection;
   }
@@ -780,16 +844,11 @@ class HiveSchemaInspector {
 
   setSchema(schema: string): void {
     this.schema = schema;
-    // Update the connection’s database name as well
     const config = this.connection.getConfig();
     config.dbname = schema;
-    // Recreate connection if needed? For simplicity, we only change the schema
     Logger.debug('schema set to: %s', schema);
   }
 
-  /**
-   * Flatten a possibly linked list of TableInfo.
-   */
   static flattenTableList(tables: TableInfo | TableInfo[]): TableInfo[] {
     if (Array.isArray(tables)) return tables;
     const result: TableInfo[] = [];
@@ -801,9 +860,6 @@ class HiveSchemaInspector {
     return result;
   }
 
-  /**
-   * Convert to a standardised format for DatabaseMetadataWizard.
-   */
   static toStandardizedFormat(tables: TableInfo[]): any[] {
     return tables.map(table => ({
       schemaname: table.schemaname,

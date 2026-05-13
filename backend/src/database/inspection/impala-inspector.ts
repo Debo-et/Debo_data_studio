@@ -10,10 +10,6 @@
 
 import { HiveClient } from 'hive-driver';
 
-// Infer the exact config type expected by HiveClient's constructor
-// This resolves the missing export error for 'HiveClientConfig'
-type HiveClientConfig = ConstructorParameters<typeof HiveClient>[0];
-
 // ---------------------------------------------------------------------------
 // Re‑use identical type definitions and utilities from the PostgreSQL inspector
 // ---------------------------------------------------------------------------
@@ -175,7 +171,7 @@ class ImpalaQueryError extends Error {
 }
 
 // ---------------------------------------------------------------------------
-// Impala Connection Manager – wraps HiveClient (HiveServer2)
+// Impala Connection Manager – properly wraps HiveClient (HiveServer2)
 // ---------------------------------------------------------------------------
 class ImpalaConnection {
   private client: HiveClient | null = null;
@@ -187,6 +183,8 @@ class ImpalaConnection {
   /**
    * Initialises the HiveClient to talk to an Impala Daemon via HiveServer2.
    * Default port is 21050; default database is 'default'.
+   *
+   * Works around incomplete/incorrect type definitions of hive-driver by using any.
    */
   async connect(): Promise<void> {
     if (this.isConnected && this.client) {
@@ -194,18 +192,15 @@ class ImpalaConnection {
       return;
     }
 
-    const impalaConfig: HiveClientConfig = {
-      host: this.config.host || 'localhost',
-      port: this.config.port ? parseInt(this.config.port, 10) : 21050, // Impala default
+    const host = this.config.host || 'localhost';
+    const port = this.config.port ? parseInt(this.config.port, 10) : 21050;
+
+    // Connection options for HiveClient.connect()
+    const connectOptions: any = {
+      host,
+      port,
       username: this.config.user,
       password: this.config.password,
-      databaseName: this.config.dbname || 'default',
-      maxRetries: 1,
-      retryInitialDelay: 1000,
-      connectTimeout: 15000,
-      socketTimeout: 30000,
-      // Impala supports SASL PLAIN when authentication is required
-      sasl: this.config.user ? { mechanism: 'PLAIN' } : undefined,
     };
 
     let lastError: unknown = null;
@@ -214,24 +209,40 @@ class ImpalaConnection {
       try {
         Logger.debug('connection attempt %d/%d', attempt, this.maxRetries);
 
-        this.client = new HiveClient(impalaConfig);
+        // Instantiate HiveClient – the constructor expects two Thrift arguments,
+        // but the module does not export them. We must pass any here.
+        this.client = new (HiveClient as any)(
+          undefined,   // TCLIService – not exported, can be undefined/null
+          undefined    // TCLIService_types
+        ) as HiveClient;
+
         this.client.on('error', (err: Error) => {
           Logger.error('Unexpected HiveClient error: %s', getErrorMessage(err));
           this.isConnected = false;
         });
 
-        await this.client.connect();
+        await (this.client as any).connect(connectOptions);
         this.isConnected = true;
 
-        Logger.info('successfully connected to Impala at %s:%d (attempt %d)',
-          impalaConfig.host, impalaConfig.port, attempt);
+        // Switch to the desired database if specified
+        const dbName = this.config.dbname || 'default';
+        if (dbName !== 'default') {
+          try {
+            await this.executeHiveQuery(`USE \`${dbName}\``);
+            Logger.debug('switched to database: %s', dbName);
+          } catch (err) {
+            Logger.warn('could not switch to database %s: %s', dbName, getErrorMessage(err));
+          }
+        }
+
+        Logger.info('successfully connected to Impala at %s:%d (attempt %d)', host, port, attempt);
         return;
 
       } catch (error) {
         lastError = error;
         this.isConnected = false;
         if (this.client) {
-          try { await this.client.close(); } catch (_) {}
+          try { await (this.client as any).close(); } catch (_) {}
           this.client = null;
         }
 
@@ -255,7 +266,7 @@ class ImpalaConnection {
   async checkHealth(): Promise<boolean> {
     if (!this.isConnected || !this.client) return false;
     try {
-      const result = await this.client.query('SELECT 1 AS health_check');
+      const result = await this.executeHiveQuery('SELECT 1 AS health_check');
       return result.rows.length > 0 && result.rows[0].health_check === 1;
     } catch (error) {
       this.isConnected = false;
@@ -272,15 +283,16 @@ class ImpalaConnection {
   }
 
   /**
-   * Execute a query. Impala (via HiveServer2) uses positional `?` placeholders.
+   * Public query interface that returns rows + schema.
+   * Parameters are escaped manually because HiveServer2 does not support ? placeholders natively.
    */
-  async query(sql: string, params?: any[]): Promise<any> {
-    const safeParams = params ?? [];
-    this.validateQueryParameters(sql, safeParams);
-
+  async query(sql: string, params?: any[]): Promise<{ rows: any[]; schema: any[] }> {
     if (!this.isConnected || !this.client) {
       throw new ImpalaConnectionError('Database not connected');
     }
+
+    const safeParams = params ?? [];
+    this.validateQueryParameters(sql, safeParams);
 
     try {
       Logger.debug('executing query: %s with %d parameters',
@@ -288,7 +300,7 @@ class ImpalaConnection {
         safeParams.length);
 
       const startTime = Date.now();
-      const result = await this.client.query(sql, safeParams);
+      const result = await this.executeHiveQuery(sql, safeParams);
       const duration = Date.now() - startTime;
 
       Logger.debug('query completed in %d ms, %d rows returned', duration, result.rows.length);
@@ -314,16 +326,93 @@ class ImpalaConnection {
     }
   }
 
-  private validateQueryParameters(sql: string, params?: any[]): void {
+  /**
+   * Core method that performs the full session → execute → fetch cycle.
+   * Uses `any` to bypass missing type exports and incorrect method signatures.
+   */
+  private async executeHiveQuery(
+    sql: string,
+    params?: any[]
+  ): Promise<{ rows: any[]; schema: any[] }> {
+    if (!this.client) throw new ImpalaConnectionError('Not connected');
+
+    // Replace ? placeholders with escaped parameter values
+    const paramArr = params ?? [];
+    let paramIndex = 0;
+    const finalSql = sql.replace(/\?/g, () => {
+      if (paramIndex >= paramArr.length) return '?';
+      const val = paramArr[paramIndex++];
+      return this.escapeParam(val);
+    });
+
+    // Open a session – protocol version 8 for HiveServer2
+    const session = await (this.client as any).openSession({
+      client_protocol: 8, // HIVE_CLI_SERVICE_PROTOCOL_V8
+    });
+
+    try {
+      // Execute statement
+      const operation = await session.executeStatement(finalSql, { runAsync: false });
+
+      try {
+        // Get schema
+        const schemaData = await operation.getSchema();
+        // schemaData may be an empty array or a TableSchema object; force to array
+        const rawCols: any[] = Array.isArray(schemaData) ? schemaData : (schemaData ? [schemaData] : []);
+        const fields = rawCols.map((col: any) => ({
+          name: col.columnName,
+          type: col.typeDesc?.types?.[0]?.primitiveEntry?.type?.toString() ?? 'STRING',
+        }));
+
+        // Fetch rows
+        let allRows: any[][] = [];
+        // TFetchOrientation.FETCH_NEXT = 2 (as per Thrift definition)
+        const FETCH_NEXT = 2;
+        let hasMore = true;
+        while (hasMore) {
+          // The real fetch method expects (orientation: number), not an options object.
+          const fetchResult = await operation.fetch(FETCH_NEXT);
+          // fetchResult may have a 'rows' property and 'hasMoreRows'
+          if (fetchResult.rows && fetchResult.rows.length > 0) {
+            allRows = allRows.concat(fetchResult.rows);
+          }
+          hasMore = fetchResult.hasMoreRows;
+        }
+
+        // Convert row arrays to objects keyed by column name
+        const rows = allRows.map(rowArr =>
+          fields.reduce((obj, col, idx) => {
+            obj[col.name] = rowArr[idx];
+            return obj;
+          }, {} as Record<string, any>)
+        );
+
+        return { rows, schema: fields };
+      } finally {
+        await operation.close();
+      }
+    } finally {
+      await session.close();
+    }
+  }
+
+  private escapeParam(value: any): string {
+    if (value === null || value === undefined) return 'NULL';
+    if (typeof value === 'number') return value.toString();
+    if (typeof value === 'boolean') return value ? 'TRUE' : 'FALSE';
+    // Simplistic string escape (doubles quotes)
+    return `'${String(value).replace(/'/g, "''")}'`;
+  }
+
+  private validateQueryParameters(sql: string, params: any[]): void {
     if (!sql || typeof sql !== 'string') {
       throw new ImpalaQueryError('SQL query must be a non-empty string', sql, params);
     }
 
     const placeholderCount = (sql.match(/\?/g) || []).length;
-    const safeParams = params ?? [];
-    if (placeholderCount !== safeParams.length) {
+    if (placeholderCount !== params.length) {
       Logger.warn('parameter count mismatch: %d placeholders, %d parameters',
-        placeholderCount, safeParams.length);
+        placeholderCount, params.length);
     }
   }
 
@@ -341,7 +430,7 @@ class ImpalaConnection {
     if (this.client) {
       try {
         Logger.debug('closing Impala connection');
-        await this.client.close();
+        await (this.client as any).close();
         Logger.info('Impala connection closed successfully');
       } catch (error) {
         Logger.error('error closing Impala client: %s', getErrorMessage(error));
@@ -406,7 +495,6 @@ class ImpalaSchemaInspector {
   async testConnection(): Promise<{ success: boolean; version?: string; error?: string }> {
     try {
       await this.connection.connect();
-      // Impala provides version() just like Hive
       const result = await this.connection.query('SELECT version() AS version');
       if (result.rows && result.rows.length > 0) {
         const version = result.rows[0].version;
@@ -452,7 +540,7 @@ class ImpalaSchemaInspector {
       const result = await this.connection.query(finalSql, params);
       const executionTime = Date.now() - startTime;
 
-      const fields = (result.schema || []).map((col: any) => ({
+      const fields = result.schema.map((col: any) => ({
         name: col.name,
         type: col.type,
       }));
@@ -547,7 +635,6 @@ class ImpalaSchemaInspector {
     await this.connection.connect();
 
     const schema = this.schema;
-    // Note: SHOW TABLES is an identifier and cannot be parameterised; we trust the schema name.
     const showTablesSql = `SHOW TABLES IN \`${schema}\``;
 
     try {
@@ -574,7 +661,6 @@ class ImpalaSchemaInspector {
 
   /**
    * Retrieve column metadata using `DESCRIBE table`.
-   * Impala returns: name, type, comment in a fixed order.
    */
   private async getTableColumns(table: TableInfo): Promise<void> {
     const describeSql = `DESCRIBE \`${table.schemaname}\`.\`${table.tablename}\``;
@@ -584,7 +670,6 @@ class ImpalaSchemaInspector {
 
       for (const row of result.rows) {
         const colName = (row.name || row.col_name || '').trim();
-        // Impala includes partition info as additional rows; we only take real columns
         if (!colName || colName.startsWith('#') || colName === '') {
           continue;
         }
@@ -593,7 +678,7 @@ class ImpalaSchemaInspector {
           name: colName,
           type: row.type || row.data_type,
           comment: row.comment || undefined,
-          nullable: true,           // Impala does not enforce NOT NULL
+          nullable: true,
           default: undefined,
           isIdentity: false,
         };
@@ -628,15 +713,12 @@ class ImpalaSchemaInspector {
 
   /**
    * Enrich table metadata with row counts and size using `SHOW TABLE STATS`.
-   * This command returns one row per column + summary rows.
    */
   private async enrichTableMetadata(table: TableInfo): Promise<void> {
     try {
       const statsSql = `SHOW TABLE STATS \`${table.schemaname}\`.\`${table.tablename}\``;
       const result = await this.connection.query(statsSql);
 
-      // The output contains rows with keys: 'Rows', 'Size', 'Format', etc.
-      // We search for the summary row where the first column is empty or '# Rows'
       for (const row of result.rows) {
         const key = (row[0] || row.col_name || '').toString().trim();
         const value = (row[1] || row.data_type || '').toString().trim();
@@ -649,8 +731,6 @@ class ImpalaSchemaInspector {
         }
       }
 
-      // Detect views: Impala views return 'VIRTUAL_VIEW' in table type via EXPLAIN or TBLPROPERTIES
-      // A simple heuristic: if SHOW TABLE STATS returns no rows, it might be a view.
       if (result.rows.length === 0) {
         table.tabletype = 'view';
       }
@@ -748,7 +828,7 @@ class ImpalaSchemaInspector {
 }
 
 // ---------------------------------------------------------------------------
-// Exports – exactly mirroring the PostgreSQL/Hive inspector
+// Exports
 // ---------------------------------------------------------------------------
 export {
   ImpalaSchemaInspector,

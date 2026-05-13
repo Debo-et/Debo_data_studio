@@ -3,11 +3,33 @@
  * Comprehensive schema inspection with robust error handling and connection management
  * TypeScript implementation optimized for DatabaseMetadataWizard integration
  * 
- * NOTE: This implementation uses the `teradata` npm package (https://www.npmjs.com/package/teradata)
- *       Install with: npm install teradata
+ * NOTE: This implementation uses the official `teradatasql` npm package.
+ *       Install with: npm install teradatasql
  */
 
-import { TeradataConnection, TeradataConnectionConfig } from 'teradata';
+// Import the driver (default export contains TeradataConnection)
+import teradatasql from 'teradatasql';
+
+// Local type definition for the Teradata driver methods (since official types are missing)
+interface ITeradataConnection {
+  connect(config: {
+    host: string;
+    port: number;
+    user: string;
+    password: string;
+    logmech?: string;
+    charset?: string;
+  }): Promise<void>;
+  query(sql: string): Promise<{
+    rows: any[];
+    rowCount: number;
+    fields: Array<{ name: string; type: string }>;
+  }>;
+  close(): Promise<void>;
+}
+
+// Grab the TeradataConnection constructor (it's a property of the default export)
+const TeradataConnection = (teradatasql as any).TeradataConnection as new () => ITeradataConnection;
 
 // Database connection configuration (adapted for Teradata)
 interface DatabaseConfig {
@@ -21,7 +43,7 @@ interface DatabaseConfig {
   charset?: string;         // Character set
 }
 
-// Enhanced Column information structure (unchanged)
+// Enhanced Column information structure
 interface ColumnInfo {
   name: string;
   type: string;
@@ -34,7 +56,7 @@ interface ColumnInfo {
   scale?: number;
 }
 
-// Enhanced Table information structure (unchanged)
+// Enhanced Table information structure
 class TableInfo {
   public tabletype: string = 'table';
   public comment?: string;
@@ -69,7 +91,7 @@ class TableInfo {
   }
 }
 
-// Query execution result structure (unchanged)
+// Query execution result structure
 interface QueryResult {
   success: boolean;
   rows?: any[];
@@ -84,7 +106,7 @@ interface QueryResult {
   command?: string;
 }
 
-// Utility function to safely extract error message (unchanged)
+// Utility function to safely extract error message
 function getErrorMessage(error: unknown): string {
   if (error instanceof Error) {
     return error.message;
@@ -95,13 +117,13 @@ function getErrorMessage(error: unknown): string {
   }
 }
 
-// Utility function to check if error is instance of Error (unchanged)
+// Utility function to check if error is instance of Error
 function isError(error: unknown): error is Error {
   return error instanceof Error;
 }
 
 /**
- * Advanced logging utilities with log levels (unchanged)
+ * Advanced logging utilities with log levels
  */
 class Logger {
   static logLevel: 'DEBUG' | 'INFO' | 'WARN' | 'ERROR' = 'INFO';
@@ -152,7 +174,7 @@ class Logger {
 }
 
 /**
- * Teradata Connection Error Types (parallel to PostgreSQL errors)
+ * Teradata Connection Error Types
  */
 class TeradataConnectionError extends Error {
   constructor(
@@ -179,10 +201,10 @@ class TeradataQueryError extends Error {
 
 /**
  * Teradata Connection Manager
- * Replaces PostgreSQL pool with a single Teradata connection.
+ * Uses the official `teradatasql` driver (Promise‑based).
  */
 class TeradataConnectionManager {
-  private connection: TeradataConnection | null = null;
+  private connection: ITeradataConnection | null = null;
   private isConnected: boolean = false;
   private readonly maxRetries: number = 3;
 
@@ -197,7 +219,7 @@ class TeradataConnectionManager {
       return;
     }
 
-    const connectionConfig: TeradataConnectionConfig = {
+    const connectionConfig = {
       host: this.config.host || 'localhost',
       port: this.config.port ? parseInt(this.config.port) : 1025,
       user: this.config.user || '',
@@ -213,11 +235,10 @@ class TeradataConnectionManager {
         Logger.debug('connection attempt %d/%d', attempt, this.maxRetries);
 
         this.connection = new TeradataConnection();
-        // Connect asynchronously (the driver's connect method returns a promise)
         await this.connection.connect(connectionConfig);
 
         // Test the connection with a simple query
-        const result = await this.queryUnsafe('SELECT 1 as connection_test');
+        const result = await this.connection.query('SELECT 1 as connection_test');
         if (!result || result.rowCount === 0) {
           throw new Error('Connection test returned no rows');
         }
@@ -232,7 +253,7 @@ class TeradataConnectionManager {
         this.isConnected = false;
         if (this.connection) {
           try {
-            this.connection.close();
+            await this.connection.close();
           } catch {}
           this.connection = null;
         }
@@ -255,21 +276,13 @@ class TeradataConnectionManager {
   }
 
   /**
-   * Internal method: execute query without parameter substitution (for health checks, etc.)
+   * Execute a query (internal, no parameter substitution)
    */
   private async queryUnsafe(sql: string): Promise<any> {
     if (!this.connection) {
       throw new TeradataConnectionError('No active Teradata connection');
     }
-    return new Promise((resolve, reject) => {
-      this.connection!.query(sql, (err, rows, rowCount, fields) => {
-        if (err) {
-          reject(err);
-        } else {
-          resolve({ rows, rowCount, fields });
-        }
-      });
-    });
+    return this.connection.query(sql);
   }
 
   /**
@@ -311,7 +324,6 @@ class TeradataConnectionManager {
       throw new TeradataConnectionError('Database not connected');
     }
 
-    // Substitute parameters
     const finalSql = this.substituteParameters(sql, params);
 
     Logger.debug('executing query: %s with %d parameters',
@@ -326,7 +338,6 @@ class TeradataConnectionManager {
         duration, result.rowCount || 0);
       return result;
     } catch (error) {
-      const duration = Date.now() - startTime;
       if (this.isConnectionError(error)) {
         this.isConnected = false;
         Logger.warn('connection lost during query');
@@ -347,11 +358,9 @@ class TeradataConnectionManager {
 
   /**
    * Simple parameter substitution for $1, $2, ... placeholders.
-   * Uses Teradata's literal quoting rules for strings and numbers.
    */
   private substituteParameters(sql: string, params: any[]): string {
     if (!params.length) return sql;
-    let idx = 1;
     const result = sql.replace(/\$(\d+)/g, (match, numStr: string) => {
       const paramIndex = parseInt(numStr) - 1;
       if (paramIndex >= params.length) {
@@ -368,12 +377,10 @@ class TeradataConnectionManager {
       if (typeof value === 'boolean') {
         return value ? '1' : '0';
       }
-      // String escaping: double any single quotes and wrap in single quotes
       if (typeof value === 'string') {
         const escaped = value.replace(/'/g, "''");
         return `'${escaped}'`;
       }
-      // fallback: convert to string and quote
       const escaped = String(value).replace(/'/g, "''");
       return `'${escaped}'`;
     });
@@ -381,7 +388,7 @@ class TeradataConnectionManager {
   }
 
   /**
-   * Validate query parameters to prevent basic injection patterns (unchanged logic)
+   * Validate query parameters to prevent basic injection patterns
    */
   private validateQueryParameters(sql: string, params: any[] = []): void {
     if (!sql || typeof sql !== 'string') {
@@ -409,7 +416,7 @@ class TeradataConnectionManager {
   }
 
   /**
-   * Determine if error is a connection-level error (adapted for Teradata)
+   * Determine if error is a connection-level error
    */
   private isConnectionError(error: unknown): boolean {
     const errorMessage = getErrorMessage(error).toLowerCase();
@@ -430,7 +437,7 @@ class TeradataConnectionManager {
     if (this.connection) {
       try {
         Logger.debug('closing Teradata connection');
-        this.connection.close();
+        await this.connection.close();
         Logger.info('connection closed successfully');
       } catch (error) {
         Logger.error('error closing connection: %s', getErrorMessage(error));
@@ -442,22 +449,17 @@ class TeradataConnectionManager {
   }
 
   /**
-   * Mock `getPool` method to maintain compatibility with the original interface.
-   * Returns the underlying Teradata connection wrapped in a minimal compatible object
-   * for transaction handling.
+   * Mock `getPool` method to maintain compatibility
    */
   getPool(): any {
     if (!this.connection) return null;
     return {
-      connect: async () => {
-        // Return the same connection for client-like access
-        return {
-          query: (sql: string, params?: any[]) => this.query(sql, params),
-          release: () => {}, // no-op
-          on: () => {},
-          off: () => {},
-        };
-      }
+      connect: async () => ({
+        query: (sql: string, params?: any[]) => this.query(sql, params),
+        release: () => {},
+        on: () => {},
+        off: () => {},
+      })
     };
   }
 
@@ -472,7 +474,6 @@ class TeradataConnectionManager {
 
 /**
  * Enhanced Teradata Schema Inspector with Query Execution
- * Comprehensive metadata extraction with robust error handling
  */
 class TeradataSchemaInspector {
   private connection: TeradataConnectionManager;
@@ -480,20 +481,13 @@ class TeradataSchemaInspector {
 
   constructor(config: DatabaseConfig) {
     this.connection = new TeradataConnectionManager(config);
-    // In Teradata, schema is equivalent to database. If not provided, use the dbname.
     this.schema = config.schema || config.dbname;
   }
 
-  /**
-   * Set log level for debugging
-   */
   static setLogLevel(level: 'DEBUG' | 'INFO' | 'WARN' | 'ERROR'): void {
     Logger.setLogLevel(level);
   }
 
-  /**
-   * Validate database connection parameters before connection
-   */
   static validateConnectionConfig(config: DatabaseConfig): string[] {
     const errors: string[] = [];
 
@@ -517,76 +511,43 @@ class TeradataSchemaInspector {
     return errors;
   }
 
-  /**
-   * Test connection without full schema inspection
-   */
   async testConnection(): Promise<{ success: boolean; version?: string; error?: string }> {
     try {
       await this.connection.connect();
-
       const result = await this.connection.query('SELECT InfoData as version FROM DBC.DBCInfoV WHERE InfoKey = \'VERSION\'');
-
       if (result.rows && result.rows.length > 0) {
         const version = result.rows[0].version;
-        const database = this.schema;
-
-        Logger.info('connection test successful - database: %s, version: %s',
-          database, version);
-
-        return {
-          success: true,
-          version: version
-        };
+        Logger.info('connection test successful - database: %s, version: %s', this.schema, version);
+        return { success: true, version };
       }
-
       return { success: false, error: 'No data returned from version query' };
     } catch (error) {
       const errorMessage = getErrorMessage(error);
       Logger.error('connection test failed: %s', errorMessage);
-      return {
-        success: false,
-        error: errorMessage
-      };
+      return { success: false, error: errorMessage };
     } finally {
       await this.connection.disconnect();
     }
   }
 
-  /**
-   * Executes arbitrary SQL query against the Teradata database
-   */
   async executeQuery(
     sql: string,
     params: any[] = [],
-    options: {
-      maxRows?: number;
-      timeout?: number;
-      autoDisconnect?: boolean;
-    } = {}
+    options: { maxRows?: number; timeout?: number; autoDisconnect?: boolean } = {}
   ): Promise<QueryResult> {
     const startTime = Date.now();
     const { maxRows, autoDisconnect = false } = options;
 
     try {
       await this.connection.connect();
-
       Logger.info('executing arbitrary SQL query');
-      Logger.debug('query: %s', sql.substring(0, 200) + (sql.length > 200 ? '...' : ''));
-
       let finalSql = sql;
       if (maxRows && sql.trim().toUpperCase().startsWith('SELECT')) {
         finalSql = this.applyRowLimit(sql, maxRows);
       }
-
       const result = await this.connection.query(finalSql, params);
       const executionTime = Date.now() - startTime;
-
-      // Fields mapping – Teradata driver returns fields as an array of { name, type, ... }
-      const fields = result.fields?.map((field: any) => ({
-        name: field.name,
-        type: field.type
-      })) || [];
-
+      const fields = result.fields?.map((field: any) => ({ name: field.name, type: field.type })) || [];
       const queryResult: QueryResult = {
         success: true,
         rows: result.rows,
@@ -596,24 +557,13 @@ class TeradataSchemaInspector {
         affectedRows: result.rowCount ?? undefined,
         command: 'generic'
       };
-
-      Logger.info('query executed successfully in %d ms, returned %d rows',
-        executionTime, result.rowCount || 0);
-
+      Logger.info('query executed successfully in %d ms, returned %d rows', executionTime, result.rowCount || 0);
       return queryResult;
     } catch (error) {
       const executionTime = Date.now() - startTime;
       const errorMessage = getErrorMessage(error);
-
       Logger.error('query execution failed in %d ms: %s', executionTime, errorMessage);
-
-      return {
-        success: false,
-        executionTime,
-        error: errorMessage,
-        rows: [],
-        rowCount: 0
-      };
+      return { success: false, executionTime, error: errorMessage, rows: [], rowCount: 0 };
     } finally {
       if (autoDisconnect) {
         await this.connection.disconnect();
@@ -621,20 +571,13 @@ class TeradataSchemaInspector {
     }
   }
 
-  /**
-   * Apply row limit to SELECT queries (Teradata uses TOP N)
-   */
   private applyRowLimit(sql: string, maxRows: number): string {
     const trimmed = sql.trim();
     const upperSql = trimmed.toUpperCase();
-
     if (upperSql.startsWith('SELECT')) {
-      // Teradata syntax: SELECT TOP 100 * FROM ...
       if (!upperSql.includes('TOP')) {
-        // Insert TOP after SELECT
         return trimmed.replace(/^SELECT/i, `SELECT TOP ${maxRows}`);
       } else {
-        // Update existing TOP
         const topMatch = trimmed.match(/TOP\s+(\d+)/i);
         if (topMatch) {
           const currentLimit = parseInt(topMatch[1]);
@@ -647,39 +590,26 @@ class TeradataSchemaInspector {
     return sql;
   }
 
-  /**
-   * Execute a query with auto-disconnect (convenience method)
-   */
   async executeQueryAndDisconnect(sql: string, params: any[] = []): Promise<QueryResult> {
     return this.executeQuery(sql, params, { autoDisconnect: true });
   }
 
-  /**
-   * Execute multiple queries in a transaction (Teradata transaction handling)
-   */
   async executeTransaction(queries: Array<{ sql: string; params?: any[] }>): Promise<QueryResult[]> {
     await this.connection.connect();
     const pool = this.connection.getPool();
     if (!pool) throw new Error('Pool not available');
-
-    // Simulated client (same connection)
     const client = await pool.connect();
-    
     try {
-      await client.query('BT;'); // Begin Transaction (Teradata mode)
+      await client.query('BT;');
       Logger.info('starting transaction with %d queries', queries.length);
-
       const results: QueryResult[] = [];
-
       for (let i = 0; i < queries.length; i++) {
         const { sql, params = [] } = queries[i];
         Logger.debug('executing transaction query %d/%d', i + 1, queries.length);
-
         const startTime = Date.now();
         try {
           const result = await client.query(sql, params);
           const executionTime = Date.now() - startTime;
-
           results.push({
             success: true,
             rows: result.rows,
@@ -694,8 +624,7 @@ class TeradataSchemaInspector {
           throw error;
         }
       }
-
-      await client.query('ET;'); // End Transaction
+      await client.query('ET;');
       Logger.info('transaction completed successfully');
       return results;
     } catch (error) {
@@ -710,36 +639,28 @@ class TeradataSchemaInspector {
     }
   }
 
-  /**
-   * Retrieves all tables from the database with comprehensive metadata
-   */
   async getTables(): Promise<TableInfo[]> {
     await this.connection.connect();
-
     const query = `
       SELECT
         TRIM(DatabaseName) AS schemaname,
         TRIM(TableName) AS tablename,
         TableKind,
         CommentString,
-        CAST(NULL AS VARCHAR(50)) AS size,   -- filled later
-        CAST(0 AS BIGINT) AS estimated_rows   -- filled later
+        CAST(NULL AS VARCHAR(50)) AS size,
+        CAST(0 AS BIGINT) AS estimated_rows
       FROM DBC.TablesV
       WHERE DatabaseName = $1
-        AND TableKind IN ('T','V','M','P')    -- Table, View, Macro, Procedure? Keep typical objects
+        AND TableKind IN ('T','V','M','P')
         AND TableName NOT LIKE 'SYS%'
       ORDER BY DatabaseName, TableName
     `;
-
     try {
       const result = await this.connection.query(query, [this.schema]);
       const tables: TableInfo[] = [];
-
       Logger.info('found %d tables in schema "%s"', result.rows.length, this.schema);
-
       for (const row of result.rows) {
         const table = new TableInfo(row.schemaname, row.tablename);
-        // Map Teradata TableKind to descriptive type
         switch (row.TableKind) {
           case 'T': table.tabletype = 'table'; break;
           case 'V': table.tabletype = 'view'; break;
@@ -748,13 +669,10 @@ class TeradataSchemaInspector {
           default: table.tabletype = row.TableKind.toLowerCase();
         }
         table.comment = row.CommentString?.trim() || undefined;
-
         await this.getTableColumns(table);
         await this.enrichTableMetadata(table);
-
         tables.push(table);
       }
-
       return tables;
     } catch (error) {
       Logger.error('Failed to retrieve tables: %s', getErrorMessage(error));
@@ -762,9 +680,6 @@ class TeradataSchemaInspector {
     }
   }
 
-  /**
-   * Enhanced column retrieval from DBC.ColumnsV
-   */
   private async getTableColumns(table: TableInfo): Promise<void> {
     const query = `
       SELECT
@@ -781,10 +696,8 @@ class TeradataSchemaInspector {
         AND TableName = $2
       ORDER BY ColumnId
     `;
-
     try {
       const result = await this.connection.query(query, [table.schemaname, table.tablename]);
-
       for (const row of result.rows) {
         const columnInfo: ColumnInfo = {
           name: row.ColumnName,
@@ -795,25 +708,16 @@ class TeradataSchemaInspector {
           isIdentity: (row.IdColType || '').trim().length > 0,
           length: row.ColumnLength
         };
-
-        // Extract precision/scale from ColumnType if present (e.g., 'DECIMAL(10,2)')
         this.extractTypeDetails(columnInfo, row.ColumnType);
         table.columns.push(columnInfo);
       }
-
-      Logger.debug('retrieved %d columns for table %s',
-        result.rows.length, table.tablename);
+      Logger.debug('retrieved %d columns for table %s', result.rows.length, table.tablename);
     } catch (error) {
-      Logger.error('column retrieval failed for table %s: %s',
-        table.tablename, getErrorMessage(error));
+      Logger.error('column retrieval failed for table %s: %s', table.tablename, getErrorMessage(error));
     }
   }
 
-  /**
-   * Extract precision, scale, length from Teradata type string
-   */
   private extractTypeDetails(column: ColumnInfo, typeString: string): void {
-    // Handles patterns like "DECIMAL(10,2)", "VARCHAR(100) CHARACTER SET LATIN", etc.
     const precisionScaleMatch = typeString.match(/\((\d+),(\d+)\)/);
     if (precisionScaleMatch) {
       column.precision = parseInt(precisionScaleMatch[1], 10);
@@ -825,18 +729,12 @@ class TeradataSchemaInspector {
     }
   }
 
-  /**
-   * Enrich table with size and estimated row count
-   */
   private async enrichTableMetadata(table: TableInfo): Promise<void> {
     try {
-      // Get table size from DBC.TableSizeV (CurrentPerm)
       const sizeQuery = `
-        SELECT
-          CAST(CurrentPerm AS DECIMAL(18,0)) AS totalBytes
+        SELECT CAST(CurrentPerm AS DECIMAL(18,0)) AS totalBytes
         FROM DBC.TableSizeV
-        WHERE DatabaseName = $1
-          AND TableName = $2
+        WHERE DatabaseName = $1 AND TableName = $2
       `;
       const sizeResult = await this.connection.query(sizeQuery, [table.schemaname, table.tablename]);
       if (sizeResult.rows.length > 0) {
@@ -845,14 +743,10 @@ class TeradataSchemaInspector {
           table.size = this.formatBytes(bytes);
         }
       }
-
-      // Attempt to get row count from statistics (may be empty)
       const statsQuery = `
-        SELECT
-          CAST(RowCount AS BIGINT) AS rowCount
+        SELECT CAST(RowCount AS BIGINT) AS rowCount
         FROM DBC.StatsV
-        WHERE DatabaseName = $1
-          AND TableName = $2
+        WHERE DatabaseName = $1 AND TableName = $2
       `;
       const statsResult = await this.connection.query(statsQuery, [table.schemaname, table.tablename]);
       if (statsResult.rows.length > 0) {
@@ -866,9 +760,6 @@ class TeradataSchemaInspector {
     }
   }
 
-  /**
-   * Format bytes to human-readable string
-   */
   private formatBytes(bytes: number): string {
     if (bytes === 0) return '0 B';
     const k = 1024;
@@ -877,76 +768,39 @@ class TeradataSchemaInspector {
     return parseFloat((bytes / Math.pow(k, i)).toFixed(2)) + ' ' + sizes[i];
   }
 
-  /**
-   * Get specific table metadata by name
-   */
   async getTable(tableName: string): Promise<TableInfo | null> {
     const allTables = await this.getTables();
     return allTables.find(table => table.tablename === tableName) || null;
   }
 
-  /**
-   * Get database version and information
-   */
-  async getDatabaseInfo(): Promise<{
-    version: string;
-    name: string;
-    encoding: string;
-    collation: string;
-  }> {
+  async getDatabaseInfo(): Promise<{ version: string; name: string; encoding: string; collation: string }> {
     await this.connection.connect();
-
-    const query = `
-      SELECT
-        InfoData AS version
-      FROM DBC.DBCInfoV
-      WHERE InfoKey = 'VERSION'
-    `;
-
+    const query = `SELECT InfoData AS version FROM DBC.DBCInfoV WHERE InfoKey = 'VERSION'`;
     try {
       const result = await this.connection.query(query);
       const version = result.rows[0]?.version || 'Unknown';
-      return {
-        version,
-        name: this.schema,
-        encoding: 'Unicode',  // DBCInfo may not provide charset, assume UTF-8
-        collation: 'Not Supported' // Teradata collation is per-column
-      };
+      return { version, name: this.schema, encoding: 'Unicode', collation: 'Not Supported' };
     } catch (error) {
       Logger.error('failed to get database info: %s', getErrorMessage(error));
       throw error;
     }
   }
 
-  /**
-   * Get the connection instance for external management
-   */
   getConnection(): TeradataConnectionManager {
     return this.connection;
   }
 
-  /**
-   * Get current schema
-   */
   getCurrentSchema(): string {
     return this.schema;
   }
 
-  /**
-   * Set schema for table discovery
-   */
   setSchema(schema: string): void {
     this.schema = schema;
     Logger.debug('schema set to: %s', schema);
   }
 
-  /**
-   * Utility method to convert table list to array (unchanged)
-   */
   static flattenTableList(tables: TableInfo | TableInfo[]): TableInfo[] {
-    if (Array.isArray(tables)) {
-      return tables;
-    }
+    if (Array.isArray(tables)) return tables;
     const result: TableInfo[] = [];
     let current: TableInfo | null = tables;
     while (current) {
@@ -956,9 +810,6 @@ class TeradataSchemaInspector {
     return result;
   }
 
-  /**
-   * Generate standardized table metadata for DatabaseMetadataWizard (unchanged)
-   */
   static toStandardizedFormat(tables: TableInfo[]): any[] {
     return tables.map(table => ({
       schemaname: table.schemaname,
@@ -982,7 +833,6 @@ class TeradataSchemaInspector {
   }
 }
 
-// Export enhanced functionality
 export {
   TeradataSchemaInspector,
   TeradataConnectionManager as TeradataConnection,
@@ -1000,5 +850,4 @@ export type {
   QueryResult
 };
 
-// Default export for convenience
 export default TeradataSchemaInspector;

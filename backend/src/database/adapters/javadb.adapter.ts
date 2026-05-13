@@ -166,7 +166,6 @@ export class JavaDBSchemaInspector {
         createDatabase: true
       });
       await testConn.connect();
-      const result = await testConn.executeQuery('VALUES (CURRENT_TIMESTAMP)');
       await testConn.disconnect();
       return {
         success: true,
@@ -208,9 +207,9 @@ export class JavaDBSchemaInspector {
         tablename: row.TABLENAME,
         tabletype: row.TABLETYPE === 'V' ? 'VIEW' : 'TABLE',
         columns: columns,
-        comment: null,               // Derby does not store table comments
+        comment: undefined,               // Derby does not store table comments
         rowCount: rowCount,
-        size: null,                  // Not easily available via JDBC
+        size: undefined,                  // Not easily available via JDBC
         originalData: row
       });
     }
@@ -241,11 +240,11 @@ export class JavaDBSchemaInspector {
       dataType: col.COLUMNDATATYPE,
       nullable: col.NULLS === 'Y',
       default: col.COLUMNDEFAULT,
-      comment: null,
-      length: null,
-      precision: null,
-      scale: null,
-      isIdentity: false,                   // Requires additional identity column check
+      comment: undefined,                // Changed from null to undefined
+      length: undefined,                 // Changed from null to undefined
+      precision: undefined,              // Changed from null to undefined
+      scale: undefined,                  // Changed from null to undefined
+      isIdentity: false,
       ordinalPosition: idx + 1
     }));
   }
@@ -287,7 +286,6 @@ export class JavaDBSchemaInspector {
     options?: { maxRows?: number; timeout?: number; autoDisconnect?: boolean }
   ): Promise<QueryResult> {
     const conn = this.getConnection();
-    const startTime = Date.now();
 
     try {
       let finalSql = sql;
@@ -300,16 +298,14 @@ export class JavaDBSchemaInspector {
       return {
         success: true,
         rows: rows,
-        rowCount: rows.length,
-        duration: Date.now() - startTime,
-        sql: finalSql
+        rowCount: rows.length
+        // Removed: sql and duration to match QueryResult type
       };
     } catch (error) {
       return {
         success: false,
-        error: error instanceof Error ? error.message : String(error),
-        duration: Date.now() - startTime,
-        sql
+        error: error instanceof Error ? error.message : String(error)
+        // Removed: sql and duration
       };
     }
   }

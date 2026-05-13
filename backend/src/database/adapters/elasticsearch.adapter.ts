@@ -303,7 +303,8 @@ class ElasticsearchConnection {
     Logger.debug('executing DSL search on index %s', index);
 
     const startTime = Date.now();
-    const response = await this.client!.search({
+    // FIX: Use generic `any` to make hit._source spreadable
+    const response = await this.client!.search<any>({
       index,
       body,
     });

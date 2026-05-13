@@ -20,199 +20,15 @@ import {
   AvroFieldDefinition,
 } from '../types/types';
 // Real Avro parsing library
-import * as avro from 'avsc';
 
-// -----------------------------------------------------------------
-// Avro type helper: flattens a parsed Avro schema into a field list
-// -----------------------------------------------------------------
-function flattenAvroSchema(
-  schemaObj: any,
-  path: string = '',
-  level: number = 0
-): AvroFieldDefinition[] {
-  const fields: AvroFieldDefinition[] = [];
-
-  if (schemaObj.type === 'record' && schemaObj.fields) {
-    schemaObj.fields.forEach((field: any) => {
-      const fieldName = field.name;
-      const fullPath = path ? `${path}.${fieldName}` : fieldName;
-      const fieldType = field.type;
-
-      const { resolvedType, nullable } = resolveAvroType(fieldType);
-
-      fields.push({
-        name: fieldName,
-        type: resolvedType,
-        path: fullPath,
-        level,
-        sampleValue: field.default !== undefined ? JSON.stringify(field.default) : undefined,
-        description: field.doc || '',
-        nullable,
-        logicalType: extractLogicalType(fieldType) || undefined,
-      });
-
-      // Recurse into nested records
-      if (typeof fieldType === 'object' && !Array.isArray(fieldType)) {
-        if (fieldType.type === 'record') {
-          const nested = flattenAvroSchema(fieldType, fullPath, level + 1);
-          fields.push(...nested);
-        } else if (fieldType.type === 'array' && typeof fieldType.items === 'object') {
-          if (fieldType.items.type === 'record') {
-            const nested = flattenAvroSchema(fieldType.items, `${fullPath}[]`, level + 1);
-            fields.push(...nested);
-          }
-        } else if (fieldType.type === 'map' && typeof fieldType.values === 'object') {
-          if (fieldType.values.type === 'record') {
-            const nested = flattenAvroSchema(fieldType.values, `${fullPath}{key}`, level + 1);
-            fields.push(...nested);
-          }
-        }
-      }
-    });
-  }
-
-  return fields;
-}
-
-function resolveAvroType(typeDef: any): { resolvedType: string; nullable: boolean } {
-  if (Array.isArray(typeDef)) {
-    const nonNull = typeDef.filter((t: any) => t !== 'null' && t !== 'null');
-    const nullable = typeDef.some((t: any) => t === 'null' || t === null);
-    if (nonNull.length === 0) return { resolvedType: 'null', nullable: true };
-    const main = nonNull[0];
-    const typeStr = typeof main === 'string' ? main : main?.type || 'unknown';
-    return { resolvedType: typeStr, nullable };
-  } else if (typeof typeDef === 'string') {
-    return { resolvedType: typeDef, nullable: false };
-  } else if (typeDef && typeof typeDef === 'object') {
-    return { resolvedType: typeDef.type || 'unknown', nullable: false };
-  }
-  return { resolvedType: 'unknown', nullable: false };
-}
-
-function extractLogicalType(typeDef: any): string | undefined {
-  if (Array.isArray(typeDef)) {
-    const nonNull = typeDef.find((t: any) => t !== 'null' && t !== null);
-    return extractLogicalType(nonNull);
-  }
-  if (typeDef && typeof typeDef === 'object' && typeDef.logicalType) {
-    return typeDef.logicalType;
-  }
-  return undefined;
-}
 
 // -----------------------------------------------------------------
 // Browser ReadableStream → Node Readable shim (FIXED)
 // -----------------------------------------------------------------
-/**
- * Converts a browser ReadableStream<Uint8Array> into a Node.js Readable stream.
- * Assumes polyfills for 'stream' and 'buffer' are provided (e.g., by Webpack).
- */
-function ReadableStreamToNodeReadable(stream: ReadableStream<Uint8Array>): any {
-  const reader = stream.getReader();
-  // eslint-disable-next-line @typescript-eslint/no-var-requires
-  const { Readable } = require('stream') as { Readable: any };
-  return new Readable({
-    read() {
-      reader
-        .read()
-        .then(({ done, value }) => {
-          if (done) {
-            this.push(null);
-          } else {
-            this.push(Buffer.from(value));
-          }
-        })
-        .catch((err) => {
-          this.destroy(err);
-        });
-    },
-  });
-}
 
 // -----------------------------------------------------------------
 // Real Avro file reader
 // -----------------------------------------------------------------
-async function readAvroFile(
-  file: File
-): Promise<{
-  schemaFields: AvroFieldDefinition[];
-  recordCount: number;
-  sampleRows: any[];
-}> {
-  const fileBuffer = await file.arrayBuffer();
-
-  // 1) Try to parse as JSON schema (.avsc)
-  try {
-    const text = await file.text();
-    const schema = JSON.parse(text);
-    // Avro schema records always have type = "record" and fields
-    if (schema && typeof schema === 'object' && schema.type === 'record') {
-      return {
-        schemaFields: flattenAvroSchema(schema),
-        recordCount: 0,
-        sampleRows: [],
-      };
-    }
-  } catch {
-    // Not JSON → assume binary Avro container
-  }
-
-  // 2) Binary Avro (.avro)
-  return new Promise((resolve, reject) => {
-    try {
-      // Use avsc to decode the file and extract schema + sample rows
-      const decoder = new avro.streams.BlockDecoder();
-      const rows: any[] = [];
-      let schemaFields: AvroFieldDefinition[] = [];
-      let totalRows = 0;
-      let schemaResolved = false;
-
-      decoder.on('metadata', (type) => {
-        // Extract schema from the first block's metadata
-        if (!schemaResolved) {
-          schemaFields = flattenAvroSchema(type.schema);
-          schemaResolved = true;
-        }
-      });
-
-      decoder.on('data', (record) => {
-        totalRows++;
-        if (rows.length < 10) {
-          rows.push(record);
-        }
-      });
-
-      decoder.on('end', () => {
-        if (!schemaResolved) {
-          // fallback: try to parse schema from the type if available
-          const type = (decoder as any).type;
-          if (type) {
-            schemaFields = flattenAvroSchema(type.schema);
-          }
-        }
-        resolve({ schemaFields, recordCount: totalRows, sampleRows: rows });
-      });
-
-      decoder.on('error', reject);
-
-      // Convert ArrayBuffer to a stream
-      const uint8 = new Uint8Array(fileBuffer);
-      const stream = new ReadableStream({
-        start(controller) {
-          controller.enqueue(uint8);
-          controller.close();
-        },
-      });
-
-      // avsc expects a Node.js readable stream; we adapt to browser
-      const readable = ReadableStreamToNodeReadable(stream);
-      readable.pipe(decoder);
-    } catch (err: any) {
-      reject(err);
-    }
-  });
-}
 
 // -----------------------------------------------------------------
 // Component
@@ -252,40 +68,45 @@ const AvroMetadataWizard: React.FC<JsonAvroParquetMetadataWizardProps> = ({
   // ------------------------------------------------------------------
   // File selection & parsing (now real)
   // ------------------------------------------------------------------
-  const handleFileSelect = async (
-    event: React.ChangeEvent<HTMLInputElement>
-  ) => {
-    const file = event.target.files?.[0];
-    if (!file) return;
+  const handleFileSelect = async (event: React.ChangeEvent<HTMLInputElement>) => {
+  const file = event.target.files?.[0];
+  if (!file) return;
 
-    const validExtensions = ['.avro', '.avsc'];
-    const ext = file.name.toLowerCase().slice(file.name.lastIndexOf('.'));
-    if (!validExtensions.includes(ext)) {
-      setError('Please select an Avro file (.avro) or Avro schema file (.avsc)');
-      return;
+  setError(null);
+  setIsLoading(true);
+
+  try {
+    const formPayload = new FormData();
+    formPayload.append('file', file);
+    formPayload.append('sampleCount', '5');
+
+// Inside handleFileSelect (line ~188)
+const response = await fetch('http://localhost:3000/api/avro/metadata', {
+  method: 'POST',
+  body: formPayload,
+});
+
+    if (!response.ok) {
+      const errText = await response.text();
+      throw new Error(errText || `Server error ${response.status}`);
     }
 
-    setError(null);
-    setIsLoading(true);
-
-    try {
-      const { schemaFields, recordCount, sampleRows } = await readAvroFile(file);
-
-      setFormData((prev) => ({
-        ...prev,
-        file,
-        filePath: file.name,
-        schema: schemaFields,
-        totalFields: schemaFields.length,
-        recordCount,
-        sampleData: sampleRows, // now real sample data
-      }));
-    } catch (err: any) {
-      setError(`Failed to process Avro file: ${err.message}`);
-    } finally {
-      setIsLoading(false);
-    }
-  };
+    const data = await response.json();
+    setFormData(prev => ({
+      ...prev,
+      file,
+      filePath: file.name,
+      schema: data.fields,
+      totalFields: data.fields.length,
+      recordCount: data.recordCount,
+      sampleData: data.sampleRows,
+    }));
+  } catch (err: any) {
+    setError(`Failed to process Avro file: ${err.message}`);
+  } finally {
+    setIsLoading(false);
+  }
+};
 
   const updateFormData = (updates: Partial<typeof formData>) => {
     setFormData((prev) => ({ ...prev, ...updates }));

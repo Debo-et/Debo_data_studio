@@ -25,14 +25,16 @@ export class IngresConnection implements DatabaseConnection {
     this.config = config;
   }
 
+  get connected(): boolean {
+    return this.connection !== null;
+  }
+
   async connect(): Promise<void> {
     try {
-      // Typical Ingres ODBC DSN-less connection string
-      // Adjust based on your Ingres installation
       const connString =
         `Driver={Ingres};` +
         `Server=${this.config.host || 'localhost'};` +
-        `Port=${this.config.port || 'II7'};` + // Ingres default port alias
+        `Port=${this.config.port || 'II7'};` +
         `Database=${this.config.dbname};` +
         `User=${this.config.user};` +
         `Password=${this.config.password};`;
@@ -53,12 +55,11 @@ export class IngresConnection implements DatabaseConnection {
     if (!this.connection) {
       throw new Error('Connection not established');
     }
-    // Ingres ODBC supports parameterized queries with '?' placeholders
     const result = await this.connection.query(sql, params);
     return result as any[];
   }
 
-  async execute(sql: string, params: any[] = []): Promise<odbc.QueryResult> {
+  async execute(sql: string, params: any[] = []): Promise<any> {
     if (!this.connection) {
       throw new Error('Connection not established');
     }
@@ -72,12 +73,12 @@ export class IngresConnection implements DatabaseConnection {
 
   async commit(): Promise<void> {
     if (!this.connection) throw new Error('No connection');
-    await this.connection.commitTransaction();
+    await this.connection.commit();
   }
 
   async rollback(): Promise<void> {
     if (!this.connection) throw new Error('No connection');
-    await this.connection.rollbackTransaction();
+    await this.connection.rollback();
   }
 
   get underlyingConnection(): odbc.Connection | null {
@@ -94,7 +95,7 @@ export class IngresSchemaInspector {
 
   constructor(config: DatabaseConfig) {
     this.connection = new IngresConnection(config);
-    this.schema = config.schema?.toUpperCase() || 'PUBLIC'; // Ingres uses uppercase schema names
+    this.schema = config.schema?.toUpperCase() || 'PUBLIC';
   }
 
   getConnection(): IngresConnection {
@@ -121,8 +122,6 @@ export class IngresSchemaInspector {
   }
 
   async getTables(): Promise<any[]> {
-    // Ingres system catalogs: iitables, iiuser, iicolumns
-    // Filter by current schema (database owner)
     const sql = `
       SELECT 
         t.table_owner AS schemaname,
@@ -137,7 +136,7 @@ export class IngresSchemaInspector {
     `;
     const tables = await this.connection.query(sql, [this.schema]);
 
-    const result = [];
+    const result: any[] = []; // Explicit type annotation to avoid 'never[]' inference
     for (const table of tables) {
       const columns = await this.getTableColumns(table.schemaname, table.tablename);
       const rowCount = await this.getRowCount(table.schemaname, table.tablename);
@@ -148,14 +147,13 @@ export class IngresSchemaInspector {
         columns,
         comment: table.comment,
         rowCount,
-        size: null, // Ingres size not easily available
+        size: null,
       });
     }
     return result;
   }
 
   private async getTableColumns(schema: string, table: string): Promise<any[]> {
-    // iicolumns provides column metadata
     const sql = `
       SELECT 
         c.column_name AS name,
@@ -175,18 +173,17 @@ export class IngresSchemaInspector {
       type: col.type,
       nullable: col.nullable === 1,
       default: col.default,
-      comment: null, // Ingres remarks can be fetched from iiremarks separately
+      comment: null,
       length: col.length,
-      precision: null, // not directly available in this query
+      precision: null,
       scale: col.scale,
-      isIdentity: false, // would need iikeys etc.
+      isIdentity: false,
       ordinalPosition: col.ordinal_position,
     }));
   }
 
   private async getRowCount(schema: string, table: string): Promise<number> {
     try {
-      // Use double quotes for case-sensitive identifiers
       const rows = await this.connection.query(`SELECT COUNT(*) AS cnt FROM "${schema}"."${table}"`);
       return rows[0]?.CNT || 0;
     } catch {
@@ -199,29 +196,34 @@ export class IngresSchemaInspector {
     const version = versionRows[0]?.VERSION || 'Unknown';
     const dbRows = await this.connection.query('SELECT DB_NAME() AS dbname');
     const name = dbRows[0]?.DBNAME || 'unknown';
-    // Ingres defaults
     return { version, name, encoding: 'UTF8', collation: 'BINARY' };
   }
 
+  // *** CRITICAL FIX: Guarantee rows is always an array ***
   async executeQuery(
     sql: string,
     params: any[] = [],
     options?: { maxRows?: number; timeout?: number; autoDisconnect?: boolean }
   ): Promise<QueryResult> {
     try {
-      if (options?.timeout) {
-        // ODBC timeout can be set via connection property, but for simplicity we ignore
+      const rawResult: any = await this.connection.execute(sql, params);
+      // Force rows to be an array; if rawResult is not iterable, use empty array.
+      const rows: any[] = Array.isArray(rawResult) ? rawResult : rawResult ? [rawResult] : [];
+      
+      let limitedRows = rows;
+      if (options?.maxRows && limitedRows.length > options.maxRows) {
+        limitedRows = limitedRows.slice(0, options.maxRows);
       }
-      const result = await this.connection.execute(sql, params);
-      let rows = result as any[];
-      if (options?.maxRows && rows.length > options.maxRows) {
-        rows = rows.slice(0, options.maxRows);
-      }
+
+      const fields: { name: string; type: string }[] = limitedRows.length
+        ? Object.keys(limitedRows[0]).map((k) => ({ name: k, type: 'unknown' }))
+        : [];
+
       return {
         success: true,
-        rows,
-        rowCount: rows.length,
-        fields: rows.length ? Object.keys(rows[0]) : [],
+        rows: limitedRows,                // always any[]
+        rowCount: limitedRows.length,
+        fields,                           // always {name,type}[]
       };
     } catch (error) {
       return {
@@ -316,7 +318,6 @@ export class IngresAdapter implements IBaseDatabaseInspector {
   }
 
   async getTableColumns(_connection: DatabaseConnection, tables: TableInfo[]): Promise<TableInfo[]> {
-    // Columns are already fetched in getTables()
     return tables;
   }
 
@@ -337,13 +338,11 @@ export class IngresAdapter implements IBaseDatabaseInspector {
     options?: QueryExecutionOptions
   ): Promise<QueryResult> {
     if (!this.inspector) throw new Error('Inspector not initialized');
-    const opts = {
+    return await this.inspector.executeQuery(sql, options?.params || [], {
       maxRows: options?.maxRows,
       timeout: options?.timeout,
       autoDisconnect: options?.autoDisconnect,
-    };
-    const params = options?.params || [];
-    return await this.inspector.executeQuery(sql, params, opts);
+    });
   }
 
   async executeTransaction(
@@ -356,7 +355,6 @@ export class IngresAdapter implements IBaseDatabaseInspector {
 
   async getTableConstraints(_connection: DatabaseConnection, _schema: string, _table: string): Promise<any[]> {
     if (!this.inspector) throw new Error('Inspector not initialized');
-    // Query Ingres constraints from iiconstraints and iiconstraint_columns
     const sql = `
       SELECT 
         c.constraint_name,
@@ -368,11 +366,11 @@ export class IngresAdapter implements IBaseDatabaseInspector {
       WHERE c.table_owner = ? AND c.table_name = ?
     `;
     const result = await this.inspector.executeQuery(sql, [_schema, _table]);
-    return result.success ? result.rows : [];
+    // result.rows is always an array (thanks to our fix), but we guard defensively
+    return result.success ? (result.rows ?? []) : [];
   }
 
   async getSchemas(connection: DatabaseConnection): Promise<string[]> {
-    // In Ingres, schemas are effectively database owners
     const sql = `
       SELECT DISTINCT table_owner AS schema_name
       FROM iitables
@@ -386,9 +384,7 @@ export class IngresAdapter implements IBaseDatabaseInspector {
     return ['public'];
   }
 
-  // Additional Ingres-specific methods
   async getFunctions(connection: DatabaseConnection, schema?: string): Promise<any[]> {
-    // Ingres stores procedures in iiprocedures
     const schemaFilter = schema ? `AND procedure_owner = '${schema}'` : '';
     const sql = `
       SELECT 
@@ -402,7 +398,7 @@ export class IngresAdapter implements IBaseDatabaseInspector {
       ORDER BY procedure_owner, procedure_name
     `;
     const result = await this.executeQuery(connection, sql);
-    return result.success ? result.rows : [];
+    return result.success && result.rows ? result.rows : [];
   }
 
   async getIndexes(connection: DatabaseConnection, tableName?: string): Promise<any[]> {
@@ -422,7 +418,7 @@ export class IngresAdapter implements IBaseDatabaseInspector {
       ORDER BY idx.table_owner, idx.table_name, idx.index_name
     `;
     const result = await this.executeQuery(connection, sql);
-    return result.success ? result.rows : [];
+    return result.success && result.rows ? result.rows : [];
   }
 }
 

@@ -12,6 +12,8 @@ import {
   convertRegex,
   convertLdif,
   convertSchema,
+  avroMetadata,
+  extractParquetMetadata,
 } from '../controllers/upload.controller';
 
 // Ensure upload directory exists
@@ -41,6 +43,8 @@ router.post('/convert/xml', upload.single('file'), convertXml);
 router.post('/convert/structured', upload.single('file'), convertStructured);
 router.post('/convert/regex', upload.single('file'), convertRegex);
 router.post('/convert/ldif', upload.single('file'), convertLdif);
+router.post('/avro/metadata', upload.single('file'), avroMetadata);
+router.post('/parquet/metadata', upload.single('file'), extractParquetMetadata);
 router.post(
   '/convert/schema',
   upload.fields([

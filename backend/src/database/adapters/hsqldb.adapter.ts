@@ -229,11 +229,11 @@ export class HSQLDBSchemaInspector {
       dataType: col.DATA_TYPE,
       nullable: col.IS_NULLABLE === 'YES',
       default: col.COLUMN_DEFAULT,
-      comment: null,
-      length: null,
-      precision: null,
-      scale: null,
-      isIdentity: false, // Not directly available
+      comment: undefined,       // Fixed: undefined instead of null
+      length: undefined,        // Fixed
+      precision: undefined,     // Fixed
+      scale: undefined,         // Fixed
+      isIdentity: false,
       ordinalPosition: idx + 1,
     }));
   }
@@ -267,7 +267,6 @@ export class HSQLDBSchemaInspector {
     options?: { maxRows?: number; timeout?: number; autoDisconnect?: boolean }
   ): Promise<QueryResult> {
     const conn = this.getConnection();
-    const startTime = Date.now();
 
     try {
       let finalSql = sql;
@@ -280,15 +279,13 @@ export class HSQLDBSchemaInspector {
         success: true,
         rows: rows,
         rowCount: rows.length,
-        duration: Date.now() - startTime,
-        sql: finalSql,
+        // Removed `sql` and `duration` — they are not part of QueryResult
       };
     } catch (error) {
       return {
         success: false,
         error: error instanceof Error ? error.message : String(error),
-        duration: Date.now() - startTime,
-        sql,
+        // Removed `sql` — not part of QueryResult
       };
     }
   }

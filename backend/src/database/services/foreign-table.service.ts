@@ -187,7 +187,7 @@ function buildDatabaseFDWOptions(
 ): string {
   const lowerType = dbType.toLowerCase();
   if (lowerType === 'postgresql' || lowerType === 'postgres') {
-    const opts = [];
+    const opts: string[] = [];   // ← explicit type fixes "never[]"
     if (options.host) opts.push(`host '${options.host}'`);
     if (options.port) opts.push(`port '${options.port}'`);
     if (options.dbname) opts.push(`dbname '${options.dbname}'`);
@@ -197,9 +197,9 @@ function buildDatabaseFDWOptions(
     if (options.table_name) opts.push(`table_name '${options.table_name}'`);
     return opts.join(',\n  ');
   } else {
-    // ogr_fdw
+    // ogr_fdw branch – don't forget to declare connectionString!
     const connectionString = buildOgrConnectionString(dbType, options);
-    const opts = [`datasource '${connectionString}'`];
+    const opts: string[] = [`datasource '${connectionString}'`];  // explicit type for clarity
     if (options.table_name) opts.push(`table_name '${options.table_name}'`);
     return opts.join(',\n  ');
   }

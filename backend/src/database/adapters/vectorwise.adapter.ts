@@ -20,6 +20,7 @@ import odbc from 'odbc';
 export class VectorWiseConnection implements DatabaseConnection {
   private connection: odbc.Connection | null = null;
   private config: DatabaseConfig;
+  connected: boolean = false;             // required by DatabaseConnection interface
 
   constructor(config: DatabaseConfig) {
     this.config = config;
@@ -27,8 +28,6 @@ export class VectorWiseConnection implements DatabaseConnection {
 
   async connect(): Promise<void> {
     try {
-      // Build ODBC connection string
-      // Typical DSN-less format for VectorWise (Actian Vector)
       const connString =
         `Driver={VectorWise};` +
         `Host=${this.config.host || 'localhost'};` +
@@ -37,6 +36,7 @@ export class VectorWiseConnection implements DatabaseConnection {
         `User=${this.config.user};` +
         `Password=${this.config.password};`;
       this.connection = await odbc.connect(connString);
+      this.connected = true;
     } catch (error) {
       throw new Error(`VectorWise connection failed: ${error instanceof Error ? error.message : String(error)}`);
     }
@@ -46,6 +46,7 @@ export class VectorWiseConnection implements DatabaseConnection {
     if (this.connection) {
       await this.connection.close();
       this.connection = null;
+      this.connected = false;
     }
   }
 
@@ -57,7 +58,7 @@ export class VectorWiseConnection implements DatabaseConnection {
     return result as any[];
   }
 
-  async execute(sql: string, params: any[] = []): Promise<odbc.QueryResult> {
+  async execute(sql: string, params: any[] = []): Promise<any> {
     if (!this.connection) {
       throw new Error('Connection not established');
     }
@@ -71,12 +72,14 @@ export class VectorWiseConnection implements DatabaseConnection {
 
   async commit(): Promise<void> {
     if (!this.connection) throw new Error('No connection');
-    await this.connection.commitTransaction();
+    // FIX: Use commit() instead of commitTransaction()
+    await this.connection.commit();
   }
 
   async rollback(): Promise<void> {
     if (!this.connection) throw new Error('No connection');
-    await this.connection.rollbackTransaction();
+    // FIX: Use rollback() instead of rollbackTransaction()
+    await this.connection.rollback();
   }
 
   get underlyingConnection(): odbc.Connection | null {
@@ -119,7 +122,7 @@ export class VectorWiseSchemaInspector {
     }
   }
 
-  async getTables(): Promise<any[]> {
+async getTables(): Promise<any[]> {
     const sql = `
       SELECT 
         table_catalog as database_name,
@@ -134,7 +137,7 @@ export class VectorWiseSchemaInspector {
     `;
     const tables = await this.connection.query(sql, [this.schema]);
 
-    const result = [];
+    const result: any[] = [];   // <-- explicit type annotation fixes the error
     for (const table of tables) {
       const columns = await this.getTableColumns(table.schemaname, table.tablename);
       const rowCount = await this.getRowCount(table.schemaname, table.tablename);
@@ -145,11 +148,11 @@ export class VectorWiseSchemaInspector {
         columns,
         comment: table.comment,
         rowCount,
-        size: null, // VectorWise size info not implemented here
+        size: null,
       });
     }
     return result;
-  }
+}
 
   private async getTableColumns(schema: string, table: string): Promise<any[]> {
     const sql = `
@@ -172,11 +175,11 @@ export class VectorWiseSchemaInspector {
       type: col.type,
       nullable: col.nullable,
       default: col.default,
-      comment: null,   // VectorWise does not store comments in information_schema easily
+      comment: null,
       length: col.length,
       precision: col.precision,
       scale: col.scale,
-      isIdentity: false, // Not derived from this query
+      isIdentity: false,
       ordinalPosition: col.ordinal_position,
     }));
   }
@@ -195,26 +198,32 @@ export class VectorWiseSchemaInspector {
     const version = versionRows[0]?.version || 'Unknown';
     const dbNameRows = await this.connection.query('SELECT current_database() as db');
     const name = dbNameRows[0]?.db || 'unknown';
-    // VectorWise encoding/collation not standard; provide placeholders
     return { version, name, encoding: 'UTF-8', collation: 'en_US' };
   }
 
   async executeQuery(sql: string, params: any[] = [], options?: { maxRows?: number; timeout?: number; autoDisconnect?: boolean }): Promise<QueryResult> {
     try {
-      if (options?.timeout) {
-        // ODBC doesn't support query timeout directly, but we can use AbortController with a promise race
-        // For simplicity, we ignore timeout in this example
-      }
+      // Timeout handling omitted for simplicity
       const result = await this.connection.execute(sql, params);
-      let rows = result as any[];
+      let rows: any[] = result as any[];
       if (options?.maxRows && rows.length > options.maxRows) {
         rows = rows.slice(0, options.maxRows);
       }
+
+      // Derive column names + types from the first row
+      let fields: { name: string; type: string }[] = [];
+      if (rows.length > 0) {
+        fields = Object.keys(rows[0]).map(key => ({
+          name: key,
+          type: typeof rows[0][key],
+        }));
+      }
+
       return {
         success: true,
         rows,
         rowCount: rows.length,
-        fields: result.length ? Object.keys(result[0]) : [],
+        fields,
       };
     } catch (error) {
       return {
@@ -309,7 +318,6 @@ export class VectorWiseAdapter implements IBaseDatabaseInspector {
   }
 
   async getTableColumns(_connection: DatabaseConnection, tables: TableInfo[]): Promise<TableInfo[]> {
-    // Table info already includes columns from getTables()
     return tables;
   }
 
@@ -347,17 +355,16 @@ export class VectorWiseAdapter implements IBaseDatabaseInspector {
     return await this.inspector.executeTransaction(queries);
   }
 
-  async getTableConstraints(_connection: DatabaseConnection, _schema: string, _table: string): Promise<any[]> {
+  async getTableConstraints(_connection: DatabaseConnection, schema: string, table: string): Promise<any[]> {
     if (!this.inspector) throw new Error('Inspector not initialized');
-    // Query information_schema for constraints
     const sql = `
       SELECT 
         constraint_name, constraint_type, table_schema, table_name
       FROM information_schema.table_constraints
       WHERE table_schema = ? AND table_name = ?
     `;
-    const result = await this.inspector.executeQuery(sql, [_schema, _table]);
-    return result.success ? result.rows : [];
+    const result = await this.inspector.executeQuery(sql, [schema, table]);
+    return result.success ? (result.rows ?? []) : [];
   }
 
   async getSchemas(connection: DatabaseConnection): Promise<string[]> {
@@ -373,7 +380,6 @@ export class VectorWiseAdapter implements IBaseDatabaseInspector {
     return ['public'];
   }
 
-  // Additional VectorWise-specific methods
   async getFunctions(connection: DatabaseConnection, schema?: string): Promise<any[]> {
     const schemaFilter = schema ? `AND specific_schema = '${schema}'` : '';
     const sql = `
@@ -390,12 +396,10 @@ export class VectorWiseAdapter implements IBaseDatabaseInspector {
       ORDER BY specific_schema, specific_name
     `;
     const result = await this.executeQuery(connection, sql);
-    return result.success ? result.rows : [];
+    return result.success ? (result.rows ?? []) : [];
   }
 
   async getIndexes(connection: DatabaseConnection, tableName?: string): Promise<any[]> {
-    // VectorWise exposes index info through sys tables; simplified version using information_schema
-    // This is a stub – production systems would need proper catalog queries.
     const whereClause = tableName ? `AND t.table_name = '${tableName}'` : '';
     const sql = `
       SELECT 
@@ -420,7 +424,7 @@ export class VectorWiseAdapter implements IBaseDatabaseInspector {
         ${whereClause}
     `;
     const result = await this.executeQuery(connection, sql);
-    return result.success ? result.rows : [];
+    return result.success ? (result.rows ?? []) : [];
   }
 }
 

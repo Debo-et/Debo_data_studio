@@ -4,7 +4,7 @@
  * Follows the design pattern of the PostgreSQL inspector for DatabaseMetadataWizard integration.
  */
 
-import { Client, types, auth, execution, mapping } from 'cassandra-driver';
+import { Client, types, auth, QueryOptions } from 'cassandra-driver';
 
 // ============================================================================
 // Configuration & Core Types
@@ -166,43 +166,32 @@ class CassandraQueryError extends Error {
 class CassandraConnection {
   private client: Client | null = null;
   private isConnected: boolean = false;
-  private config: Required<Omit<CassandraConfig, 'username' | 'password'>> &
-    Pick<CassandraConfig, 'username' | 'password'>;
+  private config: CassandraConfig; // Fixed: changed to CassandraConfig to accept optional keyspace
 
   constructor(config: CassandraConfig) {
-    const defaulted = {
+    this.config = {
       contactPoints: ['127.0.0.1:9042'],
       localDataCenter: 'datacenter1',
-      keyspace: undefined,
+      // keyspace intentionally left undefined (no default)
       protocolOptions: { port: 9042 },
       socketOptions: { connectTimeout: 30000, readTimeout: 120000 },
       maxRetries: 3,
       retryDelay: 1000,
       ...config,
     };
-    this.config = {
-      contactPoints: defaulted.contactPoints!,
-      localDataCenter: defaulted.localDataCenter!,
-      keyspace: defaulted.keyspace,
-      protocolOptions: defaulted.protocolOptions!,
-      socketOptions: defaulted.socketOptions!,
-      maxRetries: defaulted.maxRetries!,
-      retryDelay: defaulted.retryDelay!,
-      username: config.username,
-      password: config.password,
-    };
   }
 
   /** Establish connection and optionally set keyspace */
   async connect(): Promise<void> {
-    if (this.isConnected && this.client && !this.client.isShuttingDown) {
+    // Fixed: removed non-existent `isShuttingDown` check
+    if (this.isConnected && this.client) {
       Logger.debug('Cassandra connection already established');
       return;
     }
 
     let lastError: unknown = null;
 
-    for (let attempt = 1; attempt <= this.config.maxRetries; attempt++) {
+    for (let attempt = 1; attempt <= this.config.maxRetries!; attempt++) {
       try {
         Logger.debug('Cassandra connection attempt %d/%d', attempt, this.config.maxRetries);
 
@@ -211,9 +200,9 @@ class CassandraConnection {
           : undefined;
 
         this.client = new Client({
-          contactPoints: this.config.contactPoints,
-          localDataCenter: this.config.localDataCenter,
-          keyspace: this.config.keyspace,
+          contactPoints: this.config.contactPoints!,
+          localDataCenter: this.config.localDataCenter!,
+          keyspace: this.config.keyspace, // keyspace can be undefined
           authProvider,
           protocolOptions: this.config.protocolOptions,
           socketOptions: this.config.socketOptions,
@@ -234,7 +223,7 @@ class CassandraConnection {
           this.client = null;
         }
         Logger.warn('Connection attempt %d failed: %s', attempt, getErrorMessage(error));
-        if (attempt < this.config.maxRetries) {
+        if (attempt < this.config.maxRetries!) {
           const backoff = Math.min(1000 * Math.pow(2, attempt - 1), 10000);
           await new Promise(resolve => setTimeout(resolve, backoff));
         }
@@ -262,7 +251,7 @@ class CassandraConnection {
   }
 
   /** Execute a CQL query with proper error handling */
-  async execute(cql: string, params: any[] = [], options?: execution.QueryOptions): Promise<execution.ResultSet> {
+  async execute(cql: string, params: any[] = [], options?: QueryOptions): Promise<types.ResultSet> {
     if (!this.isConnected || !this.client) {
       throw new CassandraConnectionError('Not connected to Cassandra');
     }
@@ -365,13 +354,11 @@ class CassandraSchemaInspector {
       await this.connection.connect();
 
       let finalCql = cql;
-      let rowLimitApplied = false;
 
       // Apply row limit only to SELECT queries that don't already have a LIMIT
       const upperCql = cql.trim().toUpperCase();
       if (upperCql.startsWith('SELECT') && !upperCql.includes('LIMIT') && maxRows) {
         finalCql = `${cql} LIMIT ${maxRows}`;
-        rowLimitApplied = true;
         Logger.debug('Auto-applied LIMIT %d to SELECT query', maxRows);
       }
 
@@ -437,8 +424,6 @@ class CassandraSchemaInspector {
       const allParams: any[] = [];
       for (const q of queries) {
         // Replace parameter placeholders with positional markers
-        const paramCount = (q.params || []).length;
-        const placeholders = paramCount ? `[${Array(paramCount).fill('?').join(',')}]` : '';
         batchCql += `${q.sql};\n`;
         if (q.params) allParams.push(...q.params);
       }

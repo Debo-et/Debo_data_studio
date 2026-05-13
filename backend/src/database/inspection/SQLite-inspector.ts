@@ -230,12 +230,12 @@ class SQLiteConnection {
     return new Promise((resolve, reject) => {
       this.db!.all(sql, params, (err, rows) => {
         if (err) return reject(err);
-        // sqlite3 does not provide field metadata for .all; we can try db.each or use db.prepare.
-        // We'll extract column names from the first row if available, otherwise empty.
         const fields: Array<{name:string;type:string}> = [];
         if (rows && rows.length > 0) {
-          const colNames = Object.keys(rows[0]);
-          fields.push(...colNames.map(name => ({ name, type: typeof rows[0][name] })));
+          // Fixed: Assert rows[0] as Record<string, any> to satisfy TypeScript
+          const firstRow = rows[0] as Record<string, any>;
+          const colNames = Object.keys(firstRow);
+          fields.push(...colNames.map(name => ({ name, type: typeof firstRow[name] })));
         }
         resolve({ rows, fields });
       });
@@ -385,7 +385,7 @@ class SQLiteConnection {
   }
 
   private async closeDatabase(): Promise<void> {
-    return new Promise<void>((resolve, reject) => {
+    return new Promise<void>((resolve, _reject) => {
       if (this.db) {
         this.db.close((err) => {
           if (err) {
@@ -576,8 +576,10 @@ class SQLiteSchemaInspector {
           if (err) return reject(err);
           const fields: Array<{name:string;type:string}> = [];
           if (rows && rows.length > 0) {
-            const colNames = Object.keys(rows[0]);
-            fields.push(...colNames.map(name => ({ name, type: typeof rows[0][name] })));
+            // Fixed: Assert rows[0] as Record<string, any> to satisfy TypeScript
+            const firstRow = rows[0] as Record<string, any>;
+            const colNames = Object.keys(firstRow);
+            fields.push(...colNames.map(name => ({ name, type: typeof firstRow[name] })));
           }
           resolve({ rows, rowCount: rows.length, fields, command: 'SELECT' });
         });

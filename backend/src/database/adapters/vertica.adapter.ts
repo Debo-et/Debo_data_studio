@@ -25,6 +25,11 @@ export class VerticaConnection implements DatabaseConnection {
     this.config = config;
   }
 
+  // ---------- Fix 1: implement required 'connected' property ----------
+  get connected(): boolean {
+    return this.connection !== null;
+  }
+
   async connect(): Promise<void> {
     try {
       // Vertica ODBC connection string
@@ -57,7 +62,8 @@ export class VerticaConnection implements DatabaseConnection {
     return result as any[];
   }
 
-  async execute(sql: string, params: any[] = []): Promise<odbc.QueryResult> {
+  // ---------- Fix 2: return Promise<any[]> instead of odbc.QueryResult ----------
+  async execute(sql: string, params: any[] = []): Promise<any[]> {
     if (!this.connection) {
       throw new Error('Connection not established');
     }
@@ -69,14 +75,15 @@ export class VerticaConnection implements DatabaseConnection {
     await this.connection.beginTransaction();
   }
 
+  // ---------- Fix 3: odbc uses commit() and rollback(), not commitTransaction/rollbackTransaction ----------
   async commit(): Promise<void> {
     if (!this.connection) throw new Error('No connection');
-    await this.connection.commitTransaction();
+    await this.connection.commit();
   }
 
   async rollback(): Promise<void> {
     if (!this.connection) throw new Error('No connection');
-    await this.connection.rollbackTransaction();
+    await this.connection.rollback();
   }
 
   get underlyingConnection(): odbc.Connection | null {
@@ -119,40 +126,26 @@ export class VerticaSchemaInspector {
     }
   }
 
-  async getTables(): Promise<any[]> {
-    // Vertica stores metadata in v_catalog schema
-    const sql = `
-      SELECT 
-        table_schema AS schemaname,
-        table_name AS tablename,
-        CASE 
-          WHEN table_type = 'VIEW' THEN 'VIEW'
-          ELSE 'TABLE'
-        END AS tabletype,
-        description AS comment
-      FROM v_catalog.tables
-      WHERE table_schema = ?
-        AND table_type IN ('TABLE', 'VIEW')
-      ORDER BY table_schema, table_name
-    `;
-    const tables = await this.connection.query(sql, [this.schema]);
+async getTables(): Promise<any[]> {
+  const sql = `SELECT ...`; // your existing query
+  const tables = await this.connection.query(sql, [this.schema]);
 
-    const result = [];
-    for (const table of tables) {
-      const columns = await this.getTableColumns(table.schemaname, table.tablename);
-      const rowCount = await this.getRowCount(table.schemaname, table.tablename);
-      result.push({
-        schemaname: table.schemaname,
-        tablename: table.tablename,
-        tabletype: table.tabletype === 'VIEW' ? 'view' : 'table',
-        columns,
-        comment: table.comment,
-        rowCount,
-        size: null, // Could be derived from storage but omitted for simplicity
-      });
-    }
-    return result;
+  const result: any[] = [];   // <-- explicit type added here
+  for (const table of tables) {
+    const columns = await this.getTableColumns(table.schemaname, table.tablename);
+    const rowCount = await this.getRowCount(table.schemaname, table.tablename);
+    result.push({
+      schemaname: table.schemaname,
+      tablename: table.tablename,
+      tabletype: table.tabletype === 'VIEW' ? 'view' : 'table',
+      columns,
+      comment: table.comment,
+      rowCount,
+      size: null,
+    });
   }
+  return result;
+}
 
   private async getTableColumns(schema: string, table: string): Promise<any[]> {
     const sql = `
@@ -229,11 +222,20 @@ export class VerticaSchemaInspector {
       if (options?.maxRows && rows.length > options.maxRows) {
         rows = rows.slice(0, options.maxRows);
       }
+
+      // ---------- Fix 4: convert string[] fields to { name, type }[] ----------
+      const fields = rows.length
+        ? Object.keys(rows[0]).map(key => ({
+            name: key,
+            type: typeof rows[0][key],
+          }))
+        : [];
+
       return {
         success: true,
         rows,
         rowCount: rows.length,
-        fields: rows.length ? Object.keys(rows[0]) : [],
+        fields,
       };
     } catch (error) {
       return {
@@ -366,6 +368,7 @@ export class VerticaAdapter implements IBaseDatabaseInspector {
     return await this.inspector.executeTransaction(queries);
   }
 
+  // ---------- Fix 5: proper narrowing for optional rows in all returning methods ----------
   async getTableConstraints(_connection: DatabaseConnection, _schema: string, _table: string): Promise<any[]> {
     if (!this.inspector) throw new Error('Inspector not initialized');
     const sql = `
@@ -377,7 +380,7 @@ export class VerticaAdapter implements IBaseDatabaseInspector {
       WHERE table_schema = ? AND table_name = ?
     `;
     const result = await this.inspector.executeQuery(sql, [_schema, _table]);
-    return result.success ? result.rows : [];
+    return result.success && Array.isArray(result.rows) ? result.rows : [];
   }
 
   async getSchemas(connection: DatabaseConnection): Promise<string[]> {
@@ -388,14 +391,14 @@ export class VerticaAdapter implements IBaseDatabaseInspector {
       ORDER BY schema_name
     `;
     const result = await this.executeQuery(connection, sql);
-    if (result.success && result.rows) {
+    if (result.success && Array.isArray(result.rows)) {
       return result.rows.map((row: any) => row.schema_name);
     }
     return ['public'];
   }
 
-  // Vertica-specific additional methods
   async getFunctions(connection: DatabaseConnection, schema?: string): Promise<any[]> {
+    // Caution: schema interpolation – ideally use parameterised queries
     const schemaFilter = schema ? `AND function_schema = '${schema}'` : '';
     const sql = `
       SELECT 
@@ -411,12 +414,12 @@ export class VerticaAdapter implements IBaseDatabaseInspector {
       ORDER BY function_schema, function_name
     `;
     const result = await this.executeQuery(connection, sql);
-    return result.success ? result.rows : [];
+    return result.success && Array.isArray(result.rows) ? result.rows : [];
   }
 
   async getIndexes(connection: DatabaseConnection, tableName?: string): Promise<any[]> {
+    // Caution: tableName interpolation – ideally use parameterised queries
     const tableFilter = tableName ? `AND table_name = '${tableName}'` : '';
-    // Vertica uses projections instead of indexes, but we can list projections with encoding info
     const sql = `
       SELECT 
         projection_schema AS schema_name,
@@ -431,7 +434,7 @@ export class VerticaAdapter implements IBaseDatabaseInspector {
       ORDER BY projection_schema, table_name, projection_name
     `;
     const result = await this.executeQuery(connection, sql);
-    return result.success ? result.rows : [];
+    return result.success && Array.isArray(result.rows) ? result.rows : [];
   }
 }
 

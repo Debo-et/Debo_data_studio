@@ -403,7 +403,7 @@ class H2Connection {
   }
 
   private async closePool(): Promise<void> {
-    return new Promise<void>((resolve, reject) => {
+    return new Promise<void>((resolve, _reject) => {
       if (this.pool) {
         this.pool.close((err) => {
           if (err) {

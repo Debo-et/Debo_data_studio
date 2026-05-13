@@ -82,50 +82,40 @@ export class AccessAdapter implements IBaseDatabaseInspector {
    * @returns An object indicating success, the Access version, or an error message.
    */
   async testConnection(config: DatabaseConfig): Promise<{ success: boolean; version?: string; error?: string }> {
-    let testConn = null;
-    try {
-      const dbPath = config.dbname;
-      if (!dbPath) {
-        throw new Error('Database file path (dbname) is required.');
-      }
-
-      const isAccdb = dbPath.toLowerCase().endsWith('.accdb');
-      const provider = isAccdb ? 'Microsoft.ACE.OLEDB.12.0' : 'Microsoft.Jet.OLEDB.4.0';
-      let connectionString = `Provider=${provider};Data Source=${dbPath};Persist Security Info=False;`;
-
-      if (config.password) {
-        connectionString += `Jet OLEDB:Database Password=${config.password};`;
-      }
-
-      testConn = ADODB.open(connectionString);
-      await testConn.query('SELECT 1 as test');
-
-      // Retrieve Access version information
-      const versionQuery = 'SELECT @@VERSION as version';
-      const versionResult = await testConn.query(versionQuery);
-      const version = versionResult && versionResult.length > 0 ? versionResult[0].version : 'Unknown';
-
-      return { success: true, version };
-    } catch (error) {
-      return {
-        success: false,
-        error: error instanceof Error ? error.message : String(error)
-      };
-    } finally {
-      if (testConn) {
-        // No explicit close needed; allow GC to clean up.
-        testConn = null;
-      }
+  try {
+    const dbPath = config.dbname;
+    if (!dbPath) {
+      throw new Error('Database file path (dbname) is required.');
     }
+
+    const isAccdb = dbPath.toLowerCase().endsWith('.accdb');
+    const provider = isAccdb ? 'Microsoft.ACE.OLEDB.12.0' : 'Microsoft.Jet.OLEDB.4.0';
+    let connectionString = `Provider=${provider};Data Source=${dbPath};Persist Security Info=False;`;
+    if (config.password) {
+      connectionString += `Jet OLEDB:Database Password=${config.password};`;
+    }
+
+    const testConn = ADODB.open(connectionString);
+    await testConn.query('SELECT 1 as test');
+
+    const versionResult = await testConn.query('SELECT @@VERSION as version');
+    const version = versionResult?.[0]?.version ?? 'Unknown';
+    return { success: true, version };
+  } catch (error) {
+    return {
+      success: false,
+      error: error instanceof Error ? error.message : String(error),
+    };
   }
+}
 
   /**
    * Retrieve all tables and views from the Access database, including their columns.
    * @param _connection The database connection instance.
-   * @param options Optional inspection parameters (e.g., schema filter).
+   * @param _options Optional inspection parameters (e.g., schema filter).
    * @returns An array of TableInfo objects.
    */
-  async getTables(_connection: DatabaseConnection, options?: InspectionOptions): Promise<TableInfo[]> {
+  async getTables(_connection: DatabaseConnection, _options?: InspectionOptions): Promise<TableInfo[]> {
     if (!this.connection || !this.isConnected) {
       throw new Error('Not connected to the database. Call connect() first.');
     }
@@ -177,12 +167,13 @@ export class AccessAdapter implements IBaseDatabaseInspector {
           dataType: col.DATA_TYPE,
           nullable: col.IS_NULLABLE === 'YES',
           default: col.COLUMN_DEFAULT,
-          comment: '',  // Access does not support comments on columns
+          comment: '',
           length: col.CHARACTER_MAXIMUM_LENGTH ? parseInt(col.CHARACTER_MAXIMUM_LENGTH, 10) : undefined,
           precision: col.NUMERIC_PRECISION ? parseInt(col.NUMERIC_PRECISION, 10) : undefined,
           scale: col.NUMERIC_SCALE ? parseInt(col.NUMERIC_SCALE, 10) : undefined,
           isIdentity: false, // Access does not explicitly expose auto-increment via schema
-          ordinalPosition: col.ORDINAL_POSITION ? parseInt(col.ORDINAL_POSITION, 10) : undefined
+          // Fix: ensure ordinalPosition is always a number, not undefined
+          ordinalPosition: col.ORDINAL_POSITION ? parseInt(col.ORDINAL_POSITION, 10) : 0
         }));
 
         // Estimate row count for the table
@@ -198,13 +189,14 @@ export class AccessAdapter implements IBaseDatabaseInspector {
         }
 
         tableInfoList.push({
-          schemaname: '',  // Access does not have schemas; treat as empty or use default
+          schemaname: '',
           tablename: tableName,
           tabletype: tableType,
           columns,
-          comment: '',     // Access tables do not have comments
+          comment: '',
           rowCount,
-          size: 0,         // File size can be retrieved via fs.stat, but omitted for simplicity
+          // Fix: size must be a string as defined in TableInfo
+          size: '0',
           originalData: table
         });
       }
@@ -238,10 +230,9 @@ export class AccessAdapter implements IBaseDatabaseInspector {
       const versionResult = await this.connection.query(versionQuery);
       const version = versionResult && versionResult.length > 0 ? versionResult[0].version : 'Unknown';
 
-      // Access does not have a built-in encoding/collation concept in the same way.
       return {
         version,
-        name: '',    // Could be populated from the file path, but omitted for clarity
+        name: '',
         encoding: '',
         collation: ''
       };
@@ -271,16 +262,13 @@ export class AccessAdapter implements IBaseDatabaseInspector {
 
       // Apply maxRows limit using Access TOP syntax
       if (options?.maxRows && options.maxRows > 0) {
-        // Ensure we don't double-apply a TOP clause
         if (!finalSql.toLowerCase().includes(' top ')) {
           finalSql = finalSql.replace(/select/i, `SELECT TOP ${options.maxRows}`);
         }
       }
 
       // Parameterized queries: node-adodb does not directly support parameters.
-      // If parameters are provided, we inject them manually (with caution to avoid SQL injection).
       if (options?.params && options.params.length > 0) {
-        // This is a simplified injection; for production use a safer replacement strategy.
         let paramIndex = 0;
         finalSql = finalSql.replace(/\?/g, () => {
           let param = options.params?.[paramIndex++];
@@ -336,7 +324,6 @@ export class AccessAdapter implements IBaseDatabaseInspector {
 
     const results: QueryResult[] = [];
     try {
-      // Transaction emulation: run each query in sequence.
       for (const queryItem of queries) {
         const result = await this.executeQuery(_connection, queryItem.sql, { params: queryItem.params });
         results.push(result);
@@ -352,7 +339,6 @@ export class AccessAdapter implements IBaseDatabaseInspector {
    * Access does not expose constraints via INFORMATION_SCHEMA; we return an empty array as a placeholder.
    */
   async getTableConstraints(_connection: DatabaseConnection, _schema: string, _table: string): Promise<any[]> {
-    // Access does not expose primary/foreign key constraints in a simple schema.
     console.warn('Table constraints are not available through the Access adapter.');
     return [];
   }
@@ -362,7 +348,6 @@ export class AccessAdapter implements IBaseDatabaseInspector {
    * @returns An array with a single default schema.
    */
   async getSchemas(_connection: DatabaseConnection): Promise<string[]> {
-    // Access databases do not have schemas; return a placeholder.
     return ['default'];
   }
 

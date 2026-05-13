@@ -12,7 +12,6 @@ import {
   DatabaseVersionInfo
 } from '../types/inspection.types';
 import sqlite3 from 'sqlite3';
-import { promisify } from 'util';
 
 // ============================================================================
 // SQLite Connection Wrapper
@@ -174,18 +173,18 @@ export class SQLiteSchemaInspector {
         rowCount = 0;
       }
 
-      // Build column metadata
+      // Build column metadata – all values must match ColumnMetadata type
       const columns: ColumnMetadata[] = columnsRaw.map((col, idx) => ({
         name: col.name,
         type: col.type,
         dataType: col.type,
         nullable: col.notnull === 0,
-        default: col.dflt_value,
-        comment: null, // SQLite does not store column comments
-        length: null,
-        precision: null,
-        scale: null,
-        isIdentity: col.pk === 1, // primary key might be autoincrement, but not strictly identity
+        default: col.dflt_value ?? undefined,   // null → undefined
+        comment: undefined,                      // null → undefined (SQLite does not store comments)
+        length: undefined,
+        precision: undefined,
+        scale: undefined,
+        isIdentity: col.pk === 1,
         ordinalPosition: idx + 1
       }));
 
@@ -194,9 +193,9 @@ export class SQLiteSchemaInspector {
         tablename: obj.name,
         tabletype: obj.type === 'view' ? 'VIEW' : 'TABLE',
         columns: columns,
-        comment: null, // table comment not available in SQLite
+        comment: undefined,       // table comment also undefined
         rowCount: rowCount,
-        size: null,    // per-table size not easily available in SQLite
+        size: null,
         originalData: obj
       });
     }
@@ -213,7 +212,7 @@ export class SQLiteSchemaInspector {
       version: versionRow?.sqlite_version || 'unknown',
       name: (this.connection as any)?.dbPath || 'memory',
       encoding: encodingRow?.encoding,
-      collation: 'BINARY' // default collation in SQLite
+      collation: 'BINARY'
     };
   }
 
@@ -223,18 +222,14 @@ export class SQLiteSchemaInspector {
     options?: { maxRows?: number; timeout?: number; autoDisconnect?: boolean }
   ): Promise<QueryResult> {
     const conn = this.getConnection();
-    const startTime = Date.now();
 
     try {
-      // Apply maxRows limit if needed
       let finalSql = sql;
       if (options?.maxRows && !sql.toLowerCase().includes('limit')) {
         finalSql = `${sql} LIMIT ${options.maxRows}`;
       }
 
-      // Timeout simulation (basic)
       if (options?.timeout) {
-        // SQLite doesn't support query timeouts natively; we'll rely on JS promise race
         const timeoutPromise = new Promise<never>((_, reject) =>
           setTimeout(() => reject(new Error(`Query timeout after ${options.timeout}ms`)), options.timeout)
         );
@@ -242,26 +237,20 @@ export class SQLiteSchemaInspector {
         return {
           success: true,
           rows: rows as any[],
-          rowCount: (rows as any[]).length,
-          duration: Date.now() - startTime,
-          sql: finalSql
+          rowCount: (rows as any[]).length
         };
       } else {
         const rows = await conn.all(finalSql, params);
         return {
           success: true,
           rows: rows,
-          rowCount: rows.length,
-          duration: Date.now() - startTime,
-          sql: finalSql
+          rowCount: rows.length
         };
       }
     } catch (error) {
       return {
         success: false,
-        error: error instanceof Error ? error.message : String(error),
-        duration: Date.now() - startTime,
-        sql
+        error: error instanceof Error ? error.message : String(error)
       };
     }
   }
@@ -305,7 +294,6 @@ export class SQLiteAdapter implements IBaseDatabaseInspector {
 
   async connect(config: DatabaseConfig): Promise<DatabaseConnection> {
     try {
-      // SQLite only needs dbname (file path or ':memory:')
       const dbPath = config.dbname || ':memory:';
       this.inspector = new SQLiteSchemaInspector({
         dbPath,
@@ -352,8 +340,6 @@ export class SQLiteAdapter implements IBaseDatabaseInspector {
       }
 
       const tables = await this.inspector.getTables();
-
-      // Convert to standard TableInfo format (already matches structure)
       return tables as TableInfo[];
     } catch (error) {
       throw new Error(`Failed to get tables: ${error instanceof Error ? error.message : String(error)}`);
@@ -361,7 +347,6 @@ export class SQLiteAdapter implements IBaseDatabaseInspector {
   }
 
   async getTableColumns(_connection: DatabaseConnection, tables: TableInfo[]): Promise<TableInfo[]> {
-    // SQLite inspector already includes columns in getTables()
     return tables;
   }
 
@@ -428,10 +413,8 @@ export class SQLiteAdapter implements IBaseDatabaseInspector {
 
     try {
       const conn = this.inspector.getConnection();
-      // Get primary keys, unique constraints, foreign keys
-      const constraints = [];
+      const constraints: any[] = [];   // explicitly typed to avoid never[]
 
-      // Primary keys from table_info
       const pkInfo = await conn.all<{ name: string }>(
         `PRAGMA ${schema}.table_info(${table}) WHERE pk > 0`
       );
@@ -443,7 +426,6 @@ export class SQLiteAdapter implements IBaseDatabaseInspector {
         });
       }
 
-      // Unique constraints from indexes
       const indexes = await conn.all<{ name: string; unique: number; origin: string }>(
         `PRAGMA ${schema}.index_list(${table})`
       );
@@ -460,7 +442,6 @@ export class SQLiteAdapter implements IBaseDatabaseInspector {
         }
       }
 
-      // Foreign keys
       const fks = await conn.all<any>(`PRAGMA ${schema}.foreign_key_list(${table})`);
       for (const fk of fks) {
         constraints.push({
@@ -496,11 +477,7 @@ export class SQLiteAdapter implements IBaseDatabaseInspector {
     }
   }
 
-  // Additional SQLite-specific methods (mirroring PostgreSQL adapter)
-
   async getFunctions(_connection: DatabaseConnection, _schema?: string): Promise<any[]> {
-    // SQLite does not have stored procedures/functions in the traditional sense.
-    // Return empty array, but could be extended for custom functions.
     return [];
   }
 

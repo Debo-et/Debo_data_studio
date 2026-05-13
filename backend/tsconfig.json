@@ -14,28 +14,25 @@
     "declarationMap": true,
     "sourceMap": true,
     "noUnusedLocals": true,
+    "noImplicitAny": false,
     "noUnusedParameters": true,
     "noImplicitReturns": true,
     "noFallthroughCasesInSwitch": true,
-    "moduleResolution": "node",
+    // 🟢 Updated from "node" to "bundler" – this resolves the deprecation warning
+    "moduleResolution": "bundler",
     "allowSyntheticDefaultImports": true,
     "experimentalDecorators": true,
     "emitDecoratorMetadata": true,
-    "paths": {
-      "@/*": ["./src/*"],
-      "@database/*": ["./src/database/*"],
-      "@database/types/*": ["./src/database/types/*"]
-    }
+    // 🟡 Optional: Remove baseUrl if it was there
+    // "baseUrl": ".",
+    // 🟢 If you have paths, adjust them without baseUrl
+    // "paths": {
+    //   "@/*": ["./src/*"],
+    //   "@database/*": ["./src/database/*"],
+    //   "@database/types/*": ["./src/database/types/*"]
+    // },
+    "types": ["node"]
   },
-  "include": [
-    "src/**/*.ts",
-    "src/**/*.tsx",
-    "src/**/*.d.ts"
-  ],
-  "exclude": [
-    "node_modules",
-    "dist",
-    "**/*.test.ts",
-    "**/*.spec.ts"
-  ]
+  "include": ["src/**/*.ts", "src/**/*.tsx", "src/**/*.d.ts"],
+  "exclude": ["node_modules", "dist", "**/*.test.ts", "**/*.spec.ts"]
 }

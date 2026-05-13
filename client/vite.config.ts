@@ -1,43 +1,44 @@
 // client/vite.config.ts
 import { defineConfig } from 'vite'
 import react from '@vitejs/plugin-react'
+import { nodePolyfills } from 'vite-plugin-node-polyfills'
 import { resolve } from 'path'
 
-// Use dynamic import.meta.url to get __dirname equivalent in ESM
-const __dirname = new URL('.', import.meta.url).pathname
-
-// Detect if we're building for Electron production
+// Detect Electron environment
 const isElectron = process.env.ELECTRON === 'true' || process.env.NODE_ENV === 'production'
 
 export default defineConfig({
-  plugins: [react()],
-  
-  // Use relative base path for Electron (file:// protocol compatibility)
+  plugins: [
+    react(),
+    nodePolyfills({
+      include: [
+        'util', 'buffer', 'crypto', 'stream', 'events',
+        'process', 'path', 'url', 'querystring', 'http', 'https',
+      ],
+    })
+  ],
+
   base: './',
-  
+
   server: {
     port: 3001,
     strictPort: true,
-    host: true, // Expose to network for Electron dev
+    host: true,
   },
-  
+
   build: {
     outDir: 'dist',
     sourcemap: true,
     target: 'es2020',
     rollupOptions: {
       external: [
-        // Node.js built-in modules that shouldn't be bundled
-        'fs', 'path', 'url', 'child_process', 'net', 'os', 'crypto',
-        'stream', 'util', 'events', 'buffer', 'querystring', 'http',
-        'https', 'zlib', 'tls', 'dns', 'module', 'assert', 'constants',
-        // Database drivers (if they're used directly in renderer, better to keep external)
+        'fs', 'child_process', 'net', 'os',
         'pg', 'mysql2', 'node-sybase', 'better-sqlite3', 'oracledb',
         'sqlite3', 'tedious',
       ],
     },
   },
-  
+
   optimizeDeps: {
     include: [
       'react',
@@ -49,14 +50,14 @@ export default defineConfig({
       '@dnd-kit/core',
       '@dnd-kit/sortable',
       '@dnd-kit/utilities',
+      'xlsx',
     ],
     exclude: [
-      // Exclude Node.js modules from optimization (they won't be used in browser)
+      'fs', 'child_process', 'net', 'os',
       'pg', 'mysql2', 'better-sqlite3', 'oracledb', 'node-sybase',
-      'fs', 'path', 'child_process', 'net', 'os', 'crypto',
-    ]
+    ],
   },
-  
+
   resolve: {
     alias: {
       '@': resolve(__dirname, 'src'),
@@ -64,17 +65,26 @@ export default defineConfig({
       '@store': resolve(__dirname, 'src/store'),
       '@hooks': resolve(__dirname, 'src/hooks'),
       '@api': resolve(__dirname, 'src/api'),
-      '@types': resolve(__dirname, 'src/types')
-    }
+      '@types': resolve(__dirname, 'src/types'),
+    },
   },
-  
-  // Define environment variables for the client
+
   define: {
-    // Provide a global flag so the app knows it's running in Electron
     'import.meta.env.VITE_IS_ELECTRON': JSON.stringify(isElectron),
-    // You can also set the API base URL conditionally
     'import.meta.env.VITE_API_BASE_URL': JSON.stringify(
       isElectron ? 'http://localhost:3000' : 'http://localhost:3000'
     ),
+    // Mock process.env
+    'process.env': JSON.stringify({
+      NODE_ENV: process.env.NODE_ENV || 'development',
+      REACT_APP_BACKEND_URL: process.env.REACT_APP_BACKEND_URL || 'http://localhost:3000',
+      REACT_APP_DB_USER: process.env.REACT_APP_DB_USER || 'postgres',
+      USER: process.env.USER || 'postgres',
+      USERNAME: process.env.USERNAME || 'postgres',
+    }),
+    'process.platform': JSON.stringify('browser'),
+    // ✅ ADD THESE TWO LINES to prevent "process.version is undefined"
+    'process.version': JSON.stringify('v18.0.0'),
+    'process.versions': JSON.stringify({ node: '18.0.0' }),
   },
 })

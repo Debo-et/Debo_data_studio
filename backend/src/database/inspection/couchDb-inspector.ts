@@ -24,6 +24,12 @@
  *
  * This module mirrors the PostgreSQL inspector design and adapts it for CouchDB,
  * treating each CouchDB database as a "table" (collection) and documents as rows.
+ *
+ * Updated for nano v10+ compatibility:
+ * - Uses server.request({ path: '/' }) instead of server.info() for version checks.
+ * - Contains type assertions to work around possible conflicts with @types/nano.
+ *   If you have @types/nano installed, please remove it (`npm uninstall @types/nano`) as nano v10
+ *   ships its own TypeScript definitions.
  */
 
 import nano, { DocumentScope, MangoQuery, MangoSelector } from 'nano';
@@ -228,8 +234,9 @@ class CouchDbConnection {
           requestDefaults: this.config.requestDefaults || {},
         });
 
-        // Verify connectivity by requesting server info
-        await this.server.info();
+        // Verify connectivity by requesting server info (nano v10+)
+        // Cast to any avoids conflicts with outdated @types/nano
+        await (this.server.request({ path: '/' }) as any);
 
         this.isConnected = true;
         Logger.info('successfully connected to CouchDB server (attempt %d)', attempt);
@@ -279,7 +286,7 @@ class CouchDbConnection {
   }
 
   /**
-   * Check connection health using the server info endpoint
+   * Check connection health using server info endpoint
    */
   async checkHealth(): Promise<boolean> {
     if (!this.isConnected || !this.server) {
@@ -287,7 +294,8 @@ class CouchDbConnection {
     }
 
     try {
-      await this.server.info();
+      // Cast to any avoids 'void' type mismatch from outdated types
+      await (this.server.request({ path: '/' }) as any);
       return true;
     } catch (error) {
       this.isConnected = false;
@@ -379,7 +387,8 @@ class CouchDbConnection {
     try {
       Logger.debug('executing CouchDB query: %j', mangoQuery);
       const startTime = Date.now();
-      const result = await db.find(mangoQuery);
+      // Cast result to any to avoid 'Request' type issues from conflicting definitions
+      const result: any = await db.find(mangoQuery);
       const duration = Date.now() - startTime;
 
       Logger.debug('query completed in %d ms, %d docs returned', duration, result.docs.length);
@@ -524,7 +533,8 @@ class CouchDbSchemaInspector {
       await this.connection.connect();
       const server = this.connection.getServer();
       if (server) {
-        const info = await server.info();
+        // Cast to any to avoid 'void' or missing 'version' from outdated types
+        const info: any = await server.request({ path: '/' });
         Logger.info('connection test successful - version: %s', info.version);
         return { success: true, version: info.version };
       }
@@ -647,7 +657,8 @@ class CouchDbSchemaInspector {
         // Retrieve database info (document count, data size, etc.)
         try {
           const db = server.db.use(dbName);
-          const info = await db.info();
+          // Cast to any to avoid 'update_seq' etc. missing from outdated types
+          const info: any = await db.info();
           dbInfo.documentCount = info.doc_count;
           dbInfo.docDelCount = info.doc_del_count;
           dbInfo.updateSeq = info.update_seq;
@@ -660,7 +671,8 @@ class CouchDbSchemaInspector {
         // Retrieve indexes (design documents and Mango indexes)
         try {
           const db = server.db.use(dbName);
-          const indexes = await db.index();
+          // Cast to any to avoid 'index' missing from DocumentScope in outdated types
+          const indexes: any = await (db as any).index();
           if (indexes && indexes.indexes) {
             dbInfo.indexes = indexes.indexes.map((idx: any) => ({
               name: idx.name,
@@ -698,7 +710,8 @@ class CouchDbSchemaInspector {
       // Use _all_docs with include_docs to get a sample (up to 1000 docs)
       const sampleSize = 1000;
       const result = await db.list({ include_docs: true, limit: sampleSize });
-      const docs = result.rows.map(row => row.doc);
+      // Filter out rows where doc is undefined
+      const docs = result.rows.map(row => row.doc).filter((doc): doc is any => doc != null);
 
       if (!docs || docs.length === 0) {
         database.fields = [];
@@ -813,7 +826,8 @@ class CouchDbSchemaInspector {
     const server = this.connection.getServer();
     if (!server) throw new CouchDbConnectionError('Not connected');
     try {
-      const info = await server.info();
+      // Cast to any to avoid 'void' / missing properties from outdated types
+      const info: any = await server.request({ path: '/' });
       return {
         version: info.version,
         vendor: info.vendor,

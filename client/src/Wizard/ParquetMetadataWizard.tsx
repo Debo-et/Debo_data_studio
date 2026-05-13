@@ -1,5 +1,5 @@
 // ParquetMetadataWizard.tsx (real implementation using parquet-wasm)
-import React, { useState, useRef } from 'react';
+import React, { useState, useRef, useEffect } from 'react';
 import { motion } from 'framer-motion';
 import { Button } from '../components/ui/Button';
 import {
@@ -17,11 +17,21 @@ import {
 import {
   JsonAvroParquetMetadataFormData,
   JsonAvroParquetMetadataWizardProps,
-  ParquetColumnDefinition,
 } from '../types/types';
 
-// Real Parquet library (WebAssembly)
-import { readParquet } from 'parquet-wasm';
+// Parquet WebAssembly library
+// The default export is the WASM init function
+import initWasm, {  } from 'parquet-wasm';
+
+// ---------- WASM initialisation flag (once per app) ----------
+let wasmInitialized = false;
+async function ensureWasmInitialized(): Promise<void> {
+  if (!wasmInitialized) {
+    // initWasm loads the .wasm file and sets up internal bindings
+    await initWasm();
+    wasmInitialized = true;
+  }
+}
 
 // ----------------------------------------------------------------------
 // Parquet‑specific configuration options
@@ -39,100 +49,53 @@ const PARQUET_COMPRESSION_CODECS = [
 const DEFAULT_ROW_GROUP_SIZE_MB = 128;
 const DEFAULT_DATA_PAGE_SIZE_KB = 1024;
 
-// ----------------------------------------------------------------------
-// Real Parquet file reader using parquet-wasm
-// ----------------------------------------------------------------------
-interface ParquetMetadata {
-  schema: ParquetColumnDefinition[];
-  numRows: number;
-  rowGroups: number;
-  compressionCodec: string;
-  rowGroupSizeBytes: number;
-  dataPageSizeBytes: number;
-}
 
-async function readParquetFile(file: File): Promise<{
-  metadata: ParquetMetadata;
-  sampleRows: any[];
-}> {
-  // 1) Read file into an ArrayBuffer
-  const buffer = await file.arrayBuffer();
+async function fetchParquetMetadata(file: File, sampleCount = 10) {
+  const formData = new FormData();
+  formData.append('file', file);
+  formData.append('sampleCount', String(sampleCount));
 
-  // 2) Parse the Parquet file – expects a Uint8Array directly
-  const reader: any = await readParquet(new Uint8Array(buffer));
+  const response = await fetch('http://localhost:3000/api/parquet/metadata', {
+    method: 'POST',
+    body: formData,
+  });
 
-  // 3) Extract schema: rows of column metadata
-  const columnMetas: any[] = reader.metadata.columns();
+  if (!response.ok) {
+    const errorText = await response.text();
+    throw new Error(`Metadata extraction failed: ${response.status} - ${errorText}`);
+  }
 
-  const schema: ParquetColumnDefinition[] = columnMetas.map((col: any) => ({
-    name: col.name(),
-    type: formatParquetType(col.physical_type(), col.logical_type()),
-    path: col.path_in_schema() || col.name(),
-    level: col.path_in_schema() ? col.path_in_schema().split('.').length - 1 : 0,
-    sampleValue: undefined,
-    description: col.description() || '',
-    nullable: col.nullable(),
-    compression: col.compression() || '',
-  }));
-
-  // 4) Global metadata
-  const numRows = Number(reader.metadata.num_rows());
-  const rowGroups = reader.metadata.row_groups().length;
-  const globalCompression =
-    columnMetas.map((c: any) => c.compression()).find((c: any) => c) || 'none';
-
-  const fileSizeBytes = buffer.byteLength;
-  const avgRowGroupSizeBytes =
-    rowGroups > 0 ? fileSizeBytes / rowGroups : 0;
-  const dataPageSizeKB = DEFAULT_DATA_PAGE_SIZE_KB * 1024;
-
-  // 5) Sample rows (first 5 rows)
-  const cursor = reader.cursor();
-  const batchSize = Math.min(5, numRows);
-  const sampleRows: any[] = [];
-  for (let i = 0; i < batchSize; i++) {
-    if (!cursor.next()) break;
-    const row: Record<string, any> = {};
-    columnMetas.forEach((col: any, idx: number) => {
-      const val = cursor.get_by_index(idx);
-      row[col.name()] = val;
-    });
-    sampleRows.push(row);
+  const result = await response.json();
+  if (result.error) {
+    throw new Error(result.error);
   }
 
   return {
     metadata: {
-      schema,
-      numRows,
-      rowGroups,
-      compressionCodec: globalCompression,
-      rowGroupSizeBytes: avgRowGroupSizeBytes,
-      dataPageSizeBytes: dataPageSizeKB,
+      schema: result.fields.map((field: any) => ({
+        name: field.name,
+        type: field.type,
+        nullable: field.nullable,
+        compression: field.metadata?.compression || '',
+        path: field.name,
+        level: 0,
+        sampleValue: undefined,
+        description: '',
+      })),
+      numRows: result.recordCount,
+      rowGroups: result.numRowGroups || 1,
+      compressionCodec: 'snappy',   // You can parse from file metadata if needed
+      rowGroupSizeBytes: 0,
+      dataPageSizeBytes: 0,
     },
-    sampleRows,
+    sampleRows: result.sampleRows,
   };
 }
 
 // Helper to map Parquet physical/logical types to string
-function formatParquetType(physical: any, logical: any): string {
-  if (logical) {
-    return logical; // e.g., "DATE", "TIMESTAMP", "DECIMAL"
-  }
-  // Map physical types to readable names
-  const typeMap: Record<string, string> = {
-    BOOLEAN: 'boolean',
-    INT32: 'int32',
-    INT64: 'int64',
-    FLOAT: 'float',
-    DOUBLE: 'double',
-    BYTE_ARRAY: 'byte_array',
-    FIXED_LEN_BYTE_ARRAY: 'fixed_len_byte_array',
-  };
-  return typeMap[physical] || physical;
-}
 
 // ----------------------------------------------------------------------
-// Component (everything else unchanged)
+// Component
 // ----------------------------------------------------------------------
 const ParquetMetadataWizard: React.FC<JsonAvroParquetMetadataWizardProps> = ({
   isOpen,
@@ -176,6 +139,15 @@ const ParquetMetadataWizard: React.FC<JsonAvroParquetMetadataWizardProps> = ({
   const fileInputRef = useRef<HTMLInputElement>(null);
   const totalSteps = 4;
 
+  // Optionally pre-initialise WASM when the wizard opens (saves a tiny delay later)
+  useEffect(() => {
+    if (isOpen) {
+      ensureWasmInitialized().catch((err) =>
+        console.error('Parquet WASM init failed:', err)
+      );
+    }
+  }, [isOpen]);
+
   // ------------------------------------------------------------------
   // File handling & parsing
   // ------------------------------------------------------------------
@@ -195,7 +167,7 @@ const ParquetMetadataWizard: React.FC<JsonAvroParquetMetadataWizardProps> = ({
     setIsLoading(true);
 
     try {
-      const { metadata, sampleRows } = await readParquetFile(file);
+      const { metadata, sampleRows } = await fetchParquetMetadata(file, 5);
 
       setFormData((prev) => ({
         ...prev,
@@ -267,9 +239,9 @@ const ParquetMetadataWizard: React.FC<JsonAvroParquetMetadataWizardProps> = ({
   };
 
   // ------------------------------------------------------------------
-  // Render helpers (unchanged)
+  // Render helpers
   // ------------------------------------------------------------------
-  const renderSchemaTable = () => { /* ... same as original ... */
+  const renderSchemaTable = () => {
     if (formData.schema.length === 0) {
       return (
         <div className="border border-gray-200 dark:border-gray-600 rounded-md p-4">
@@ -332,7 +304,7 @@ const ParquetMetadataWizard: React.FC<JsonAvroParquetMetadataWizardProps> = ({
     );
   };
 
-  const renderSampleData = () => { /* ... same ... */
+  const renderSampleData = () => {
     if (!formData.sampleData || formData.sampleData.length === 0) {
       return (
         <div className="border border-gray-200 dark:border-gray-600 rounded-md p-4">
@@ -368,9 +340,9 @@ const ParquetMetadataWizard: React.FC<JsonAvroParquetMetadataWizardProps> = ({
   };
 
   // ------------------------------------------------------------------
-  // Step content (unchanged)
+  // Step content
   // ------------------------------------------------------------------
-  const renderStepContent = () => { /* ... same ... */
+  const renderStepContent = () => {
     switch (currentStep) {
       case 1:
         return (
@@ -381,6 +353,34 @@ const ParquetMetadataWizard: React.FC<JsonAvroParquetMetadataWizardProps> = ({
             <p className="text-sm text-gray-600 dark:text-gray-400">
               Basic information and Parquet‑specific storage settings.
             </p>
+
+            {/* ---------- Name Input ---------- */}
+            <div className="mb-4">
+              <label
+                htmlFor="metadata-name"
+                className="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-1"
+              >
+                Metadata Name <span className="text-red-500">*</span>
+              </label>
+              <input
+                id="metadata-name"
+                type="text"
+                value={formData.name}
+                onChange={(e) => updateFormData({ name: e.target.value })}
+                placeholder="e.g. Sales Transactions Archive"
+                className="w-full px-3 py-2 border border-gray-300 dark:border-gray-600 rounded-md shadow-sm
+                           bg-white dark:bg-gray-700 text-gray-900 dark:text-white
+                           focus:ring-2 focus:ring-blue-500 focus:border-blue-500
+                           placeholder-gray-400 dark:placeholder-gray-500"
+              />
+              {!formData.name.trim() && currentStep === 1 && (
+                <p className="mt-1 text-xs text-red-500 dark:text-red-400">
+                  A name is required to proceed.
+                </p>
+              )}
+            </div>
+            {/* ------------------------------- */}
+
             <div className="border-t border-gray-200 dark:border-gray-600 pt-4 mt-2">
               <h4 className="text-sm font-semibold mb-4 flex items-center gap-2">
                 <FileArchive className="h-4 w-4" />
@@ -393,45 +393,95 @@ const ParquetMetadataWizard: React.FC<JsonAvroParquetMetadataWizardProps> = ({
                   </label>
                   <select
                     value={formData.compressionCodec}
-                    onChange={(e) => updateFormData({ compressionCodec: e.target.value })}
+                    onChange={(e) =>
+                      updateFormData({ compressionCodec: e.target.value })
+                    }
                     className="w-full px-3 py-2 border border-gray-300 dark:border-gray-600 rounded-md dark:bg-gray-700 dark:text-white"
                   >
                     {PARQUET_COMPRESSION_CODECS.map((c) => (
-                      <option key={c.value} value={c.value}>{c.label}</option>
+                      <option key={c.value} value={c.value}>
+                        {c.label}
+                      </option>
                     ))}
                   </select>
                 </div>
-                {/* ... all other inputs from step 1 ... */}
-                <div> {/* Row Group Size (MB) */}
-                  <label className="block text-sm font-medium mb-1">Row Group Size (MB)</label>
-                  <input type="number" min={8} max={512} value={formData.rowGroupSizeMB}
-                    onChange={(e) => updateFormData({ rowGroupSizeMB: Number(e.target.value) })}
-                    className="w-full px-3 py-2 border border-gray-300 dark:border-gray-600 rounded-md dark:bg-gray-700 dark:text-white" />
+                <div>
+                  <label className="block text-sm font-medium mb-1">
+                    Row Group Size (MB)
+                  </label>
+                  <input
+                    type="number"
+                    min={8}
+                    max={512}
+                    value={formData.rowGroupSizeMB}
+                    onChange={(e) =>
+                      updateFormData({ rowGroupSizeMB: Number(e.target.value) })
+                    }
+                    className="w-full px-3 py-2 border border-gray-300 dark:border-gray-600 rounded-md dark:bg-gray-700 dark:text-white"
+                  />
                 </div>
-                <div> {/* Data Page Size (KB) */}
-                  <label className="block text-sm font-medium mb-1">Data Page Size (KB)</label>
-                  <input type="number" min={64} max={2048} value={formData.dataPageSizeKB}
-                    onChange={(e) => updateFormData({ dataPageSizeKB: Number(e.target.value) })}
-                    className="w-full px-3 py-2 border border-gray-300 dark:border-gray-600 rounded-md dark:bg-gray-700 dark:text-white" />
+                <div>
+                  <label className="block text-sm font-medium mb-1">
+                    Data Page Size (KB)
+                  </label>
+                  <input
+                    type="number"
+                    min={64}
+                    max={2048}
+                    value={formData.dataPageSizeKB}
+                    onChange={(e) =>
+                      updateFormData({
+                        dataPageSizeKB: Number(e.target.value),
+                      })
+                    }
+                    className="w-full px-3 py-2 border border-gray-300 dark:border-gray-600 rounded-md dark:bg-gray-700 dark:text-white"
+                  />
                 </div>
                 <div className="flex flex-col space-y-2">
                   <label className="flex items-center space-x-2">
-                    <input type="checkbox" checked={formData.dictionaryEncoding}
-                      onChange={(e) => updateFormData({ dictionaryEncoding: e.target.checked })} className="h-4 w-4" />
+                    <input
+                      type="checkbox"
+                      checked={formData.dictionaryEncoding}
+                      onChange={(e) =>
+                        updateFormData({
+                          dictionaryEncoding: e.target.checked,
+                        })
+                      }
+                      className="h-4 w-4"
+                    />
                     <span className="text-sm">Enable Dictionary Encoding</span>
                   </label>
                   <label className="flex items-center space-x-2">
-                    <input type="checkbox" checked={formData.statisticsEnabled}
-                      onChange={(e) => updateFormData({ statisticsEnabled: e.target.checked })} className="h-4 w-4" />
+                    <input
+                      type="checkbox"
+                      checked={formData.statisticsEnabled}
+                      onChange={(e) =>
+                        updateFormData({
+                          statisticsEnabled: e.target.checked,
+                        })
+                      }
+                      className="h-4 w-4"
+                    />
                     <span className="text-sm">Collect Column Statistics</span>
                   </label>
                 </div>
               </div>
               <div className="mt-3">
-                <label className="block text-sm font-medium mb-1">Bloom Filter Columns (comma‑separated)</label>
-                <input type="text" value={formData.bloomFilterColumns.join(', ')}
-                  onChange={(e) => { const cols = e.target.value.split(',').map(s => s.trim()).filter(Boolean); updateFormData({ bloomFilterColumns: cols }); }}
-                  className="w-full px-3 py-2 border border-gray-300 dark:border-gray-600 rounded-md dark:bg-gray-700 dark:text-white" />
+                <label className="block text-sm font-medium mb-1">
+                  Bloom Filter Columns (comma‑separated)
+                </label>
+                <input
+                  type="text"
+                  value={formData.bloomFilterColumns.join(', ')}
+                  onChange={(e) => {
+                    const cols = e.target.value
+                      .split(',')
+                      .map((s) => s.trim())
+                      .filter(Boolean);
+                    updateFormData({ bloomFilterColumns: cols });
+                  }}
+                  className="w-full px-3 py-2 border border-gray-300 dark:border-gray-600 rounded-md dark:bg-gray-700 dark:text-white"
+                />
               </div>
             </div>
           </div>
@@ -440,22 +490,67 @@ const ParquetMetadataWizard: React.FC<JsonAvroParquetMetadataWizardProps> = ({
       case 2:
         return (
           <div className="space-y-4">
-            <h3 className="text-lg font-medium text-gray-900 dark:text-white">File Selection</h3>
-            <p className="text-sm text-gray-600 dark:text-gray-400">Upload a Parquet file to extract its schema and metadata.</p>
-            <input type="file" ref={fileInputRef} onChange={handleFileSelect} accept=".parquet" className="hidden" />
+            <h3 className="text-lg font-medium text-gray-900 dark:text-white">
+              File Selection
+            </h3>
+            <p className="text-sm text-gray-600 dark:text-gray-400">
+              Upload a Parquet file to extract its schema and metadata.
+            </p>
+            <input
+              type="file"
+              ref={fileInputRef}
+              onChange={handleFileSelect}
+              accept=".parquet"
+              className="hidden"
+            />
             <div className="flex space-x-2">
-              <input type="text" value={formData.filePath} readOnly className="flex-1 px-3 py-2 border border-gray-300 dark:border-gray-600 rounded-md bg-gray-50 dark:bg-gray-600 dark:text-white" placeholder="No file selected" />
-              <Button type="button" variant="outline" onClick={() => fileInputRef.current?.click()} disabled={isLoading}>
-                {isLoading ? <div className="animate-spin rounded-full h-4 w-4 border-b-2 border-current mr-2" /> : <Upload className="h-4 w-4 mr-2" />}
+              <input
+                type="text"
+                value={formData.filePath}
+                readOnly
+                className="flex-1 px-3 py-2 border border-gray-300 dark:border-gray-600 rounded-md bg-gray-50 dark:bg-gray-600 dark:text-white"
+                placeholder="No file selected"
+              />
+              <Button
+                type="button"
+                variant="outline"
+                onClick={() => fileInputRef.current?.click()}
+                disabled={isLoading}
+              >
+                {isLoading ? (
+                  <div className="animate-spin rounded-full h-4 w-4 border-b-2 border-current mr-2" />
+                ) : (
+                  <Upload className="h-4 w-4 mr-2" />
+                )}
                 {isLoading ? 'Reading...' : 'Browse'}
               </Button>
             </div>
-            {formData.file && <p className="text-sm text-green-600 dark:text-green-400">✓ {formData.file.name} ({(formData.file.size / 1024).toFixed(0)} KB)</p>}
-            {error && <div className="flex items-center space-x-2 p-3 bg-red-50 dark:bg-red-900/20 border border-red-200 dark:border-red-800 rounded-md"><AlertCircle className="h-4 w-4 text-red-600 dark:text-red-400" /><span className="text-sm text-red-600 dark:text-red-400">{error}</span></div>}
+            {formData.file && (
+              <p className="text-sm text-green-600 dark:text-green-400">
+                ✓ {formData.file.name} (
+                {(formData.file.size / 1024).toFixed(0)} KB)
+              </p>
+            )}
+            {error && (
+              <div className="flex items-center space-x-2 p-3 bg-red-50 dark:bg-red-900/20 border border-red-200 dark:border-red-800 rounded-md">
+                <AlertCircle className="h-4 w-4 text-red-600 dark:text-red-400" />
+                <span className="text-sm text-red-600 dark:text-red-400">
+                  {error}
+                </span>
+              </div>
+            )}
             {formData.schema.length > 0 && (
               <div className="bg-green-50 dark:bg-green-900/20 border border-green-200 dark:border-green-800 rounded-md p-3">
-                <div className="flex items-center space-x-2 text-green-800 dark:text-green-300"><Layers className="h-4 w-4" /><span className="font-medium">Parquet file read successfully</span></div>
-                <p className="text-sm text-green-700 dark:text-green-400 mt-1">Columns: <strong>{formData.totalFields}</strong> · Rows: <strong>{formData.recordCount.toLocaleString()}</strong></p>
+                <div className="flex items-center space-x-2 text-green-800 dark:text-green-300">
+                  <Layers className="h-4 w-4" />
+                  <span className="font-medium">
+                    Parquet file read successfully
+                  </span>
+                </div>
+                <p className="text-sm text-green-700 dark:text-green-400 mt-1">
+                  Columns: <strong>{formData.totalFields}</strong> · Rows:{' '}
+                  <strong>{formData.recordCount.toLocaleString()}</strong>
+                </p>
               </div>
             )}
           </div>
@@ -464,10 +559,17 @@ const ParquetMetadataWizard: React.FC<JsonAvroParquetMetadataWizardProps> = ({
       case 3:
         return (
           <div className="space-y-6">
-            <h3 className="text-lg font-medium text-gray-900 dark:text-white">Schema Analysis</h3>
-            <p className="text-sm text-gray-600 dark:text-gray-400">Inspect the column structure and sample rows.</p>
+            <h3 className="text-lg font-medium text-gray-900 dark:text-white">
+              Schema Analysis
+            </h3>
+            <p className="text-sm text-gray-600 dark:text-gray-400">
+              Inspect the column structure and sample rows.
+            </p>
             {!formData.file ? (
-              <div className="text-center py-8 text-gray-500 dark:text-gray-400"><Database className="h-12 w-12 mx-auto mb-4 opacity-50" /><p>No file loaded. Go back to Step 2 and select a file.</p></div>
+              <div className="text-center py-8 text-gray-500 dark:text-gray-400">
+                <Database className="h-12 w-12 mx-auto mb-4 opacity-50" />
+                <p>No file loaded. Go back to Step 2 and select a file.</p>
+              </div>
             ) : (
               <>
                 {renderSchemaTable()}
@@ -480,24 +582,66 @@ const ParquetMetadataWizard: React.FC<JsonAvroParquetMetadataWizardProps> = ({
       case 4:
         return (
           <div className="space-y-6">
-            <h3 className="text-lg font-medium text-gray-900 dark:text-white">Summary & Save</h3>
-            <p className="text-sm text-gray-600 dark:text-gray-400">Review the Parquet metadata before saving.</p>
-            <div className="bg-green-50 dark:bg-green-900/20 border border-green-200 dark:border-green-800 rounded-md p-4"><div className="flex items-center space-x-2 text-green-800 dark:text-green-300"><CheckCircle className="h-5 w-5" /><span className="font-medium">Ready to save</span></div></div>
+            <h3 className="text-lg font-medium text-gray-900 dark:text-white">
+              Summary & Save
+            </h3>
+            <p className="text-sm text-gray-600 dark:text-gray-400">
+              Review the Parquet metadata before saving.
+            </p>
+            <div className="bg-green-50 dark:bg-green-900/20 border border-green-200 dark:border-green-800 rounded-md p-4">
+              <div className="flex items-center space-x-2 text-green-800 dark:text-green-300">
+                <CheckCircle className="h-5 w-5" />
+                <span className="font-medium">Ready to save</span>
+              </div>
+            </div>
             <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
               <div className="space-y-2 text-sm">
                 <h4 className="font-medium">General</h4>
-                <div className="flex justify-between"><span>Name</span><span className="font-medium">{formData.name || '—'}</span></div>
-                <div className="flex justify-between"><span>File</span><span>{formData.filePath || '—'}</span></div>
-                <div className="flex justify-between"><span>Rows</span><span>{formData.recordCount.toLocaleString()}</span></div>
-                <div className="flex justify-between"><span>Columns</span><span>{formData.totalFields}</span></div>
+                <div className="flex justify-between">
+                  <span>Name</span>
+                  <span className="font-medium">
+                    {formData.name || '—'}
+                  </span>
+                </div>
+                <div className="flex justify-between">
+                  <span>File</span>
+                  <span>{formData.filePath || '—'}</span>
+                </div>
+                <div className="flex justify-between">
+                  <span>Rows</span>
+                  <span>{formData.recordCount.toLocaleString()}</span>
+                </div>
+                <div className="flex justify-between">
+                  <span>Columns</span>
+                  <span>{formData.totalFields}</span>
+                </div>
               </div>
               <div className="space-y-2 text-sm">
                 <h4 className="font-medium">Parquet Configuration</h4>
-                <div className="flex justify-between"><span>Compression</span><span className="font-medium">{formData.compressionCodec}</span></div>
-                <div className="flex justify-between"><span>Row Group Size</span><span>{formData.rowGroupSizeMB} MB</span></div>
-                <div className="flex justify-between"><span>Page Size</span><span>{formData.dataPageSizeKB} KB</span></div>
-                <div className="flex justify-between"><span>Dictionary Encoding</span><span>{formData.dictionaryEncoding ? 'Yes' : 'No'}</span></div>
-                <div className="flex justify-between"><span>Statistics</span><span>{formData.statisticsEnabled ? 'Enabled' : 'Disabled'}</span></div>
+                <div className="flex justify-between">
+                  <span>Compression</span>
+                  <span className="font-medium">
+                    {formData.compressionCodec}
+                  </span>
+                </div>
+                <div className="flex justify-between">
+                  <span>Row Group Size</span>
+                  <span>{formData.rowGroupSizeMB} MB</span>
+                </div>
+                <div className="flex justify-between">
+                  <span>Page Size</span>
+                  <span>{formData.dataPageSizeKB} KB</span>
+                </div>
+                <div className="flex justify-between">
+                  <span>Dictionary Encoding</span>
+                  <span>{formData.dictionaryEncoding ? 'Yes' : 'No'}</span>
+                </div>
+                <div className="flex justify-between">
+                  <span>Statistics</span>
+                  <span>
+                    {formData.statisticsEnabled ? 'Enabled' : 'Disabled'}
+                  </span>
+                </div>
               </div>
             </div>
             {formData.schema.length > 0 && (
@@ -506,12 +650,26 @@ const ParquetMetadataWizard: React.FC<JsonAvroParquetMetadataWizardProps> = ({
                 <div className="max-h-40 overflow-y-auto border border-gray-200 dark:border-gray-600 rounded-md p-2">
                   <div className="space-y-1 text-sm">
                     {formData.schema.slice(0, 6).map((col: any, i) => (
-                      <div key={i} className="flex justify-between py-1 border-b border-gray-100 dark:border-gray-700 last:border-0">
-                        <span><span className="font-medium">{col.name}</span><span className="text-xs ml-2 bg-blue-100 dark:bg-blue-900 rounded px-1">{col.type}</span></span>
-                        <span className="text-xs">{col.nullable ? 'NULL' : 'NOT NULL'}</span>
+                      <div
+                        key={i}
+                        className="flex justify-between py-1 border-b border-gray-100 dark:border-gray-700 last:border-0"
+                      >
+                        <span>
+                          <span className="font-medium">{col.name}</span>
+                          <span className="text-xs ml-2 bg-blue-100 dark:bg-blue-900 rounded px-1">
+                            {col.type}
+                          </span>
+                        </span>
+                        <span className="text-xs">
+                          {col.nullable ? 'NULL' : 'NOT NULL'}
+                        </span>
                       </div>
                     ))}
-                    {formData.schema.length > 6 && <p className="text-center text-xs text-gray-500">… and {formData.schema.length - 6} more columns</p>}
+                    {formData.schema.length > 6 && (
+                      <p className="text-center text-xs text-gray-500">
+                        … and {formData.schema.length - 6} more columns
+                      </p>
+                    )}
                   </div>
                 </div>
               </div>
@@ -543,7 +701,12 @@ const ParquetMetadataWizard: React.FC<JsonAvroParquetMetadataWizardProps> = ({
               Step {currentStep} of {totalSteps}
             </p>
           </div>
-          <Button variant="ghost" size="sm" onClick={handleClose} className="h-8 w-8 p-0">
+          <Button
+            variant="ghost"
+            size="sm"
+            onClick={handleClose}
+            className="h-8 w-8 p-0"
+          >
             <X className="h-4 w-4" />
           </Button>
         </div>
@@ -559,11 +722,16 @@ const ParquetMetadataWizard: React.FC<JsonAvroParquetMetadataWizardProps> = ({
         </div>
 
         {/* Step content */}
-        <div className="p-6 max-h-[60vh] overflow-y-auto">{renderStepContent()}</div>
+        <div className="p-6 max-h-[60vh] overflow-y-auto">
+          {renderStepContent()}
+        </div>
 
         {/* Footer */}
         <div className="flex items-center justify-between p-6 border-t border-gray-200 dark:border-gray-700">
-          <Button variant="outline" onClick={currentStep === 1 ? handleClose : handleBack}>
+          <Button
+            variant="outline"
+            onClick={currentStep === 1 ? handleClose : handleBack}
+          >
             <ArrowLeft className="h-4 w-4 mr-2" />
             {currentStep === 1 ? 'Cancel' : 'Back'}
           </Button>

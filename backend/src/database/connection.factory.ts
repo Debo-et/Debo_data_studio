@@ -17,26 +17,24 @@ import { MaxDBAdapter } from './adapters/maxdb.adapter';
 import { TeradataAdapter } from './adapters/teradata.adapter';
 import { VerticaAdapter } from './adapters/vertica.adapter';
 
+
 // NoSQL & Distributed Data Stores
-import { HBaseAdapter } from './adapters/hBase.adapter';
 import { CassandraAdapter } from './adapters/cassandra.adapter';
-import { MongoAdapter } from './adapters/mongo.adapter';
+import { MongoDBAdapter } from './adapters/mongo.adapter';
 import { CouchbaseAdapter } from './adapters/couchbase.adapter';
-import { CouchDbAdapter } from './adapters/couchdb.adapter';
+import { CouchDBAdapter } from './adapters/couchdb.adapter';
 import { Neo4jAdapter } from './adapters/neo4j.adapter';
 import { MarkLogicAdapter } from './adapters/marklogic.adapter';
 import { ExistAdapter } from './adapters/exist.adapter';
 
-// Search Engines & Big Data Tools
-import { ElasticsearchAdapter } from './adapters/elasticsearch.adapter';
-import { HiveAdapter } from './adapters/hive.adapter';
+import { HiveAdapter } from './adapters/hive-adapter';
 import { ImpalaAdapter } from './adapters/impala.adapter';
 
 // Embedded & Lightweight Databases
-import { AccessAdapter } from './adapters/access.adapter';
+//import { AccessAdapter } from './adapters/access.adapter';
 import { SQLiteAdapter } from './adapters/sqlite.adapter';
 import { H2Adapter } from './adapters/h2.adapter';
-import { HsqlDBAdapter } from './adapters/hsqldb.adapter';
+import { HSQLDBAdapter } from './adapters/hsqldb.adapter';
 import { JavaDBAdapter } from './adapters/javadb.adapter';
 
 import { IBaseDatabaseInspector } from './inspection/base-inspector';
@@ -117,17 +115,17 @@ export class DatabaseConnectionFactory {
         return new VerticaAdapter();
 
       // NoSQL
-      case 'hbase':
-        return new HBaseAdapter();
+    //  case 'hbase':
+      //   return new ElasticsearchAdapter()
       case 'cassandra':
         return new CassandraAdapter();
       case 'mongo':
       case 'mongodb':
-        return new MongoAdapter();
+        return new MongoDBAdapter();  
       case 'couchbase':
         return new CouchbaseAdapter();
       case 'couchdb':
-        return new CouchDbAdapter();
+        return new CouchDBAdapter();
       case 'neo4j':
         return new Neo4jAdapter();
       case 'marklogic':
@@ -137,22 +135,22 @@ export class DatabaseConnectionFactory {
         return new ExistAdapter();
 
       // Search & Big Data
-      case 'elasticsearch':
-        return new ElasticsearchAdapter();
+     // case 'elasticsearch':
+       // return new ElasticsearchAdapter();
       case 'hive':
         return new HiveAdapter();
       case 'impala':
         return new ImpalaAdapter();
 
       // Embedded
-      case 'access':
-        return new AccessAdapter();
+  //    case 'access':
+    //    return new AccessAdapter();
       case 'sqlite':
         return new SQLiteAdapter();
       case 'h2':
         return new H2Adapter();
       case 'hsqldb':
-        return new HsqlDBAdapter();
+        return new HSQLDBAdapter();
       case 'javadb':
       case 'derby':
         return new JavaDBAdapter();

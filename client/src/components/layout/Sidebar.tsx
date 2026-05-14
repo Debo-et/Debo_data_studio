@@ -103,20 +103,11 @@ const getDefaultRepositoryStructure = (): RepositoryNode[] => {
       metadata: { type: 'folder', count: 0, system: true }
     },
     {
-      id: 'contexts',
-      name: 'Contexts',
-      type: 'folder',
-      children: [],
-      draggable: false,
-      metadata: { type: 'folder', count: 0, system: true }
-    },
-    {
       id: 'metadata',
       name: 'Metadata',
       type: 'folder',
       children: [
         { id: 'db-connections', name: 'Database Connections', type: 'folder', children: [], draggable: false, metadata: { type: 'folder', count: 0 } },
-        { id: 'sap-connection', name: 'SAP Connection', type: 'folder', children: [], draggable: false, metadata: { type: 'folder', count: 0 } },
         { id: 'file-delimited', name: 'Delimited Files', type: 'category', children: [], draggable: false, metadata: { type: 'category', count: 0 } },
         { id: 'file-positional', name: 'Positional Files', type: 'category', children: [], draggable: false, metadata: { type: 'category', count: 0 } },
         { id: 'file-xml', name: 'XML Files', type: 'category', children: [], draggable: false, metadata: { type: 'category', count: 0 } },
@@ -127,51 +118,8 @@ const getDefaultRepositoryStructure = (): RepositoryNode[] => {
         { id: 'file-json',    name: 'JSON',    type: 'category', children: [], draggable: false, metadata: { type: 'category', count: 0 } },
 { id: 'file-avro',    name: 'Avro',    type: 'category', children: [], draggable: false, metadata: { type: 'category', count: 0 } },
 { id: 'file-parquet', name: 'Parquet', type: 'category', children: [], draggable: false, metadata: { type: 'category', count: 0 } },
-        { id: 'web-service', name: 'Web Service', type: 'category', children: [], draggable: false, metadata: { type: 'category', count: 0 } },
-        { id: 'ldap', name: 'LDAP', type: 'folder', children: [], draggable: false, metadata: { type: 'folder', count: 0 } },
-        { id: 'ftp-sftp', name: 'FTP/SFTP', type: 'folder', children: [], draggable: false, metadata: { type: 'folder', count: 0 } },
-        { id: 'salesforce', name: 'Salesforce', type: 'folder', children: [], draggable: false, metadata: { type: 'folder', count: 0 } }
+        { id: 'ldap', name: 'LDAP', type: 'folder', children: [], draggable: false, metadata: { type: 'folder', count: 0 }  }
       ],
-      draggable: false,
-      metadata: { type: 'folder', count: 0, system: true }
-    },
-    {
-      id: 'code',
-      name: 'Code',
-      type: 'folder',
-      children: [],
-      draggable: false,
-      metadata: { type: 'folder', count: 0, system: true }
-    },
-    {
-      id: 'sql-templates',
-      name: 'SQL Templates',
-      type: 'folder',
-      children: [],
-      draggable: false,
-      metadata: { type: 'folder', count: 0, system: true }
-    },
-    {
-      id: 'business-models',
-      name: 'Business Models',
-      type: 'folder',
-      children: [],
-      draggable: false,
-      metadata: { type: 'folder', count: 0, system: true }
-    },
-    {
-      id: 'documentation',
-      name: 'Documentation',
-      type: 'folder',
-      children: [],
-      draggable: false,
-      metadata: { type: 'folder', count: 0, system: true }
-    },
-    {
-      id: 'recycle-bin',
-      name: 'Recycle Bin',
-      type: 'folder',
-      children: [],
       draggable: false,
       metadata: { type: 'folder', count: 0, system: true }
     }
